@@ -1,0 +1,315 @@
+import { Theme } from "theme.slint";
+
+export struct MouseBtn {
+    id: string,        // input id, e.g. "mouse:back"
+    label: string,     // "Back"
+    detail: string,    // "Mouse 4 · XButton1"
+    value: string,     // current action label, e.g. "F" or "Default"
+    mapped: bool,
+    supported: bool,
+}
+
+struct CalloutSpec {
+    idx: int,     // index into `buttons`
+    right: bool,  // callout sits on the right side of the mouse
+    cy: float,    // callout centre y (mouse units)
+    tx: float,    // target point on the mouse (mouse units)
+    ty: float,
+}
+
+component Callout inherits Rectangle {
+    in property <MouseBtn> btn;
+    in property <bool> selected;
+    in property <bool> right;
+    callback clicked;
+
+    width: 150px;
+    height: 38px;
+    border-radius: Theme.radius;
+    background: root.selected ? Theme.accent-soft : (ta.has-hover ? Theme.control-hover : Theme.panel-bg);
+    border-width: 1px;
+    border-color: root.selected ? Theme.accent : Theme.border;
+    opacity: root.btn.supported ? 1 : 0.6;
+    animate background, border-color { duration: 90ms; }
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: center;
+        spacing: 1px;
+        Text {
+            text: root.btn.label;
+            font-size: Theme.font-xs;
+            color: Theme.text-muted;
+            horizontal-alignment: root.right ? TextHorizontalAlignment.left : TextHorizontalAlignment.right;
+        }
+        Text {
+            text: root.btn.value;
+            font-size: Theme.font;
+            font-weight: 600;
+            color: root.btn.mapped ? Theme.accent : Theme.text;
+            overflow: elide;
+            horizontal-alignment: root.right ? TextHorizontalAlignment.left : TextHorizontalAlignment.right;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Generic top-down mouse with G HUB / Synapse style callouts.
+// Button order: 0 left, 1 right, 2 middle, 3 wheel up, 4 wheel down,
+//               5 back, 6 forward, 7 dpi
+export component MouseDiagram inherits Rectangle {
+    in property <[MouseBtn]> buttons;
+    in property <string> selected;
+    callback select(string);
+
+    property <length> s: 1.05px; // px per mouse unit (mouse is 200 x 340 units)
+    property <length> mw: 200 * root.s;
+    property <length> mh: 340 * root.s;
+    property <length> mx: (root.width - root.mw) / 2;
+    property <length> my: max(28px, (root.height - root.mh) / 2);
+    property <length> gap: 44px;
+    property <length> cw: 150px;
+
+    property <[CalloutSpec]> specs: [
+        { idx: 0, right: false, cy: 40, tx: 55, ty: 72 },
+        { idx: 7, right: false, cy: 104, tx: 94, ty: 106 },
+        { idx: 6, right: false, cy: 167, tx: 8, ty: 167 },
+        { idx: 5, right: false, cy: 207, tx: 8, ty: 207 },
+        { idx: 3, right: true, cy: 6, tx: 109, ty: 39 },
+        { idx: 2, right: true, cy: 50, tx: 109, ty: 58 },
+        { idx: 4, right: true, cy: 94, tx: 109, ty: 77 },
+        { idx: 1, right: true, cy: 138, tx: 150, ty: 100 },
+    ];
+
+    pure function is-sel(i: int) -> bool {
+        root.buttons[i].id != "" && root.buttons[i].id == root.selected
+    }
+    pure function part-fill(i: int, hover: bool) -> color {
+        root.is-sel(i) ? Theme.accent-soft : (hover ? Theme.device-part-hover : Theme.device-body)
+    }
+    pure function part-stroke(i: int) -> color {
+        root.is-sel(i) ? Theme.accent : Theme.device-stroke
+    }
+
+    // ---- the mouse ------------------------------------------------------------
+    Rectangle {
+        x: root.mx;
+        y: root.my;
+        width: root.mw;
+        height: root.mh;
+
+        // Shell
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 200;
+            viewbox-height: 340;
+            commands: "M 100 6 C 152 6 180 40 181 112 C 182 184 176 262 160 302 C 146 334 54 334 40 302 C 24 262 18 184 19 112 C 20 40 48 6 100 6 Z";
+            fill: Theme.device-body;
+            stroke: Theme.device-stroke;
+            stroke-width: 1.5px;
+        }
+        // Left / right buttons
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 200;
+            viewbox-height: 340;
+            commands: "M 98 8.6 C 55 9.6 23.5 42 21.6 112 L 21.3 128 L 98 128 Z";
+            fill: root.part-fill(0, left-ta.has-hover);
+            stroke: root.part-stroke(0);
+            stroke-width: 1px;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 200;
+            viewbox-height: 340;
+            commands: "M 102 8.6 C 145 9.6 176.5 42 178.4 112 L 178.7 128 L 102 128 Z";
+            fill: root.part-fill(1, right-ta.has-hover);
+            stroke: root.part-stroke(1);
+            stroke-width: 1px;
+        }
+        // Accent light strip near the palm rest
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 200;
+            viewbox-height: 340;
+            commands: "M 70 300 C 88 309 112 309 130 300";
+            fill: transparent;
+            stroke: Theme.accent.with-alpha(0.55);
+            stroke-width: 2px;
+        }
+
+        // Side thumb buttons, sticking out of the left edge
+        forward := Rectangle {
+            x: 7 * root.s;
+            y: 150 * root.s;
+            width: 14 * root.s;
+            height: 34 * root.s;
+            border-radius: 4 * root.s;
+            background: root.part-fill(6, fwd-ta.has-hover);
+            border-width: 1px;
+            border-color: root.part-stroke(6);
+        }
+        back := Rectangle {
+            x: 7 * root.s;
+            y: 190 * root.s;
+            width: 14 * root.s;
+            height: 34 * root.s;
+            border-radius: 4 * root.s;
+            background: root.part-fill(5, back-ta.has-hover);
+            border-width: 1px;
+            border-color: root.part-stroke(5);
+        }
+
+        // Scroll wheel (three zones: up / click / down)
+        wheel := Rectangle {
+            x: 91 * root.s;
+            y: 30 * root.s;
+            width: 18 * root.s;
+            height: 56 * root.s;
+            border-radius: 9 * root.s;
+            background: Theme.input-bg;
+            border-width: 1px;
+            border-color: root.is-sel(2) || root.is-sel(3) || root.is-sel(4) ? Theme.accent : Theme.device-stroke;
+            clip: true;
+            Rectangle {
+                y: root.is-sel(3) ? 0 : root.is-sel(2) ? parent.height / 3 : parent.height * 2 / 3;
+                height: parent.height / 3;
+                background: root.is-sel(2) || root.is-sel(3) || root.is-sel(4) ? Theme.accent-soft : transparent;
+            }
+            for r in [0.3, 0.42, 0.54, 0.66]: Rectangle {
+                x: parent.width * 0.25;
+                y: parent.height * r;
+                width: parent.width * 0.5;
+                height: 1px;
+                background: Theme.device-stroke;
+            }
+        }
+        // DPI button (handled in firmware: shown for reference only)
+        dpi := Rectangle {
+            x: 94 * root.s;
+            y: 98 * root.s;
+            width: 12 * root.s;
+            height: 16 * root.s;
+            border-radius: 3 * root.s;
+            background: root.is-sel(7) ? Theme.accent-soft : Theme.input-bg;
+            border-width: 1px;
+            border-color: root.is-sel(7) ? Theme.accent : Theme.device-stroke;
+        }
+
+        // ---- hit areas (on top of the artwork) ---------------------------------
+        left-ta := TouchArea {
+            x: 20 * root.s;
+            y: 8 * root.s;
+            width: 70 * root.s;
+            height: 120 * root.s;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[0].id); }
+        }
+        right-ta := TouchArea {
+            x: 110 * root.s;
+            y: 8 * root.s;
+            width: 70 * root.s;
+            height: 120 * root.s;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[1].id); }
+        }
+        TouchArea {
+            x: wheel.x;
+            y: wheel.y;
+            width: wheel.width;
+            height: wheel.height / 3;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[3].id); }
+        }
+        TouchArea {
+            x: wheel.x;
+            y: wheel.y + wheel.height / 3;
+            width: wheel.width;
+            height: wheel.height / 3;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[2].id); }
+        }
+        TouchArea {
+            x: wheel.x;
+            y: wheel.y + wheel.height * 2 / 3;
+            width: wheel.width;
+            height: wheel.height / 3;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[4].id); }
+        }
+        TouchArea {
+            x: dpi.x;
+            y: dpi.y;
+            width: dpi.width;
+            height: dpi.height;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[7].id); }
+        }
+        fwd-ta := TouchArea {
+            x: forward.x;
+            y: forward.y;
+            width: forward.width;
+            height: forward.height;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[6].id); }
+        }
+        back-ta := TouchArea {
+            x: back.x;
+            y: back.y;
+            width: back.width;
+            height: back.height;
+            mouse-cursor: pointer;
+            clicked => { root.select(root.buttons[5].id); }
+        }
+    }
+
+    // ---- leader lines (drawn over the shell, G HUB style) ------------------
+    for spec in root.specs: Path {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        // Coordinates are plain logical pixels.
+        fit: preserve;
+        property <length> x1: spec.right ? root.mx + root.mw + root.gap : root.mx - root.gap;
+        property <length> y1: root.my + spec.cy * root.s;
+        property <length> xk: spec.right ? self.x1 - 12px : self.x1 + 12px;
+        property <length> x2: root.mx + spec.tx * root.s;
+        property <length> y2: root.my + spec.ty * root.s;
+        commands: "M \{self.x1 / 1px} \{self.y1 / 1px} L \{self.xk / 1px} \{self.y1 / 1px} L \{self.x2 / 1px} \{self.y2 / 1px}";
+        stroke: root.is-sel(spec.idx) ? Theme.accent : Theme.border-strong;
+        stroke-width: 1px;
+        fill: transparent;
+    }
+
+    // Target dots drawn above the mouse
+    for spec in root.specs: Rectangle {
+        x: root.mx + spec.tx * root.s - 3.5px;
+        y: root.my + spec.ty * root.s - 3.5px;
+        width: 7px;
+        height: 7px;
+        border-radius: 3.5px;
+        background: root.is-sel(spec.idx) || root.buttons[spec.idx].mapped ? Theme.accent : Theme.border-strong;
+        border-width: 1.5px;
+        border-color: Theme.device-body;
+    }
+
+    // ---- callouts -------------------------------------------------------------
+    for spec in root.specs: Callout {
+        x: spec.right ? root.mx + root.mw + root.gap : root.mx - root.gap - root.cw;
+        y: root.my + spec.cy * root.s - self.height / 2;
+        btn: root.buttons[spec.idx];
+        selected: root.is-sel(spec.idx);
+        right: spec.right;
+        clicked => { root.select(root.buttons[spec.idx].id); }
+    }
+}

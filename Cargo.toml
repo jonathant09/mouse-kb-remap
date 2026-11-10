@@ -1,0 +1,47 @@
+[package]
+name = "mouse-kb-remap"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight, brand-agnostic mouse & keyboard remapper with per-app profiles"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+# The CPU (software) renderer keeps memory use low: no GPU/OpenGL context for a
+# settings window that is open a few minutes at a time. Build with
+# `--features gpu` to try the OpenGL renderer instead.
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "software-renderer-path",
+    "software-renderer-systemfonts",
+    "accessibility",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+gpu = ["slint/renderer-femtovg"]
+
+[build-dependencies]
+slint-build = "1.18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

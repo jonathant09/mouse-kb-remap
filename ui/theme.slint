@@ -1,0 +1,52 @@
+// Design tokens. Dark is a Discord-style charcoal (not pure black),
+// light is a soft neutral grey. Corners stay small: 3–7px.
+
+export global Theme {
+    in-out property <bool> dark: true;
+
+    // Surfaces
+    out property <color> window-bg: dark ? #313338 : #f4f5f7;
+    out property <color> sidebar-bg: dark ? #2b2d31 : #e9ebee;
+    out property <color> statusbar-bg: dark ? #232428 : #dfe1e5;
+    out property <color> panel-bg: dark ? #2b2d31 : #ffffff;
+    out property <color> input-bg: dark ? #1e1f22 : #e9ebee;
+    out property <color> control-bg: dark ? #383a40 : #ffffff;
+    out property <color> control-hover: dark ? #404249 : #eef0f3;
+    out property <color> selected-bg: dark ? #404249 : #dadde3;
+    out property <color> border: dark ? #3a3c42 : #d8dbe0;
+    out property <color> border-strong: dark ? #4e5058 : #b9bec7;
+
+    // Text
+    out property <color> text: dark ? #dbdee1 : #2e3338;
+    out property <color> text-strong: dark ? #f2f3f5 : #0d0e10;
+    out property <color> text-muted: dark ? #949ba4 : #5c6370;
+    out property <color> text-faint: dark ? #6d717b : #8d939d;
+
+    // Accent
+    out property <color> accent: dark ? #6d8dff : #4867f0;
+    out property <color> accent-hover: dark ? #829dff : #3a58df;
+    out property <color> accent-soft: dark ? #6d8dff29 : #4867f01f;
+    out property <color> on-accent: #ffffff;
+    out property <color> success: #3ba55d;
+    out property <color> warning: #e3a52a;
+    out property <color> danger: #ed4245;
+
+    // Device illustrations
+    out property <color> device-body: dark ? #26272b : #ffffff;
+    out property <color> device-stroke: dark ? #4a4c53 : #c3c8cf;
+    out property <color> device-part-hover: dark ? #2f3035 : #f1f3f6;
+    out property <color> key-well: dark ? #18191c : #c9cdd4;
+    out property <color> key-top: dark ? #36383e : #fbfbfc;
+    out property <color> key-top-hover: dark ? #40424a : #eef1f5;
+    out property <color> canvas-dot: dark ? #35373c : #eaecef;
+
+    // Shape & type
+    out property <length> radius-sm: 3px;
+    out property <length> radius: 5px;
+    out property <length> radius-lg: 7px;
+    out property <length> font-xs: 10px;
+    out property <length> font-sm: 11px;
+    out property <length> font: 12px;
+    out property <length> font-md: 13px;
+    out property <length> font-lg: 16px;
+}

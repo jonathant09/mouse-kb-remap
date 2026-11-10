@@ -1,0 +1,110 @@
+import { Theme } from "theme.slint";
+
+export struct KeyCap {
+    id: string,     // input id, e.g. "key:A"
+    label: string,  // legend
+    x: float,       // position / width in key units
+    y: float,
+    w: float,
+    mapped: bool,
+    value: string,  // short label of the remap target
+}
+
+component KeyView inherits Rectangle {
+    in property <KeyCap> key;
+    in property <bool> selected;
+    in property <length> u;
+    callback clicked;
+
+    // The "well" is the darker base; the cap sits slightly raised on top.
+    border-radius: 4px;
+    background: root.selected ? Theme.accent : Theme.key-well;
+
+    cap := Rectangle {
+        x: 1.5px;
+        y: 1px;
+        width: parent.width - 3px;
+        height: parent.height - 4px;
+        border-radius: 3px;
+        background: ta.pressed ? Theme.key-well : ta.has-hover ? Theme.key-top-hover : Theme.key-top;
+        border-width: root.key.mapped || root.selected ? 1px : 0px;
+        border-color: Theme.accent;
+        animate background { duration: 70ms; }
+
+        Text {
+            // Long legends on 1u keys ("PrtSc", "PgUp") get a smaller size so they fit.
+            property <bool> compact: root.key.label.character-count > 3 && root.key.w < 1.2;
+            property <bool> small: self.compact || (root.key.mapped && root.u < 42px);
+            x: self.compact ? 3px : 5px;
+            y: root.key.mapped ? 2px : 3px;
+            width: parent.width - (self.compact ? 4px : 8px);
+            text: root.key.label;
+            font-size: self.small ? 8.5px : (root.u > 38px ? Theme.font-sm : Theme.font-xs);
+            color: root.key.mapped ? Theme.text-muted : Theme.text;
+            overflow: elide;
+        }
+        if root.key.mapped: Text {
+            x: 3px;
+            y: parent.height - self.height - 1px;
+            width: parent.width - 6px;
+            horizontal-alignment: right;
+            text: root.key.value;
+            font-size: root.u < 42px ? 9px : Theme.font-xs;
+            font-weight: 700;
+            color: Theme.accent;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Generic 87-key (TKL) ANSI board. Layout comes from Rust (src/keys.rs).
+export component KeyboardDiagram inherits Rectangle {
+    in property <[KeyCap]> keys;
+    in property <string> selected;
+    callback select(string);
+
+    property <length> pad: 14px;
+    property <length> u: clamp((root.width - 2 * root.pad - 48px) / 18.25, 26px, 50px);
+    property <length> kw: 18.25 * root.u + 2 * root.pad;
+    property <length> kh: 6.25 * root.u + 2 * root.pad;
+
+    Rectangle {
+        x: (root.width - root.kw) / 2;
+        y: (root.height - root.kh) / 2;
+        width: root.kw;
+        height: root.kh;
+        border-radius: Theme.radius-lg;
+        background: Theme.device-body;
+        border-width: 1px;
+        border-color: Theme.device-stroke;
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: Theme.dark ? #00000040 : #0000001a;
+
+        for k in root.keys: KeyView {
+            x: root.pad + k.x * root.u;
+            y: root.pad + k.y * root.u;
+            width: k.w * root.u - 3px;
+            height: root.u - 3px;
+            u: root.u;
+            key: k;
+            selected: k.id == root.selected;
+            clicked => { root.select(k.id); }
+        }
+
+        // Accent light bar across the top edge (subtle nod to RGB boards)
+        Rectangle {
+            x: parent.width * 0.35;
+            y: 0;
+            width: parent.width * 0.3;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent.with-alpha(0.6);
+        }
+    }
+}

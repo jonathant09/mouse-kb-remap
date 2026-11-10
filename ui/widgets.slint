@@ -1,0 +1,177 @@
+import { Theme } from "theme.slint";
+
+export component SectionLabel inherits Text {
+    color: Theme.text-faint;
+    font-size: Theme.font-xs;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+}
+
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    height: 28px;
+    min-width: label.preferred-width + 22px;
+    border-radius: Theme.radius;
+    background: !root.enabled ? Theme.control-bg
+        : root.primary ? (ta.has-hover ? Theme.accent-hover : Theme.accent)
+        : (ta.has-hover ? Theme.control-hover : Theme.control-bg);
+    border-width: root.primary ? 0px : 1px;
+    border-color: root.danger && ta.has-hover ? Theme.danger : Theme.border;
+    opacity: root.enabled ? 1 : 0.5;
+    animate background { duration: 90ms; }
+
+    label := Text {
+        text: root.text;
+        color: root.primary ? Theme.on-accent : (root.danger ? Theme.danger : Theme.text);
+        font-size: Theme.font;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> removable: false;
+    in property <bool> active: false;
+    in property <bool> dashed: false;
+    callback clicked;
+    callback remove;
+
+    height: 22px;
+    min-width: layout.preferred-width;
+    border-radius: Theme.radius-sm;
+    background: root.active ? Theme.accent-soft : (ta.has-hover ? Theme.control-hover : Theme.input-bg);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.border;
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    layout := HorizontalLayout {
+        padding-left: 8px;
+        padding-right: root.removable ? 3px : 8px;
+        spacing: 2px;
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: Theme.font-sm;
+            color: root.active ? Theme.accent : Theme.text;
+        }
+        if root.removable: Rectangle {
+            width: 16px;
+            border-radius: 2px;
+            background: x-ta.has-hover ? Theme.control-hover : transparent;
+            Text {
+                text: "×";
+                font-size: Theme.font-md;
+                color: x-ta.has-hover ? Theme.danger : Theme.text-muted;
+            }
+            x-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove(); }
+            }
+        }
+    }
+}
+
+// Small segmented control (Wooting / NuPhy style tabs).
+export component Segmented inherits Rectangle {
+    in property <[string]> items;
+    in property <int> current;
+    in property <length> item-min-width: 0px;
+    callback selected(int);
+
+    height: 28px;
+    border-radius: Theme.radius;
+    background: Theme.input-bg;
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+        for item[i] in root.items: Rectangle {
+            min-width: max(root.item-min-width, lbl.preferred-width + 20px);
+            border-radius: Theme.radius-sm;
+            background: i == root.current ? Theme.control-bg : (t.has-hover ? Theme.control-hover.with-alpha(0.5) : transparent);
+            drop-shadow-blur: i == root.current ? 2px : 0px;
+            drop-shadow-color: i == root.current ? #0000001f : transparent;
+            drop-shadow-offset-y: 1px;
+            animate background { duration: 90ms; }
+            lbl := Text {
+                text: item;
+                font-size: Theme.font;
+                font-weight: i == root.current ? 600 : 400;
+                color: i == root.current ? Theme.text-strong : Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            t := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.selected(i); }
+            }
+        }
+    }
+}
+
+export component Field inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    callback accepted(string);
+
+    height: 28px;
+    border-radius: Theme.radius;
+    background: Theme.input-bg;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+
+    if root.text == "": Text {
+        x: 9px;
+        width: parent.width - 18px;
+        text: root.placeholder;
+        color: Theme.text-faint;
+        font-size: Theme.font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    input := TextInput {
+        x: 9px;
+        width: parent.width - 18px;
+        height: parent.height;
+        text <=> root.text;
+        color: Theme.text;
+        font-size: Theme.font;
+        vertical-alignment: center;
+        single-line: true;
+        selection-background-color: Theme.accent-soft;
+        selection-foreground-color: Theme.text-strong;
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+// Status dot with optional soft halo.
+export component Dot inherits Rectangle {
+    in property <color> tint: Theme.success;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.tint;
+}
