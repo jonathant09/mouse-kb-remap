@@ -53,6 +53,14 @@ release the stuck key physically, and please open an issue describing what you w
 
 Bringing the mouse-kb-remap window to the front stops every running macro and turbo.
 
+## Does it add input latency?
+
+Barely. Inputs you haven't remapped pass through in microseconds; remapped ones add one
+extra trip through Windows' input queue (well under a millisecond). Mouse movement is never
+changed, and the app only watches the mouse at all while the active profile remaps a mouse
+button or the wheel: a profile that only remaps keys leaves the mouse completely alone. The
+input thread runs at high priority so a busy PC doesn't delay it.
+
 ## Remapping stops working after a while
 
 Windows silently removes low-level hooks that respond too slowly, for example when the

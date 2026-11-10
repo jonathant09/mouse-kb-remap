@@ -74,7 +74,20 @@ handles it:
 
 `mouse_proc` / `keyboard_proc` run for **every** mouse click and key press on the system
 (mouse moves return immediately). Windows removes a low-level hook without telling anyone if
-it takes too long (`LowLevelHooksTimeout`), so the hook does very little:
+it takes too long (`LowLevelHooksTimeout`), so the hook does very little.
+
+Every hooked event makes a round trip to the engine thread, so:
+
+- **The mouse hook is only installed while it's needed**: when the active profile remaps a
+  mouse button or the wheel, or while a macro is recording (`update_mouse_hook`, re-checked
+  on focus changes, config changes and recording start/stop). Otherwise mouse movement and
+  clicks never pass through the app. If a remapped button is held when the hook should go,
+  removal waits for its release so the key it sends can't get stuck. The keyboard hook stays
+  installed (key capture, recording).
+- **The engine thread runs at `THREAD_PRIORITY_HIGHEST`** so hooked input never queues
+  behind ordinary work on a busy PC; the playback thread runs above normal.
+
+Per event:
 
 1. Ignore our own injected events (tagged with `dwExtraInfo = "MKRR"`) and, by default, all
    other synthetic input too. That prevents feedback loops.

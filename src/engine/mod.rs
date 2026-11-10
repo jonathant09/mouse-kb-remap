@@ -99,6 +99,15 @@ pub struct Layers {
 }
 
 impl Layers {
+    /// Whether any mouse button or wheel input is remapped.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn uses_mouse(&self) -> bool {
+        self.base
+            .keys()
+            .chain(self.shift.keys())
+            .any(|i| matches!(i, Input::Mouse(_)))
+    }
+
     pub fn lookup(&self, input: &Input, shifted: bool) -> Option<&Target> {
         if shifted {
             if let Some(t) = self.shift.get(input) {

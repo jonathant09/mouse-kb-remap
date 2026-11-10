@@ -17,7 +17,7 @@ use crate::config::MouseButton;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -28,8 +28,9 @@ use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVAT
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, SetThreadPriority, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_HIGHEST,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -41,12 +42,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, SetWindowsHookExW,
-    SystemParametersInfoW, TranslateMessage, EVENT_SYSTEM_FOREGROUND, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-    LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, PostThreadMessageW,
+    SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND,
+    HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+    SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 pub const SUPPORTED: bool = true;
@@ -61,6 +63,13 @@ const MAGIC: usize = 0x4D4B_5252; // "MKRR"
 const ACCEPT_INJECTED_ENV: &str = "MOUSE_KB_REMAP_ACCEPT_INJECTED";
 
 const NO_PROFILE: usize = usize::MAX;
+
+/// Thread message asking the engine thread to re-check whether the mouse
+/// hook is needed.
+const WM_UPDATE_HOOKS: u32 = WM_APP + 1;
+
+/// Engine thread id, for posting it messages.
+static ENGINE_TID: AtomicU32 = AtomicU32::new(0);
 
 struct Recording {
     start: Instant,
@@ -107,6 +116,10 @@ thread_local! {
     static DISPATCH: RefCell<Dispatcher> = RefCell::new(Dispatcher::default());
     static CAPTURE: RefCell<CaptureState> = RefCell::new(CaptureState::default());
     static REC_DOWN: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
+    /// The mouse hook, when installed (only while it is needed).
+    static MOUSE_HOOK: std::cell::Cell<Option<HHOOK>> = const { std::cell::Cell::new(None) };
+    /// Remove the mouse hook once no remapped button is held any more.
+    static PENDING_UNHOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub struct Engine;
@@ -139,7 +152,13 @@ impl Engine {
 
         std::thread::Builder::new()
             .name("remap-player".into())
-            .spawn(move || player::run_worker(rx, emit_outs))
+            .spawn(move || {
+                // Timed output (turbo, macros) shouldn't wait behind normal work.
+                unsafe {
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+                }
+                player::run_worker(rx, emit_outs)
+            })
             .expect("failed to spawn player thread");
         std::thread::Builder::new()
             .name("remap-engine".into())
@@ -156,6 +175,7 @@ impl Engine {
         }
         let (exe, is_self) = sh.last_focus.lock().map(|f| f.clone()).unwrap_or_default();
         recompute_active(&exe, is_self);
+        request_hook_update();
         // Bindings may have changed under a running macro or turbo.
         let _ = sh.worker.send(Cmd::StopAll);
     }
@@ -182,12 +202,14 @@ impl Engine {
             });
         }
         sh.recording.store(true, Ordering::SeqCst);
+        request_hook_update();
         true
     }
 
     pub fn stop_recording(&self) -> Vec<(Duration, RecEvent)> {
         let sh = shared();
         sh.recording.store(false, Ordering::SeqCst);
+        request_hook_update();
         sh.record
             .lock()
             .ok()
@@ -207,12 +229,16 @@ impl Engine {
 
 fn engine_thread() {
     unsafe {
+        // Every hooked event waits for this thread: never let it queue
+        // behind ordinary work when the PC is busy. It does very little.
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        ENGINE_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
+
         let hmod = GetModuleHandleW(PCWSTR::null()).ok();
-        let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod.map(Into::into), 0);
+        // The mouse hook comes and goes with the active profile (see
+        // update_mouse_hook); the keyboard hook is always needed for key
+        // capture and recording.
         let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod.map(Into::into), 0);
-        if let Err(e) = &mouse {
-            crate::log!("engine: mouse hook failed: {e}");
-        }
         if let Err(e) = &keyboard {
             crate::log!("engine: keyboard hook failed: {e}");
         }
@@ -230,10 +256,68 @@ fn engine_thread() {
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.hwnd.is_invalid() && msg.message == WM_UPDATE_HOOKS {
+                update_mouse_hook();
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// Ask the engine thread to re-check the mouse hook (from any thread).
+fn request_hook_update() {
+    let tid = ENGINE_TID.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_UPDATE_HOOKS, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Install the mouse hook only while something needs it: the active profile
+/// remaps a mouse button or the wheel, or a macro is being recorded.
+/// Otherwise mouse movement and clicks never pass through this app at all.
+/// Engine thread only.
+fn update_mouse_hook() {
+    let sh = shared();
+    let wanted = sh.recording.load(Ordering::SeqCst)
+        || sh
+            .active
+            .read()
+            .ok()
+            .and_then(|a| a.clone())
+            .is_some_and(|l| l.uses_mouse());
+    MOUSE_HOOK.with(|hook| match (wanted, hook.get()) {
+        (true, None) => {
+            PENDING_UNHOOK.with(|p| p.set(false));
+            let hmod = unsafe { GetModuleHandleW(PCWSTR::null()) }.ok();
+            match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod.map(Into::into), 0) } {
+                Ok(h) => {
+                    hook.set(Some(h));
+                    crate::log!("engine: mouse hook on");
+                }
+                Err(e) => crate::log!("engine: mouse hook failed: {e}"),
+            }
+        }
+        (true, Some(_)) => PENDING_UNHOOK.with(|p| p.set(false)),
+        (false, Some(h)) => {
+            // A remapped button still held needs its release seen, or the
+            // key it sends would stay down: wait for it.
+            if DISPATCH.with(|d| d.borrow().holds_mouse()) {
+                PENDING_UNHOOK.with(|p| p.set(true));
+            } else {
+                PENDING_UNHOOK.with(|p| p.set(false));
+                unsafe {
+                    let _ = UnhookWindowsHookEx(h);
+                }
+                hook.set(None);
+                crate::log!("engine: mouse hook off");
+            }
+        }
+        (false, None) => {}
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +360,7 @@ fn on_foreground(hwnd: HWND) {
     }
     let before = sh.active_index.load(Ordering::Relaxed);
     let after = recompute_active(&exe_lower, is_self);
+    update_mouse_hook();
     if before != after {
         // A toggled turbo or looping macro stops when you switch profile, and
         // focusing this window stops everything (a handy panic button).
@@ -397,7 +482,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         });
                     }
                 }
-                if handle(input, phase) {
+                let swallow = handle(input, phase);
+                if phase == Phase::Up
+                    && PENDING_UNHOOK.with(|p| p.get())
+                    && !DISPATCH.with(|d| d.borrow().holds_mouse())
+                {
+                    // Finish a deferred unhook (not from inside the callback).
+                    request_hook_update();
+                }
+                if swallow {
                     return LRESULT(1);
                 }
             }

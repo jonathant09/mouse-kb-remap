@@ -117,9 +117,12 @@ export component Sidebar inherits Rectangle {
             }
         }
 
-        Flickable {
+        list := Flickable {
             vertical-stretch: 1;
             VerticalLayout {
+                // Match the sidebar width so long text wraps instead of
+                // widening (and clipping) the list.
+                width: list.width;
                 alignment: start;
                 spacing: 2px;
 
@@ -140,12 +143,15 @@ export component Sidebar inherits Rectangle {
                     text: "MACROS";
                     add => { Store.add-macro(); }
                 }
-                if Store.macros.length == 0: Text {
-                    x: 4px;
-                    text: "Record keys and clicks, then bind the macro to any button.";
-                    wrap: word-wrap;
-                    font-size: Theme.font-xs;
-                    color: Theme.text-faint;
+                if Store.macros.length == 0: HorizontalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    Text {
+                        text: "Record keys and clicks, then bind the macro to any button.";
+                        wrap: word-wrap;
+                        font-size: Theme.font-xs;
+                        color: Theme.text-faint;
+                    }
                 }
                 for m[i] in Store.macros: SideRow {
                     title: m.name;

@@ -171,6 +171,13 @@ impl Dispatcher {
         }
     }
 
+    /// Whether a remapped mouse button is being held (its release must still
+    /// be seen).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn holds_mouse(&self) -> bool {
+        self.held.keys().any(|i| matches!(i, Input::Mouse(_)))
+    }
+
     #[cfg(test)]
     pub fn shifted(&self) -> bool {
         self.shift > 0
@@ -323,6 +330,25 @@ mod tests {
         d.handle(Input::Key(2), Phase::Tap, Some(&l), true, &mut s);
         assert_eq!(s.cmds, vec!["press tap=false", "release", "tap 32", "press tap=true"]);
         assert!(s.out.is_empty());
+    }
+
+    #[test]
+    fn knows_when_a_remapped_mouse_button_is_held() {
+        let back = Input::Mouse(MouseButton::Back);
+        let l = layers(
+            vec![(back, Target::Key { vk: 0x42, mods: 0 }), (IN, Target::Disabled)],
+            vec![],
+        );
+        assert!(l.uses_mouse());
+        assert!(!layers(vec![(IN, Target::Disabled)], vec![]).uses_mouse());
+        let mut d = Dispatcher::default();
+        let mut s = Rec::default();
+        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
+        assert!(!d.holds_mouse());
+        d.handle(back, Phase::Down, Some(&l), true, &mut s);
+        assert!(d.holds_mouse());
+        d.handle(back, Phase::Up, None, true, &mut s);
+        assert!(!d.holds_mouse());
     }
 
     #[test]
