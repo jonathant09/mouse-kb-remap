@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to publish release assets on tags
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        shell: pwsh
+        run: |
+          cargo build --release --locked 2>&1 | Tee-Object -FilePath build.log
+          exit $LASTEXITCODE
+
+      # Surface compiler errors/warnings as annotations on the commit, so they
+      # are visible without opening the full log.
+      - name: Annotate compiler output
+        if: always()
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build.log)) { exit 0 }
+          $text = (Get-Content build.log -Raw) -replace "`r", ''
+          foreach ($m in [regex]::Matches($text, '(?ms)^(error|warning)(\[\w+\])?:.*?(?=^\S|\z)')) {
+            $kind = if ($m.Value.StartsWith('error')) { 'error' } else { 'warning' }
+            $msg = $m.Value.Trim() -replace '%', '%25' -replace "`n", '%0A'
+            Write-Output "::${kind} title=rustc::$msg"
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/mouse-kb-remap.exe dist/
+          Copy-Item README.md, LICENSE, start.bat dist/
+          Compress-Archive -Path dist/* -DestinationPath mouse-kb-remap-windows-x64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mouse-kb-remap-windows-x64
+          path: dist/
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/mouse-kb-remap.exe
+            mouse-kb-remap-windows-x64.zip
+          generate_release_notes: true
