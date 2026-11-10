@@ -144,6 +144,7 @@ pub fn show_window_from_any_thread() {
 
 pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    system::stop_raw_keyboard_input();
     let cfg = Config::load();
     ui.global::<Theme>().set_dark(cfg.theme == ThemeMode::Dark);
 

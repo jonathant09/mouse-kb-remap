@@ -52,8 +52,19 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK, SW_HIDE, SW_SHOWNORMAL};
 
-    const MUTEX_NAME: PCWSTR = w!("Local\\mouse-kb-remap.instance");
-    const SHOW_EVENT_NAME: PCWSTR = w!("Local\\mouse-kb-remap.show");
+    /// Name for the single-instance objects. Copies using a different config
+    /// file (MOUSE_KB_REMAP_CONFIG) count as separate instances.
+    fn instance_name(kind: &str) -> HSTRING {
+        let mut name = format!("Local\\mouse-kb-remap.{kind}");
+        if let Some(cfg) = std::env::var_os(crate::config::CONFIG_ENV).filter(|v| !v.is_empty()) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            cfg.to_string_lossy().to_lowercase().hash(&mut h);
+            name.push_str(&format!(".{:016x}", h.finish()));
+        }
+        HSTRING::from(name)
+    }
+
     const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
     const APP_NAME: PCWSTR = w!("mouse-kb-remap");
     const TASK_NAME: &str = "mouse-kb-remap";
@@ -65,13 +76,13 @@ mod win {
     /// launch asks this copy to show itself.
     pub fn single_instance(on_show: impl Fn() + Send + 'static) -> bool {
         unsafe {
-            let mutex = CreateMutexW(None, false, MUTEX_NAME);
+            let mutex = CreateMutexW(None, false, &instance_name("instance"));
             let already = match &mutex {
                 Ok(_) => GetLastError() == ERROR_ALREADY_EXISTS,
                 Err(_) => true, // access denied: created by an elevated copy
             };
             if already {
-                let signalled = OpenEventW(EVENT_MODIFY_STATE, false, SHOW_EVENT_NAME)
+                let signalled = OpenEventW(EVENT_MODIFY_STATE, false, &instance_name("show"))
                     .and_then(|e| {
                         let r = SetEvent(e);
                         let _ = CloseHandle(e);
@@ -88,7 +99,7 @@ mod win {
             }
             // Keep the mutex for the life of the process.
             std::mem::forget(mutex);
-            if let Ok(event) = CreateEventW(None, false, false, SHOW_EVENT_NAME) {
+            if let Ok(event) = CreateEventW(None, false, false, &instance_name("show")) {
                 let event = event.0 as usize;
                 std::thread::spawn(move || loop {
                     let h = HANDLE(event as *mut _);
@@ -340,6 +351,27 @@ mod win {
         }
     }
 
+    /// Undo the raw keyboard input registration the windowing library (winit)
+    /// makes for our window. While a window registered for raw keyboard input
+    /// is focused, Windows stops calling low-level keyboard hooks installed by
+    /// the same process, so our own engine would go deaf to keys whenever this
+    /// app is in front (breaking macro recording and key capture). The UI
+    /// doesn't use raw keyboard input; normal key events are unaffected.
+    pub fn stop_raw_keyboard_input() {
+        use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_REMOVE};
+        let device = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // generic desktop
+            usUsage: 0x06,     // keyboard
+            dwFlags: RIDEV_REMOVE,
+            hwndTarget: Default::default(),
+        };
+        unsafe {
+            if let Err(e) = RegisterRawInputDevices(&[device], std::mem::size_of::<RAWINPUTDEVICE>() as u32) {
+                crate::log!("ui: couldn't unregister raw keyboard input: {e}");
+            }
+        }
+    }
+
     /// The primary monitor's work area (screen minus taskbar), physical pixels:
     /// (x, y, width, height).
     pub fn work_area() -> Option<(i32, i32, i32, i32)> {
@@ -475,6 +507,8 @@ X-GNOME-Autostart-enabled=true
     pub fn is_elevated() -> bool {
         false
     }
+
+    pub fn stop_raw_keyboard_input() {}
 
     pub fn work_area() -> Option<(i32, i32, i32, i32)> {
         None

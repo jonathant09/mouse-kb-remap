@@ -29,7 +29,7 @@ Debug builds show a console window so log output is visible. Release builds hide
 
 | Variable | Effect |
 | --- | --- |
-| `MOUSE_KB_REMAP_CONFIG` | Use this config file instead of the default (portable installs, testing) |
+| `MOUSE_KB_REMAP_CONFIG` | Use this config file instead of the default (portable installs, testing). A copy with its own config file runs as a separate instance. |
 | `MOUSE_KB_REMAP_ACCEPT_INJECTED=1` | Also remap synthetic input from other programs. For end-to-end tests that drive the app with `SendInput`; leave it off otherwise. |
 
 ## Renderer

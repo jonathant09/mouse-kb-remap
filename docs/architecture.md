@@ -132,7 +132,8 @@ evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y
   `SPIF_UPDATEINIFILE`) and restored on release and on quit.
 - **Config writes are atomic**: write `config.json.tmp`, then rename.
 - **Broken configs are preserved** as `config.broken.json` before defaults load.
-- **One instance**: a second launch signals the first to show its window and exits.
+- **One instance**: a second launch signals the first to show its window and exits. Copies started with a different `MOUSE_KB_REMAP_CONFIG` count as separate instances.
+- **No raw keyboard input in the UI.** winit registers the window for raw keyboard input, and while such a window is focused Windows skips low-level keyboard hooks owned by the same process: key capture and macro recording would go deaf whenever the app is in front. `system::stop_raw_keyboard_input()` removes that registration right after the window is created.
 
 ## UI conventions
 
