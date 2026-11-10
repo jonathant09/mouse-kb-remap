@@ -6,6 +6,7 @@ export struct KeyCap {
     x: float,       // position / width in key units
     y: float,
     w: float,
+    h: float,
     mapped: bool,
     value: string,  // short label of the remap target
 }
@@ -33,13 +34,16 @@ component KeyView inherits Rectangle {
 
         Text {
             // Long legends on 1u keys ("PrtSc", "PgUp") get a smaller size so they fit.
-            property <bool> compact: root.key.label.character-count > 3 && root.key.w < 1.2;
+            // Small keys (full-size layout, small window) get smaller legends
+            // so "Esc", "F10" or "PrtSc" still fit.
+            property <bool> tight: root.u < 40px && root.key.label.character-count >= 3;
+            property <bool> compact: (root.key.label.character-count > 3 && root.key.w < 1.2) || self.tight;
             property <bool> small: self.compact || (root.key.mapped && root.u < 42px);
             x: self.compact ? 3px : 5px;
             y: root.key.mapped ? 2px : 3px;
             width: parent.width - (self.compact ? 4px : 8px);
             text: root.key.label;
-            font-size: self.small ? 8.5px : (root.u > 38px ? Theme.font-sm : Theme.font-xs);
+            font-size: self.tight && root.key.label.character-count > 3 ? 7.5px : self.small ? 8.5px : (root.u > 38px ? Theme.font-sm : Theme.font-xs);
             color: root.key.mapped ? Theme.text-muted : Theme.text;
             overflow: elide;
         }
@@ -62,15 +66,16 @@ component KeyView inherits Rectangle {
     }
 }
 
-// Generic 87-key (TKL) ANSI board. Layout comes from Rust (src/keys.rs).
+// Generic ANSI board, TKL (87 keys) or full size. Layout comes from Rust (src/keys.rs).
 export component KeyboardDiagram inherits Rectangle {
     in property <[KeyCap]> keys;
     in property <string> selected;
+    in property <float> units-wide: 18.25;
     callback select(string);
 
     property <length> pad: 14px;
-    property <length> u: clamp((root.width - 2 * root.pad - 48px) / 18.25, 26px, 50px);
-    property <length> kw: 18.25 * root.u + 2 * root.pad;
+    property <length> u: clamp((root.width - 2 * root.pad - 48px) / root.units-wide, 20px, 50px);
+    property <length> kw: root.units-wide * root.u + 2 * root.pad;
     property <length> kh: 6.25 * root.u + 2 * root.pad;
 
     Rectangle {
@@ -90,7 +95,7 @@ export component KeyboardDiagram inherits Rectangle {
             x: root.pad + k.x * root.u;
             y: root.pad + k.y * root.u;
             width: k.w * root.u - 3px;
-            height: root.u - 3px;
+            height: k.h * root.u - 3px;
             u: root.u;
             key: k;
             selected: k.id == root.selected;

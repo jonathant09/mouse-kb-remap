@@ -1,0 +1,208 @@
+// Profile editor: header, device canvas and inspector.
+
+import { Theme } from "theme.slint";
+import { Store } from "store.slint";
+import { Button, Chip, Divider, Field, Segmented, Switch } from "widgets.slint";
+import { MouseDiagram } from "mouse.slint";
+import { KeyboardDiagram } from "keyboard.slint";
+import { Inspector } from "inspector.slint";
+
+component ProfileHeader inherits Rectangle {
+    background: Theme.window-bg;
+    property <string> new-app;
+    // Keep the editable title in sync when switching profiles.
+    property <string> pname: Store.profile-name;
+    changed pname => { name-input.text = root.pname; }
+
+    VerticalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        padding-top: 16px;
+        padding-bottom: 14px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            name-input := TextInput {
+                text: Store.profile-name;
+                font-size: Theme.font-lg;
+                font-weight: 700;
+                color: Theme.text-strong;
+                single-line: true;
+                read-only: Store.selected-profile == 0;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                selection-background-color: Theme.accent-soft;
+                accepted => { Store.rename-profile(self.text); }
+                edited => { Store.rename-profile(self.text); }
+            }
+            Segmented {
+                items: ["Mouse", "Keyboard"];
+                current: Store.device-tab;
+                item-min-width: 76px;
+                selected(i) => { Store.device-tab = i; }
+            }
+            Segmented {
+                items: ["Base", "Shift layer"];
+                current: Store.layer;
+                selected(i) => { Store.select-layer(i); }
+            }
+            Button { text: "Duplicate"; clicked => { Store.duplicate-profile(); } }
+            if Store.selected-profile != 0: Button {
+                text: "Delete";
+                danger: true;
+                clicked => { Store.delete-profile(); }
+            }
+        }
+
+        if Store.selected-profile == 0: Text {
+            text: "Used when no other profile matches the focused app. Other profiles inherit these bindings.";
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+        }
+        if Store.selected-profile != 0: HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Text { text: "Activates for"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            for app in Store.profile-apps: Chip {
+                text: app;
+                removable: true;
+                active: true;
+                remove => { Store.remove-app(app); }
+            }
+            Field {
+                width: 170px;
+                height: 22px;
+                placeholder: "add app, e.g. game.exe";
+                text <=> root.new-app;
+                accepted(t) => {
+                    Store.add-app(t);
+                    root.new-app = "";
+                }
+            }
+            if Store.recent-apps.length > 0: Text {
+                text: "Recent:";
+                color: Theme.text-faint;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+            for app in Store.recent-apps: Chip {
+                text: "+ " + app;
+                clicked => { Store.add-app(app); }
+            }
+        }
+    }
+}
+
+component Canvas inherits Rectangle {
+    background: Theme.window-bg;
+    clip: true;
+
+    // Faint blueprint grid (a few dozen 1px lines: cheap to draw)
+    for i in 64: Rectangle {
+        x: i * 32px;
+        width: 1px;
+        background: Theme.canvas-dot;
+    }
+    for i in 40: Rectangle {
+        y: i * 32px;
+        height: 1px;
+        background: Theme.canvas-dot;
+    }
+
+    if Store.device-tab == 0: MouseDiagram {
+        width: parent.width;
+        height: parent.height;
+        buttons: Store.mouse-buttons;
+        selected: Store.selected-input;
+        select(id) => { Store.select-input(id); }
+    }
+    if Store.device-tab == 1: KeyboardDiagram {
+        width: parent.width;
+        height: parent.height;
+        keys: Store.keys;
+        units-wide: Store.full-keyboard ? 22.5 : 18.25;
+        selected: Store.selected-input;
+        select(id) => { Store.select-input(id); }
+    }
+
+    // Shift layer banner
+    if Store.layer == 1: Rectangle {
+        x: 16px;
+        y: 14px;
+        width: banner.preferred-width + 20px;
+        height: 26px;
+        border-radius: 13px;
+        background: Theme.accent;
+        banner := Text {
+            text: "SHIFT LAYER · " + Store.shift-hint;
+            color: Theme.on-accent;
+            font-size: Theme.font-sm;
+            font-weight: 600;
+        }
+    }
+
+    // Keyboard tools
+    if Store.device-tab == 1: HorizontalLayout {
+        x: parent.width - self.width - 16px;
+        y: 12px;
+        width: self.preferred-width;
+        height: 28px;
+        spacing: 10px;
+        Text { text: "Number pad"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+        VerticalLayout {
+            alignment: center;
+            Switch {
+                checked: Store.full-keyboard;
+                toggled(on) => { Store.set-full-keyboard(on); }
+            }
+        }
+        Button {
+            text: Store.capturing == "detect" ? "Press any key…" : "Detect key";
+            primary: Store.capturing == "detect";
+            clicked => {
+                if Store.capturing == "detect" {
+                    Store.cancel-capture();
+                } else {
+                    Store.start-capture("detect");
+                }
+            }
+        }
+    }
+
+    // Legend
+    HorizontalLayout {
+        x: 16px;
+        y: parent.height - 30px;
+        width: self.preferred-width;
+        height: 16px;
+        spacing: 14px;
+        HorizontalLayout {
+            spacing: 6px;
+            Rectangle { width: 10px; height: 10px; y: 3px; border-radius: 2px; border-width: 1px; border-color: Theme.accent; background: Theme.accent-soft; }
+            Text { text: "Remapped"; font-size: Theme.font-xs; color: Theme.text-faint; vertical-alignment: center; }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Rectangle { width: 10px; height: 10px; y: 3px; border-radius: 2px; background: Theme.accent; }
+            Text { text: "Selected"; font-size: Theme.font-xs; color: Theme.text-faint; vertical-alignment: center; }
+        }
+        if Store.device-tab == 1: Text {
+            text: "Keys not on the drawing (F13–F24, media keys, extra mouse keys): use Detect key.";
+            font-size: Theme.font-xs;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ProfileView inherits VerticalLayout {
+    ProfileHeader { }
+    Divider { }
+    HorizontalLayout {
+        vertical-stretch: 1;
+        Canvas { horizontal-stretch: 1; }
+        Rectangle { width: 1px; background: Theme.border; }
+        Inspector { }
+    }
+}

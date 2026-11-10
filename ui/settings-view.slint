@@ -1,0 +1,119 @@
+// Settings page: startup, tray, import / export, config file, about.
+
+import { Theme } from "theme.slint";
+import { Store } from "store.slint";
+import { Button, Divider, Hint, SectionLabel, Segmented, Switch } from "widgets.slint";
+
+component Card inherits Rectangle {
+    in property <string> title;
+    border-radius: Theme.radius-lg;
+    background: Theme.panel-bg;
+    border-width: 1px;
+    border-color: Theme.border;
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        SectionLabel { text: root.title; }
+        @children
+    }
+}
+
+export component SettingsView inherits Rectangle {
+    background: Theme.window-bg;
+
+    Flickable {
+        VerticalLayout {
+            alignment: start;
+            padding: 24px;
+            spacing: 16px;
+
+            Text { text: "Settings"; font-size: Theme.font-lg; font-weight: 700; color: Theme.text-strong; }
+            if Store.notice != "": Text {
+                max-width: 640px;
+                text: Store.notice;
+                wrap: word-wrap;
+                color: Store.notice-error ? Theme.danger : Theme.success;
+                font-size: Theme.font;
+            }
+
+            Card {
+                title: "START WITH WINDOWS";
+                max-width: 640px;
+                Segmented {
+                    items: ["Off", "On", "On, as administrator"];
+                    current: Store.autostart;
+                    selected(i) => { Store.set-autostart(i); }
+                }
+                Hint {
+                    text: !Store.autostart-supported ? "Not available on this system yet."
+                        : "Starts hidden in the tray when you sign in. \"As administrator\" is needed for games that run as admin (Genshin Impact and many games with anti-cheat); it is set up with Task Scheduler and asks for admin rights once.";
+                }
+            }
+
+            Card {
+                title: "WINDOW";
+                max-width: 640px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text { text: "Keep running in the tray when the window is closed"; color: Theme.text; font-size: Theme.font; }
+                        Hint { text: "Remapping keeps working in the background. Quit from the tray icon's menu."; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Switch {
+                            checked: Store.close-to-tray;
+                            toggled(on) => { Store.set-close-to-tray(on); }
+                        }
+                    }
+                }
+                Hint { text: "Switching to this window pauses remapping and stops any running macro or turbo, so it doubles as a panic button."; }
+            }
+
+            Card {
+                title: "PROFILES";
+                max-width: 640px;
+                Hint { text: "Share profiles or move them between PCs. Exports include every macro the profiles use. Imported profiles are added next to your own."; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button { text: "Import…"; clicked => { Store.import-profiles(); } }
+                    Button { text: "Export \"" + Store.profile-name + "\"…"; clicked => { Store.export-profile(); } }
+                    Button { text: "Export all…"; clicked => { Store.export-all(); } }
+                }
+            }
+
+            Card {
+                title: "CONFIGURATION FILE";
+                max-width: 640px;
+                Text {
+                    text: Store.config-path;
+                    wrap: word-wrap;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Open folder"; clicked => { Store.open-config-folder(); } }
+                }
+                Hint { text: "Everything is saved as you change it. The folder also holds mouse-kb-remap.log, useful when reporting a problem."; }
+            }
+
+            Card {
+                title: "ABOUT";
+                max-width: 640px;
+                Text { text: "mouse-kb-remap " + Store.version; color: Theme.text; font-size: Theme.font; }
+                Hint { text: "Open source (MIT). Works with any mouse or keyboard."; }
+                HorizontalLayout {
+                    alignment: start;
+                    Button {
+                        text: "github.com/jonathant09/mouse-kb-remap";
+                        clicked => { Store.open-link("https://github.com/jonathant09/mouse-kb-remap"); }
+                    }
+                }
+            }
+        }
+    }
+}

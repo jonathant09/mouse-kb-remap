@@ -1,7 +1,8 @@
 # Getting started
 
-mouse-kb-remap currently runs on **Windows 10 and 11**. On other systems the UI opens in
-preview mode, but remapping is disabled.
+mouse-kb-remap runs on **Windows 10 and 11**. A Linux engine is included but experimental
+(see [Troubleshooting](troubleshooting.md#linux-experimental)); on other systems the UI
+opens in preview mode with remapping disabled.
 
 ## Option A: use a prebuilt exe
 
@@ -50,12 +51,22 @@ When the app opens you'll see two profiles:
 Try it:
 
 1. Select **Default**, click the **Back** side button on the mouse drawing, choose
-   **Key**, click the box and press a key.
+   **Key**, click the box and press a key (or a combo like Ctrl + C).
 2. Switch to another app, for example Notepad, and press your mouse's back button. It now
-   types that key.
+   sends that key.
 3. Remaps never apply while mouse-kb-remap itself is focused, so you can't lock yourself out.
 
+Then try a **Turbo** on a button, or record a **macro** from the sidebar: see
+[Macros & turbo](macros.md).
+
+## Keep it running
+
+Closing the window keeps mouse-kb-remap running in the tray (notification area). To have it
+start when you sign in, open **Settings → Start with Windows** and pick **On**, or
+**On, as administrator** if you play games that run as admin.
+
 > If a game runs as administrator, Windows won't let a normal app send it input. Launch
-> with `start.bat admin` for those games. See [Troubleshooting](troubleshooting.md#remaps-dont-work-in-a-game).
+> with `start.bat admin` or use the administrator autostart. See
+> [Troubleshooting](troubleshooting.md#remaps-dont-work-in-a-game).
 
 Next: the [user guide](user-guide.md).

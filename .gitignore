@@ -2,3 +2,4 @@
 /target-*
 /dist
 *.json.tmp
+/node_modules

@@ -15,6 +15,7 @@ struct CalloutSpec {
     cy: float,    // callout centre y (mouse units)
     tx: float,    // target point on the mouse (mouse units)
     ty: float,
+    line: bool,   // draw a leader line to the target point
 }
 
 component Callout inherits Rectangle {
@@ -61,7 +62,8 @@ component Callout inherits Rectangle {
 
 // Generic top-down mouse with G HUB / Synapse style callouts.
 // Button order: 0 left, 1 right, 2 middle, 3 wheel up, 4 wheel down,
-//               5 back, 6 forward, 7 dpi
+//               5 back, 6 forward, 7 dpi, 8 tilt left, 9 tilt right
+// (keep in sync with MOUSE_ORDER in src/app.rs)
 export component MouseDiagram inherits Rectangle {
     in property <[MouseBtn]> buttons;
     in property <string> selected;
@@ -76,14 +78,16 @@ export component MouseDiagram inherits Rectangle {
     property <length> cw: 150px;
 
     property <[CalloutSpec]> specs: [
-        { idx: 0, right: false, cy: 40, tx: 55, ty: 72 },
-        { idx: 7, right: false, cy: 104, tx: 94, ty: 106 },
-        { idx: 6, right: false, cy: 167, tx: 8, ty: 167 },
-        { idx: 5, right: false, cy: 207, tx: 8, ty: 207 },
-        { idx: 3, right: true, cy: 6, tx: 109, ty: 39 },
-        { idx: 2, right: true, cy: 50, tx: 109, ty: 58 },
-        { idx: 4, right: true, cy: 94, tx: 109, ty: 77 },
-        { idx: 1, right: true, cy: 138, tx: 150, ty: 100 },
+        { idx: 0, right: false, cy: 40, tx: 55, ty: 72, line: true },
+        { idx: 7, right: false, cy: 104, tx: 94, ty: 106, line: true },
+        { idx: 6, right: false, cy: 167, tx: 8, ty: 167, line: true },
+        { idx: 5, right: false, cy: 207, tx: 8, ty: 207, line: true },
+        { idx: 8, right: false, cy: 262, tx: 0, ty: 0, line: false },
+        { idx: 3, right: true, cy: 6, tx: 109, ty: 39, line: true },
+        { idx: 2, right: true, cy: 50, tx: 109, ty: 58, line: true },
+        { idx: 4, right: true, cy: 94, tx: 109, ty: 77, line: true },
+        { idx: 1, right: true, cy: 138, tx: 150, ty: 100, line: true },
+        { idx: 9, right: true, cy: 182, tx: 0, ty: 0, line: false },
     ];
 
     pure function is-sel(i: int) -> bool {
@@ -178,7 +182,7 @@ export component MouseDiagram inherits Rectangle {
             border-radius: 9 * root.s;
             background: Theme.input-bg;
             border-width: 1px;
-            border-color: root.is-sel(2) || root.is-sel(3) || root.is-sel(4) ? Theme.accent : Theme.device-stroke;
+            border-color: root.is-sel(2) || root.is-sel(3) || root.is-sel(4) || root.is-sel(8) || root.is-sel(9) ? Theme.accent : Theme.device-stroke;
             clip: true;
             Rectangle {
                 y: root.is-sel(3) ? 0 : root.is-sel(2) ? parent.height / 3 : parent.height * 2 / 3;
@@ -274,6 +278,7 @@ export component MouseDiagram inherits Rectangle {
 
     // ---- leader lines (drawn over the shell, G HUB style) ------------------
     for spec in root.specs: Path {
+        visible: spec.line;
         x: 0;
         y: 0;
         width: root.width;
@@ -293,6 +298,7 @@ export component MouseDiagram inherits Rectangle {
 
     // Target dots drawn above the mouse
     for spec in root.specs: Rectangle {
+        visible: spec.line;
         x: root.mx + spec.tx * root.s - 3.5px;
         y: root.my + spec.ty * root.s - 3.5px;
         width: 7px;

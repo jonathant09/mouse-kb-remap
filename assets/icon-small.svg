@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Simplified icon for 16-24 px: thicker strokes, no arrow. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8ea5ff"/>
+      <stop offset="0.55" stop-color="#5a74f2"/>
+      <stop offset="1" stop-color="#3a52d6"/>
+    </linearGradient>
+    <mask id="cut">
+      <rect width="256" height="256" fill="#fff"/>
+      <rect x="112" y="110" width="124" height="124" rx="34" fill="#000"/>
+    </mask>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="52" fill="url(#tile)"/>
+
+  <g mask="url(#cut)">
+    <rect x="34" y="26" width="112" height="170" rx="56" fill="none" stroke="#ffffff" stroke-width="26"/>
+    <rect x="78" y="62" width="24" height="46" rx="12" fill="#ffffff"/>
+  </g>
+
+  <rect x="128" y="126" width="102" height="102" rx="26" fill="#ffffff"/>
+  <rect x="150" y="146" width="58" height="52" rx="12" fill="#5a74f2" opacity="0.35"/>
+</svg>

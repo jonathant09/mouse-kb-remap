@@ -1,0 +1,99 @@
+// Controls that talk to the Store directly.
+
+import { Theme } from "theme.slint";
+import { Store } from "store.slint";
+
+// Click, then press a key or combo. While waiting, the engine swallows the
+// next key press and reports it (so Win, Alt+Tab, PrintScreen etc. work).
+export component CaptureBox inherits Rectangle {
+    in property <string> target;   // "binding", "turbo", "step"
+    in property <string> value;
+    in property <string> placeholder: "Click, then press a key";
+    property <bool> active: Store.capturing == root.target;
+
+    height: 40px;
+    border-radius: Theme.radius;
+    background: Theme.input-bg;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : (ta.has-hover ? Theme.border-strong : Theme.border);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.active ? "Press a key or combo…" : root.value != "" ? root.value : root.placeholder;
+            color: root.active ? Theme.accent : root.value != "" ? Theme.text-strong : Theme.text-faint;
+            font-size: root.value != "" && !root.active ? Theme.font-md : Theme.font;
+            font-weight: root.value != "" && !root.active ? 600 : 400;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    if root.active: Text {
+        x: parent.width - self.width - 10px;
+        text: "click to cancel";
+        color: Theme.text-faint;
+        font-size: Theme.font-xs;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            if root.active {
+                Store.cancel-capture();
+            } else {
+                Store.start-capture(root.target);
+            }
+        }
+    }
+}
+
+// Ctrl / Shift / Alt / Win toggles.
+export component ModifierChips inherits HorizontalLayout {
+    in property <string> target;
+    in property <int> mods;
+    spacing: 4px;
+
+    pure function has(bit: int) -> bool {
+        Math.mod(Math.floor(root.mods / bit), 2) == 1
+    }
+
+    for m in [{ name: "Ctrl", bit: 1 }, { name: "Shift", bit: 2 }, { name: "Alt", bit: 4 }, { name: "Win", bit: 8 }]: Rectangle {
+        horizontal-stretch: 1;
+        height: 24px;
+        border-radius: Theme.radius-sm;
+        background: root.has(m.bit) ? Theme.accent-soft : (mta.has-hover ? Theme.control-hover : Theme.input-bg);
+        border-width: 1px;
+        border-color: root.has(m.bit) ? Theme.accent : transparent;
+        Text {
+            text: (root.has(m.bit) ? "✓ " : "+ ") + m.name;
+            font-size: Theme.font-sm;
+            color: root.has(m.bit) ? Theme.accent : Theme.text-muted;
+            font-weight: root.has(m.bit) ? 600 : 400;
+        }
+        mta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { Store.toggle-mod(root.target, m.bit); }
+        }
+    }
+}
+
+// "Label ........ [field]" row.
+export component FormRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <length> field-width: 110px;
+    spacing: 8px;
+    Text {
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        width: root.field-width;
+        @children
+    }
+}

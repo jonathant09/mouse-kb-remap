@@ -1,0 +1,194 @@
+// App state shared by every view. Rust owns the data: it sets these
+// properties after every change (see `refresh()` in src/app.rs) and handles
+// the callbacks. Components read from here instead of passing props down.
+
+import { MouseBtn } from "mouse.slint";
+import { KeyCap } from "keyboard.slint";
+
+export struct ProfileItem {
+    name: string,
+    apps: string,   // summary line, e.g. "GenshinImpact.exe"
+    live: bool,     // currently active because its app is focused
+    count: int,     // number of bindings
+}
+
+export struct MacroItem {
+    name: string,
+    summary: string, // "6 steps · used by 2 profiles"
+}
+
+export struct BindingRow {
+    input-id: string,
+    input: string,
+    action: string,
+    layer: int,      // 0 base, 1 shift
+}
+
+export struct StepRow {
+    kind: string,    // "Key down"
+    value: string,   // "A"
+    delay: bool,     // drawn lighter / indented
+}
+
+export global Store {
+    // ---- navigation ------------------------------------------------------------
+    in-out property <int> view;            // 0 profile, 1 macro, 2 settings
+    in property <[ProfileItem]> profiles;
+    in property <int> selected-profile;
+    in property <[MacroItem]> macros;
+    in property <int> selected-macro: -1;
+    in property <string> version;
+
+    // ---- profile editor ----------------------------------------------------------
+    in property <string> profile-name;
+    in property <[string]> profile-apps;
+    in property <[string]> recent-apps;
+    in-out property <int> device-tab;      // 0 mouse, 1 keyboard
+    in property <int> layer;               // 0 base, 1 shift layer
+    in property <string> shift-hint;       // how to reach the shift layer
+    in property <bool> full-keyboard;
+    in property <[KeyCap]> keys;
+    in property <[MouseBtn]> mouse-buttons;
+    in property <[BindingRow]> bindings;
+
+    // ---- inspector ---------------------------------------------------------------------
+    in-out property <int> inspector-tab;   // 0 selected input, 1 all bindings
+    in property <string> selected-input;
+    in property <string> selected-label;
+    in property <string> selected-detail;
+    in property <bool> selected-supported: true;
+    in property <int> selected-kind;       // index into kind-names
+    in property <string> inherited-value;
+    in property <[string]> kind-names: ["Default", "Key", "Mouse", "Macro", "Turbo", "Text", "Launch", "Media", "Shift layer", "Sensitivity", "Off"];
+
+    in property <string> key-value;        // "Ctrl + C"
+    in property <int> key-mods;            // modifier bits: 1 ctrl, 2 shift, 4 alt, 8 win
+    in property <int> shortcut-current: -1;
+    in property <[string]> shortcut-names;
+    in property <int> mouse-current: -1;
+    in property <[string]> mouse-names;
+    in property <int> media-current: -1;
+    in property <[string]> media-names;
+
+    in property <[string]> macro-names;
+    in property <int> macro-current: -1;
+    in property <int> macro-mode;          // 0 once, 1 repeat, 2 while held, 3 toggle
+    in property <string> macro-count;
+    in property <string> macro-gap;
+
+    in property <bool> turbo-is-mouse;
+    in property <string> turbo-key;
+    in property <int> turbo-mods;
+    in property <int> turbo-mouse: -1;
+    in property <string> turbo-interval;
+    in property <string> turbo-hold;
+    in property <string> turbo-delay;
+    in property <bool> turbo-toggle;
+    in property <string> turbo-rate;
+
+    in property <string> text-value;
+    in property <string> text-delay;
+    in property <string> launch-path;
+    in property <string> launch-args;
+    in property <int> sens-speed: 10;
+
+    // Which capture box is waiting for a key ("" when none).
+    in property <string> capturing;
+
+    // ---- macro editor ----------------------------------------------------------
+    in property <string> macro-name;
+    in property <[StepRow]> steps;
+    in property <int> selected-step: -1;
+    in property <bool> recording;
+    in property <string> macro-info;       // "Used by: …"
+    in property <[string]> step-kind-names: ["Key press", "Key down", "Key up", "Mouse click", "Mouse down", "Mouse up", "Delay", "Text"];
+    in property <int> step-kind: -1;
+    in property <string> step-key;
+    in property <int> step-mouse: -1;
+    in property <string> step-ms;
+    in property <string> step-text;
+
+    // ---- settings ------------------------------------------------------------------
+    in property <int> autostart;           // 0 off, 1 on, 2 on as admin
+    in property <bool> autostart-supported;
+    in property <bool> close-to-tray;
+    in property <string> config-path;
+    in property <string> notice;           // result of the last settings action
+    in property <bool> notice-error;
+
+    // ---- status bar ----------------------------------------------------------------
+    in property <string> focused-app;
+    in property <string> live-profile;
+    in property <bool> elevation-warning;
+    in property <bool> self-elevated;
+    in property <bool> engine-enabled: true;
+    in property <bool> engine-supported: true;
+
+    // ---- callbacks (handled in Rust) ----------------------------------------
+    callback open-settings();
+    callback select-profile(int);
+    callback add-profile();
+    callback duplicate-profile();
+    callback delete-profile();
+    callback rename-profile(string);
+    callback add-app(string);
+    callback remove-app(string);
+    callback select-layer(int);
+    callback set-full-keyboard(bool);
+
+    callback select-input(string);
+    callback select-binding(string, int);  // input id, layer
+    callback clear-binding(string, int);
+    callback set-kind(int);
+    callback start-capture(string);        // "binding", "turbo", "step", "detect"
+    callback cancel-capture();
+    callback ui-key(string, bool, int);    // window capture: key text, released, modifier bits
+    callback toggle-mod(string, int);      // target ("binding"/"turbo"), bit
+    callback set-shortcut(int);
+    callback set-mouse-target(int);
+    callback set-media(int);
+    callback set-macro-choice(int);
+    callback set-macro-mode(int);
+    callback set-macro-number(string, string); // field ("count"/"gap"), value
+    callback new-macro-for-binding();
+    callback set-turbo-output(bool);       // true = mouse button, false = key
+    callback set-turbo-mouse(int);
+    callback set-turbo-number(string, string); // field ("interval"/"hold"/"delay"), value
+    callback set-turbo-toggle(bool);
+    callback set-text(string);
+    callback set-text-delay(string);
+    callback set-launch(string, string);
+    callback browse-launch();
+    callback set-sens(int);
+
+    callback select-macro(int);
+    callback add-macro();
+    callback duplicate-macro();
+    callback delete-macro();
+    callback rename-macro(string);
+    callback toggle-record();
+    callback clear-steps();
+    callback remove-delays();
+    callback set-all-delays(string);
+    callback add-step(int);                // index into step-kind-names
+    callback select-step(int);
+    callback set-step-kind(int);
+    callback set-step-mouse(int);
+    callback set-step-number(string);
+    callback set-step-text(string);
+    callback move-step(int);               // -1 up, +1 down
+    callback duplicate-step();
+    callback delete-step();
+
+    callback set-autostart(int);
+    callback set-close-to-tray(bool);
+    callback import-profiles();
+    callback export-profile();
+    callback export-all();
+    callback open-config-folder();
+    callback open-link(string);
+
+    callback toggle-enabled();
+    callback set-theme(bool);
+
+}

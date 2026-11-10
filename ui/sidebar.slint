@@ -1,0 +1,178 @@
+import { Theme } from "theme.slint";
+import { Store, ProfileItem, MacroItem } from "store.slint";
+import { Divider, SectionLabel, Segmented } from "widgets.slint";
+
+component SideRow inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> selected;
+    in property <bool> live;
+    callback clicked;
+
+    height: 44px;
+    border-radius: Theme.radius;
+    background: root.selected ? Theme.selected-bg : (ta.has-hover ? Theme.control-hover.with-alpha(0.6) : transparent);
+    animate background { duration: 90ms; }
+
+    // Selection marker
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.selected ? 20px : 0px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+        animate height { duration: 120ms; easing: ease-out; }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 8px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                font-size: Theme.font;
+                font-weight: root.selected ? 600 : 500;
+                color: root.selected ? Theme.text-strong : Theme.text;
+                overflow: elide;
+            }
+            if root.subtitle != "": Text {
+                text: root.subtitle;
+                font-size: Theme.font-xs;
+                color: Theme.text-faint;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            if root.live: Rectangle {
+                width: 38px;
+                height: 16px;
+                border-radius: 8px;
+                background: Theme.success.with-alpha(0.15);
+                Text {
+                    text: "LIVE";
+                    font-size: 9px;
+                    font-weight: 700;
+                    letter-spacing: 0.6px;
+                    color: Theme.success;
+                }
+            }
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component SectionHeader inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> tooltip;
+    callback add;
+
+    padding-left: 4px;
+    padding-top: 4px;
+    alignment: space-between;
+    SectionLabel { text: root.text; vertical-alignment: center; }
+    Rectangle {
+        width: 22px;
+        height: 22px;
+        border-radius: Theme.radius-sm;
+        background: add-ta.has-hover ? Theme.control-hover : transparent;
+        Text { text: "+"; font-size: 16px; color: add-ta.has-hover ? Theme.text-strong : Theme.text-muted; }
+        add-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.add(); }
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    width: 232px;
+    background: Theme.sidebar-bg;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+
+        // Brand
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-bottom: 8px;
+            spacing: 9px;
+            Image {
+                width: 26px;
+                height: 26px;
+                source: @image-url("../assets/icon-64.png");
+            }
+            VerticalLayout {
+                alignment: center;
+                Text { text: "mouse-kb-remap"; font-size: Theme.font-md; font-weight: 700; color: Theme.text-strong; }
+                Text { text: "v" + Store.version + " · input remapper"; font-size: Theme.font-xs; color: Theme.text-faint; }
+            }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                spacing: 2px;
+
+                SectionHeader {
+                    text: "PROFILES";
+                    add => { Store.add-profile(); }
+                }
+                for p[i] in Store.profiles: SideRow {
+                    title: p.name;
+                    subtitle: p.apps;
+                    live: p.live;
+                    selected: Store.view == 0 && i == Store.selected-profile;
+                    clicked => { Store.select-profile(i); }
+                }
+
+                Rectangle { height: 10px; }
+                SectionHeader {
+                    text: "MACROS";
+                    add => { Store.add-macro(); }
+                }
+                if Store.macros.length == 0: Text {
+                    x: 4px;
+                    text: "Record keys and clicks, then bind the macro to any button.";
+                    wrap: word-wrap;
+                    font-size: Theme.font-xs;
+                    color: Theme.text-faint;
+                }
+                for m[i] in Store.macros: SideRow {
+                    title: m.name;
+                    subtitle: m.summary;
+                    selected: Store.view == 1 && i == Store.selected-macro;
+                    clicked => { Store.select-macro(i); }
+                }
+            }
+        }
+
+        Divider { }
+        SideRow {
+            height: 34px;
+            title: "Settings";
+            selected: Store.view == 2;
+            clicked => { Store.open-settings(); }
+        }
+        HorizontalLayout {
+            padding-top: 2px;
+            alignment: space-between;
+            Text { text: "Theme"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Segmented {
+                width: 120px;
+                items: ["Dark", "Light"];
+                current: Theme.dark ? 0 : 1;
+                selected(i) => { Store.set-theme(i == 0); }
+            }
+        }
+    }
+}

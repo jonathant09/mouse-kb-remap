@@ -1,91 +1,14 @@
 import { Theme } from "theme.slint";
-import { Button, Chip, Divider, Dot, Field, SectionLabel, Segmented } from "widgets.slint";
-import { MouseBtn, MouseDiagram } from "mouse.slint";
-import { KeyCap, KeyboardDiagram } from "keyboard.slint";
+import { Store, ProfileItem, MacroItem, BindingRow, StepRow } from "store.slint";
+import { Dot } from "widgets.slint";
+import { MouseBtn } from "mouse.slint";
+import { KeyCap } from "keyboard.slint";
+import { Sidebar } from "sidebar.slint";
+import { ProfileView } from "profile-view.slint";
+import { MacroView } from "macro-view.slint";
+import { SettingsView } from "settings-view.slint";
 
-export { Theme, MouseBtn, KeyCap }
-
-export struct ProfileItem {
-    name: string,
-    apps: string,   // summary line, e.g. "GenshinImpact.exe"
-    live: bool,     // currently active because its app is focused
-    count: int,     // number of bindings
-}
-
-export struct BindingRow {
-    input-id: string,
-    input: string,
-    action: string,
-}
-
-struct MouseTarget { id: string, label: string }
-
-component ProfileRow inherits Rectangle {
-    in property <ProfileItem> item;
-    in property <bool> selected;
-    in property <bool> is-default;
-    callback clicked;
-
-    height: 44px;
-    border-radius: Theme.radius;
-    background: root.selected ? Theme.selected-bg : (ta.has-hover ? Theme.control-hover.with-alpha(0.6) : transparent);
-    animate background { duration: 90ms; }
-
-    // Selection marker
-    Rectangle {
-        x: 0;
-        y: (parent.height - self.height) / 2;
-        width: 3px;
-        height: root.selected ? 20px : 0px;
-        border-radius: 1.5px;
-        background: Theme.accent;
-        animate height { duration: 120ms; easing: ease-out; }
-    }
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 10px;
-        spacing: 8px;
-        VerticalLayout {
-            alignment: center;
-            spacing: 2px;
-            Text {
-                text: root.item.name;
-                font-size: Theme.font;
-                font-weight: root.selected ? 600 : 500;
-                color: root.selected ? Theme.text-strong : Theme.text;
-                overflow: elide;
-            }
-            Text {
-                text: root.item.apps;
-                font-size: Theme.font-xs;
-                color: Theme.text-faint;
-                overflow: elide;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            if root.item.live: Rectangle {
-                width: 38px;
-                height: 16px;
-                border-radius: 8px;
-                background: Theme.success.with-alpha(0.15);
-                Text {
-                    text: "LIVE";
-                    font-size: 9px;
-                    font-weight: 700;
-                    letter-spacing: 0.6px;
-                    color: Theme.success;
-                }
-            }
-        }
-    }
-
-    ta := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.clicked(); }
-    }
-}
+export { Theme, Store, MouseBtn, KeyCap, ProfileItem, MacroItem, BindingRow, StepRow }
 
 component StatusItem inherits HorizontalLayout {
     in property <string> label;
@@ -93,11 +16,71 @@ component StatusItem inherits HorizontalLayout {
     in property <color> value-color: Theme.text;
     spacing: 5px;
     Text { text: root.label; color: Theme.text-faint; font-size: Theme.font-sm; vertical-alignment: center; }
-    Text { text: root.value; color: root.value-color; font-size: Theme.font-sm; vertical-alignment: center; }
+    Text { text: root.value; color: root.value-color; font-size: Theme.font-sm; vertical-alignment: center; overflow: elide; }
+}
+
+component StatusBar inherits Rectangle {
+    height: 28px;
+    background: Theme.statusbar-bg;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 18px;
+
+        // Engine on/off
+        Rectangle {
+            width: eng-row.preferred-width + 12px;
+            border-radius: Theme.radius-sm;
+            background: eng-ta.has-hover ? Theme.control-hover : transparent;
+            eng-row := HorizontalLayout {
+                x: 6px;
+                spacing: 6px;
+                Dot {
+                    y: (parent.height - self.height) / 2;
+                    tint: !Store.engine-supported ? Theme.text-faint : Store.engine-enabled ? Theme.success : Theme.warning;
+                }
+                Text {
+                    text: !Store.engine-supported ? "Engine unavailable on this OS (UI preview)"
+                        : Store.engine-enabled ? "Remapping on" : "Remapping paused";
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+            }
+            eng-ta := TouchArea {
+                enabled: Store.engine-supported;
+                mouse-cursor: pointer;
+                clicked => { Store.toggle-enabled(); }
+            }
+        }
+
+        StatusItem { label: "Focused"; value: Store.focused-app != "" ? Store.focused-app : "—"; }
+        StatusItem { label: "Active profile"; value: Store.live-profile; value-color: Theme.accent; }
+
+        if Store.elevation-warning: HorizontalLayout {
+            spacing: 6px;
+            Dot { y: (parent.height - self.height) / 2; tint: Theme.warning; }
+            Text {
+                text: "Focused app runs as admin. Run this app as admin to remap it.";
+                color: Theme.warning;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+        Text {
+            text: Store.self-elevated ? "Admin" : "Standard user";
+            color: Theme.text-faint;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
 }
 
 export component AppWindow inherits Window {
     title: "mouse-kb-remap";
+    icon: @image-url("../assets/icon-64.png");
     preferred-width: 1220px;
     preferred-height: 760px;
     min-width: 1080px;
@@ -105,539 +88,66 @@ export component AppWindow inherits Window {
     background: Theme.window-bg;
     default-font-size: 12px;
 
-    // ---- state pushed from Rust ----------------------------------------------
-    in property <[ProfileItem]> profiles;
-    in property <int> selected-profile;
-    in property <string> profile-name;
-    in property <[string]> profile-apps;
-    in property <[string]> recent-apps;
-    in property <[KeyCap]> keys;
-    in property <[MouseBtn]> mouse-buttons;
-    in property <[BindingRow]> bindings;
-
-    in property <string> selected-input;
-    in property <string> selected-label;
-    in property <string> selected-detail;
-    in property <bool> selected-supported: true;
-    in property <int> selected-kind;        // 0 default, 1 key, 2 mouse, 3 disabled
-    in property <string> selected-value;    // key label or mouse button id
-    in property <string> inherited-value;   // what Default does with this input
-
-    in property <string> focused-app;
-    in property <string> live-profile;
-    in property <bool> elevation-warning;
-    in property <bool> self-elevated;
-    in property <bool> engine-enabled: true;
-    in property <bool> engine-supported: true;
-    in property <string> config-path;
-
-    in-out property <int> device-tab: 0;    // 0 mouse, 1 keyboard
-
-    // ---- callbacks handled in Rust --------------------------------------------
-    callback select-profile(int);
-    callback add-profile();
-    callback delete-profile();
-    callback rename-profile(string);
-    callback add-app(string);
-    callback remove-app(string);
-    callback select-input(string);
-    callback set-kind(int);
-    callback key-captured(string);
-    callback set-mouse-target(string);
-    callback clear-binding(string);
-    callback toggle-enabled();
-    callback set-theme(bool);
-    callback engine-focus(string, bool, bool); // exe, is-self, elevation-blocked
-
-    property <[MouseTarget]> mouse-targets: [
-        { id: "left", label: "Left click" },
-        { id: "right", label: "Right click" },
-        { id: "middle", label: "Wheel click" },
-        { id: "back", label: "Back" },
-        { id: "forward", label: "Forward" },
-        { id: "wheel_up", label: "Scroll up" },
-        { id: "wheel_down", label: "Scroll down" },
-    ];
-    property <string> new-app;
-
-    // Keep the editable title in sync when switching profiles.
-    changed profile-name => { name-input.text = root.profile-name; }
-
     VerticalLayout {
         HorizontalLayout {
             vertical-stretch: 1;
-
-            // ===================================================================
-            // Sidebar
-            // ===================================================================
-            Rectangle {
-                width: 232px;
-                background: Theme.sidebar-bg;
-
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 6px;
-
-                    // Brand
-                    HorizontalLayout {
-                        padding-left: 4px;
-                        padding-bottom: 10px;
-                        spacing: 9px;
-                        Rectangle {
-                            width: 22px;
-                            height: 22px;
-                            border-radius: Theme.radius;
-                            background: Theme.accent;
-                            // tiny abstract "key" glyph
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 2px;
-                                border-width: 2px;
-                                border-color: Theme.on-accent;
-                            }
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Text { text: "mouse-kb-remap"; font-size: Theme.font-md; font-weight: 700; color: Theme.text-strong; }
-                            Text { text: "v0.1 · input remapper"; font-size: Theme.font-xs; color: Theme.text-faint; }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        padding-left: 4px;
-                        alignment: space-between;
-                        SectionLabel { text: "PROFILES"; vertical-alignment: center; }
-                        Rectangle {
-                            width: 22px;
-                            height: 22px;
-                            border-radius: Theme.radius-sm;
-                            background: add-ta.has-hover ? Theme.control-hover : transparent;
-                            Text { text: "+"; font-size: 16px; color: add-ta.has-hover ? Theme.text-strong : Theme.text-muted; }
-                            add-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { root.add-profile(); }
-                            }
-                        }
-                    }
-
-                    Flickable {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            alignment: start;
-                            spacing: 2px;
-                            for p[i] in root.profiles: ProfileRow {
-                                item: p;
-                                selected: i == root.selected-profile;
-                                is-default: i == 0;
-                                clicked => { root.select-profile(i); }
-                            }
-                        }
-                    }
-
-                    Divider { }
-                    HorizontalLayout {
-                        padding-top: 4px;
-                        alignment: space-between;
-                        Text { text: "Theme"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
-                        Segmented {
-                            width: 120px;
-                            items: ["Dark", "Light"];
-                            current: Theme.dark ? 0 : 1;
-                            selected(i) => { root.set-theme(i == 0); }
-                        }
-                    }
-                }
-            }
+            Sidebar { }
             Rectangle { width: 1px; background: Theme.border; }
-
-            // ===================================================================
-            // Main area
-            // ===================================================================
-            VerticalLayout {
-                horizontal-stretch: 1;
-
-                // ---- Profile header ------------------------------------------------
-                Rectangle {
-                    background: Theme.window-bg;
-                    VerticalLayout {
-                        padding-left: 20px;
-                        padding-right: 20px;
-                        padding-top: 16px;
-                        padding-bottom: 14px;
-                        spacing: 10px;
-
-                        HorizontalLayout {
-                            spacing: 10px;
-                            name-input := TextInput {
-                                text: root.profile-name;
-                                font-size: Theme.font-lg;
-                                font-weight: 700;
-                                color: Theme.text-strong;
-                                single-line: true;
-                                read-only: root.selected-profile == 0;
-                                vertical-alignment: center;
-                                horizontal-stretch: 1;
-                                selection-background-color: Theme.accent-soft;
-                                accepted => { root.rename-profile(self.text); }
-                                edited => { root.rename-profile(self.text); }
-                            }
-                            Segmented {
-                                items: ["Mouse", "Keyboard"];
-                                current: root.device-tab;
-                                item-min-width: 84px;
-                                selected(i) => { root.device-tab = i; }
-                            }
-                            if root.selected-profile != 0: Button {
-                                text: "Delete";
-                                danger: true;
-                                clicked => { root.delete-profile(); }
-                            }
-                        }
-
-                        if root.selected-profile == 0: Text {
-                            text: "Used when no other profile matches the focused app. Other profiles inherit these bindings.";
-                            color: Theme.text-muted;
-                            font-size: Theme.font-sm;
-                        }
-                        if root.selected-profile != 0: HorizontalLayout {
-                            spacing: 6px;
-                            alignment: start;
-                            Text { text: "Activates for"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
-                            for app in root.profile-apps: Chip {
-                                text: app;
-                                removable: true;
-                                active: true;
-                                remove => { root.remove-app(app); }
-                            }
-                            Field {
-                                width: 170px;
-                                height: 22px;
-                                placeholder: "add app, e.g. game.exe";
-                                text <=> root.new-app;
-                                accepted(t) => {
-                                    root.add-app(t);
-                                    root.new-app = "";
-                                }
-                            }
-                            if root.recent-apps.length > 0: Text {
-                                text: "Recent:";
-                                color: Theme.text-faint;
-                                font-size: Theme.font-sm;
-                                vertical-alignment: center;
-                            }
-                            for app in root.recent-apps: Chip {
-                                text: "+ " + app;
-                                clicked => { root.add-app(app); }
-                            }
-                        }
-                    }
-                }
-                Divider { }
-
-                HorizontalLayout {
-                    vertical-stretch: 1;
-
-                    // ---- Device canvas -------------------------------------------
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        background: Theme.window-bg;
-                        clip: true;
-
-                        // Faint blueprint grid (a few dozen 1px lines: cheap to draw)
-                        for i in 48: Rectangle {
-                            x: i * 32px;
-                            width: 1px;
-                            background: Theme.canvas-dot;
-                        }
-                        for i in 32: Rectangle {
-                            y: i * 32px;
-                            height: 1px;
-                            background: Theme.canvas-dot;
-                        }
-
-                        if root.device-tab == 0: MouseDiagram {
-                            width: parent.width;
-                            height: parent.height;
-                            buttons: root.mouse-buttons;
-                            selected: root.selected-input;
-                            select(id) => { root.select-input(id); }
-                        }
-                        if root.device-tab == 1: KeyboardDiagram {
-                            width: parent.width;
-                            height: parent.height;
-                            keys: root.keys;
-                            selected: root.selected-input;
-                            select(id) => { root.select-input(id); }
-                        }
-
-                        // Legend
-                        HorizontalLayout {
-                            x: 16px;
-                            y: parent.height - 30px;
-                            width: self.preferred-width;
-                            height: 16px;
-                            spacing: 14px;
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Rectangle { width: 10px; height: 10px; y: 3px; border-radius: 2px; border-width: 1px; border-color: Theme.accent; background: Theme.accent-soft; }
-                                Text { text: "Remapped"; font-size: Theme.font-xs; color: Theme.text-faint; vertical-alignment: center; }
-                            }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Rectangle { width: 10px; height: 10px; y: 3px; border-radius: 2px; background: Theme.accent; }
-                                Text { text: "Selected"; font-size: Theme.font-xs; color: Theme.text-faint; vertical-alignment: center; }
-                            }
-                        }
-                    }
-                    Rectangle { width: 1px; background: Theme.border; }
-
-                    // ---- Inspector -----------------------------------------------
-                    Rectangle {
-                        width: 300px;
-                        background: Theme.panel-bg;
-
-                        VerticalLayout {
-                            padding: 16px;
-                            spacing: 12px;
-
-                            SectionLabel { text: "SELECTED INPUT"; }
-                            if root.selected-input == "": Text {
-                                vertical-stretch: 0;
-                                text: "Click a button or key on the diagram to remap it.";
-                                color: Theme.text-muted;
-                                font-size: Theme.font;
-                                wrap: word-wrap;
-                            }
-                            if root.selected-input != "": VerticalLayout {
-                                vertical-stretch: 0;
-                                spacing: 2px;
-                                Text { text: root.selected-label; font-size: Theme.font-md; font-weight: 700; color: Theme.text-strong; }
-                                Text { text: root.selected-detail; font-size: Theme.font-sm; color: Theme.text-faint; }
-                            }
-
-                            if root.selected-input != "" && !root.selected-supported: Rectangle {
-                                vertical-stretch: 0;
-                                border-radius: Theme.radius;
-                                background: Theme.input-bg;
-                                border-width: 1px;
-                                border-color: Theme.border;
-                                VerticalLayout {
-                                    padding: 10px;
-                                    Text {
-                                        text: "This button is handled by the mouse's own firmware and never reaches Windows, so it can't be remapped in software.";
-                                        wrap: word-wrap;
-                                        color: Theme.text-muted;
-                                        font-size: Theme.font-sm;
-                                    }
-                                }
-                            }
-
-                            if root.selected-input != "" && root.selected-supported: VerticalLayout {
-                                vertical-stretch: 0;
-                                spacing: 10px;
-                                Divider { }
-                                SectionLabel { text: "ACTION"; }
-                                Segmented {
-                                    items: ["Default", "Key", "Mouse", "Off"];
-                                    current: root.selected-kind;
-                                    selected(i) => { root.set-kind(i); }
-                                }
-
-                                if root.selected-kind == 0: Text {
-                                    text: root.inherited-value != "" ? "Inherits from Default: " + root.inherited-value : "Passes through unchanged.";
-                                    color: Theme.text-muted;
-                                    font-size: Theme.font-sm;
-                                    wrap: word-wrap;
-                                }
-
-                                if root.selected-kind == 1: VerticalLayout {
-                                    vertical-stretch: 0;
-                                    spacing: 6px;
-                                    Text { text: "Sends key"; color: Theme.text-muted; font-size: Theme.font-sm; }
-                                    capture := FocusScope {
-                                        height: 40px;
-                                        key-pressed(event) => {
-                                            root.key-captured(event.text);
-                                            self.clear-focus();
-                                            accept
-                                        }
-                                        Rectangle {
-                                            border-radius: Theme.radius;
-                                            background: Theme.input-bg;
-                                            border-width: 1px;
-                                            border-color: capture.has-focus ? Theme.accent : Theme.border;
-                                            HorizontalLayout {
-                                                padding-left: 12px;
-                                                padding-right: 12px;
-                                                Text {
-                                                    text: capture.has-focus ? "Press any key…"
-                                                        : root.selected-value != "" ? root.selected-value : "Click, then press a key";
-                                                    color: capture.has-focus ? Theme.accent : root.selected-value != "" ? Theme.text-strong : Theme.text-faint;
-                                                    font-size: root.selected-value != "" && !capture.has-focus ? Theme.font-md : Theme.font;
-                                                    font-weight: root.selected-value != "" ? 600 : 400;
-                                                    vertical-alignment: center;
-                                                }
-                                            }
-                                            TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { capture.focus(); }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if root.selected-kind == 2: VerticalLayout {
-                                    vertical-stretch: 0;
-                                    spacing: 2px;
-                                    Text { text: "Sends mouse input"; color: Theme.text-muted; font-size: Theme.font-sm; }
-                                    for t in root.mouse-targets: Rectangle {
-                                        height: 28px;
-                                        border-radius: Theme.radius-sm;
-                                        background: t.id == root.selected-value ? Theme.accent-soft : (mt-ta.has-hover ? Theme.control-hover : transparent);
-                                        border-width: 1px;
-                                        border-color: t.id == root.selected-value ? Theme.accent : transparent;
-                                        HorizontalLayout {
-                                            padding-left: 10px;
-                                            Text {
-                                                text: t.label;
-                                                vertical-alignment: center;
-                                                color: t.id == root.selected-value ? Theme.accent : Theme.text;
-                                                font-size: Theme.font;
-                                            }
-                                        }
-                                        mt-ta := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.set-mouse-target(t.id); }
-                                        }
-                                    }
-                                }
-
-                                if root.selected-kind == 3: Text {
-                                    text: "This input is blocked while the profile is active.";
-                                    color: Theme.text-muted;
-                                    font-size: Theme.font-sm;
-                                    wrap: word-wrap;
-                                }
-                            }
-
-                            Divider { }
-                            HorizontalLayout {
-                                vertical-stretch: 0;
-                                SectionLabel { text: "PROFILE BINDINGS"; }
-                                Text {
-                                    text: root.bindings.length;
-                                    font-size: Theme.font-xs;
-                                    color: Theme.text-faint;
-                                    horizontal-alignment: right;
-                                }
-                            }
-
-                            Flickable {
-                                vertical-stretch: 1;
-                                VerticalLayout {
-                                    alignment: start;
-                                    spacing: 1px;
-                                    if root.bindings.length == 0: Text {
-                                        text: "No bindings yet.";
-                                        color: Theme.text-faint;
-                                        font-size: Theme.font-sm;
-                                    }
-                                    for b in root.bindings: Rectangle {
-                                        height: 30px;
-                                        border-radius: Theme.radius-sm;
-                                        background: b.input-id == root.selected-input ? Theme.selected-bg : (row-ta.has-hover ? Theme.control-hover : transparent);
-                                        row-ta := TouchArea {
-                                            mouse-cursor: pointer;
-                                            clicked => { root.select-input(b.input-id); }
-                                        }
-                                        HorizontalLayout {
-                                            padding-left: 8px;
-                                            padding-right: 4px;
-                                            spacing: 6px;
-                                            Text { text: b.input; color: Theme.text; font-size: Theme.font; vertical-alignment: center; width: 96px; overflow: elide; }
-                                            Text { text: "→"; color: Theme.text-faint; font-size: Theme.font; vertical-alignment: center; }
-                                            Text { text: b.action; color: Theme.accent; font-size: Theme.font; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                                            Rectangle {
-                                                width: 22px;
-                                                border-radius: 2px;
-                                                background: del-ta.has-hover ? Theme.control-hover : transparent;
-                                                Text { text: "×"; font-size: Theme.font-md; color: del-ta.has-hover ? Theme.danger : Theme.text-faint; }
-                                                del-ta := TouchArea {
-                                                    mouse-cursor: pointer;
-                                                    clicked => { root.clear-binding(b.input-id); }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Explicit max-width: otherwise a view whose content has a bounded
+            // width would make the window shrink to fit it.
+            if Store.view == 0: ProfileView { horizontal-stretch: 1; max-width: 100000px; }
+            if Store.view == 1: MacroView { horizontal-stretch: 1; max-width: 100000px; }
+            if Store.view == 2: SettingsView { horizontal-stretch: 1; max-width: 100000px; }
         }
+        StatusBar { }
+    }
 
-        // =======================================================================
-        // Status bar
-        // =======================================================================
-        Rectangle {
-            height: 28px;
-            background: Theme.statusbar-bg;
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 18px;
+    // Key capture through the window. The engine normally captures keys in
+    // its input hook first (and swallows them); this catches anything it
+    // doesn't, and is the only path where there is no engine.
+    if Store.capturing != "": FocusScope {
+        width: 0px;
+        height: 0px;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            Store.ui-key(event.text, false, root.mod-bits(event.modifiers));
+            accept
+        }
+        key-released(event) => {
+            Store.ui-key(event.text, true, root.mod-bits(event.modifiers));
+            accept
+        }
+    }
 
-                // Engine on/off
-                Rectangle {
-                    width: eng-row.preferred-width + 12px;
-                    border-radius: Theme.radius-sm;
-                    background: eng-ta.has-hover ? Theme.control-hover : transparent;
-                    eng-row := HorizontalLayout {
-                        x: 6px;
-                        spacing: 6px;
-                        Dot {
-                            y: (parent.height - self.height) / 2;
-                            tint: !root.engine-supported ? Theme.text-faint : root.engine-enabled ? Theme.success : Theme.warning;
-                        }
-                        Text {
-                            text: !root.engine-supported ? "Engine unavailable on this OS (UI preview)"
-                                : root.engine-enabled ? "Remapping on" : "Remapping paused";
-                            color: Theme.text;
-                            font-size: Theme.font-sm;
-                            vertical-alignment: center;
-                        }
-                    }
-                    eng-ta := TouchArea {
-                        enabled: root.engine-supported;
-                        mouse-cursor: pointer;
-                        clicked => { root.toggle-enabled(); }
-                    }
-                }
+    pure function mod-bits(m: KeyboardModifiers) -> int {
+        (m.control ? 1 : 0) + (m.shift ? 2 : 0) + (m.alt ? 4 : 0) + (m.meta ? 8 : 0)
+    }
+}
 
-                StatusItem { label: "Focused"; value: root.focused-app != "" ? root.focused-app : "—"; }
-                StatusItem { label: "Active profile"; value: root.live-profile; value-color: Theme.accent; }
+export component AppTray inherits SystemTrayIcon {
+    in property <bool> remap-enabled: true;
+    in property <string> status;
+    callback show-window();
+    callback toggle-enabled();
+    callback quit();
 
-                if root.elevation-warning: HorizontalLayout {
-                    spacing: 6px;
-                    Dot { y: (parent.height - self.height) / 2; tint: Theme.warning; }
-                    Text {
-                        text: "Focused app runs as admin. Run this app as admin to remap it.";
-                        color: Theme.warning;
-                        font-size: Theme.font-sm;
-                        vertical-alignment: center;
-                    }
-                }
+    icon: @image-url("../assets/icon-32.png");
+    tooltip: "mouse-kb-remap" + (root.status != "" ? " · " + root.status : "");
+    clicked => { root.show-window(); }
 
-                Rectangle { horizontal-stretch: 1; }
-                Text {
-                    text: root.self-elevated ? "Admin" : "Standard user";
-                    color: Theme.text-faint;
-                    font-size: Theme.font-sm;
-                    vertical-alignment: center;
-                }
-            }
+    Menu {
+        MenuItem {
+            title: "Open mouse-kb-remap";
+            activated => { root.show-window(); }
+        }
+        MenuItem {
+            title: root.remap-enabled ? "Pause remapping" : "Resume remapping";
+            activated => { root.toggle-enabled(); }
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "Quit";
+            activated => { root.quit(); }
         }
     }
 }

@@ -1,0 +1,223 @@
+// Macro editor: record or build a sequence of steps.
+
+import { Theme } from "theme.slint";
+import { Store, StepRow } from "store.slint";
+import { Button, Callout, ChoiceGrid, Divider, Hint, SectionLabel, TextArea, ValueField } from "widgets.slint";
+import { CaptureBox, FormRow } from "controls.slint";
+
+component MacroHeader inherits Rectangle {
+    background: Theme.window-bg;
+    property <string> mname: Store.macro-name;
+    changed mname => { name-input.text = root.mname; }
+
+    VerticalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        padding-top: 16px;
+        padding-bottom: 14px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 10px;
+            name-input := TextInput {
+                text: Store.macro-name;
+                font-size: Theme.font-lg;
+                font-weight: 700;
+                color: Theme.text-strong;
+                single-line: true;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                selection-background-color: Theme.accent-soft;
+                accepted => { Store.rename-macro(self.text); }
+                changed has-focus => {
+                    if !self.has-focus { Store.rename-macro(self.text); }
+                }
+            }
+            Button {
+                text: Store.recording ? "■  Stop recording" : "●  Record";
+                primary: !Store.recording;
+                danger: Store.recording;
+                enabled: Store.engine-supported;
+                clicked => { Store.toggle-record(); }
+            }
+            Button { text: "Duplicate"; clicked => { Store.duplicate-macro(); } }
+            Button { text: "Delete"; danger: true; clicked => { Store.delete-macro(); } }
+        }
+        Text { text: Store.macro-info; color: Theme.text-muted; font-size: Theme.font-sm; }
+    }
+}
+
+component StepList inherits Rectangle {
+    background: Theme.window-bg;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        if Store.recording: Callout {
+            tint: Theme.danger;
+            text: "Recording. Press keys and mouse buttons (in this window or any other) and the pauses between them are recorded too. Click Stop recording when you're done.";
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            SectionLabel { text: "ADD STEP"; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: "Delays:"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Button { text: "Remove all"; compact: true; clicked => { Store.remove-delays(); } }
+            Text { text: "Set all to"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            ValueField {
+                width: 80px;
+                height: 24px;
+                value: "";
+                placeholder: "50";
+                suffix: "ms";
+                committed(v) => { Store.set-all-delays(v); }
+            }
+            Button { text: "Clear steps"; compact: true; danger: true; clicked => { Store.clear-steps(); } }
+        }
+        ChoiceGrid {
+            columns: 4;
+            cell-height: 26px;
+            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text"];
+            selected(i) => { Store.add-step(i); }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            border-radius: Theme.radius;
+            background: Theme.panel-bg;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            if Store.steps.length == 0: Text {
+                text: "No steps yet. Click Record, or add steps above.";
+                color: Theme.text-faint;
+                font-size: Theme.font;
+            }
+            Flickable {
+                VerticalLayout {
+                    alignment: start;
+                    padding: 6px;
+                    spacing: 1px;
+                    for s[i] in Store.steps: Rectangle {
+                        height: s.delay ? 24px : 30px;
+                        border-radius: Theme.radius-sm;
+                        background: i == Store.selected-step ? Theme.selected-bg : (sta.has-hover ? Theme.control-hover : transparent);
+                        sta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { Store.select-step(i); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            Text {
+                                width: 26px;
+                                text: i + 1;
+                                color: Theme.text-faint;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                            if i == Store.selected-step: Rectangle {
+                                width: 3px;
+                                y: 6px;
+                                height: parent.height - 12px;
+                                border-radius: 1.5px;
+                                background: Theme.accent;
+                            }
+                            Text {
+                                width: s.delay ? 120px : 96px;
+                                text: s.delay ? "⏱  " + s.value : s.kind;
+                                color: s.delay ? Theme.text-faint : Theme.text-muted;
+                                font-size: s.delay ? Theme.font-sm : Theme.font;
+                                vertical-alignment: center;
+                            }
+                            if !s.delay: Text {
+                                horizontal-stretch: 1;
+                                text: s.value;
+                                color: Theme.text-strong;
+                                font-size: Theme.font;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component StepInspector inherits Rectangle {
+    width: 300px;
+    background: Theme.panel-bg;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        alignment: start;
+
+        SectionLabel { text: Store.selected-step >= 0 ? "STEP " + (Store.selected-step + 1) + " OF " + Store.steps.length : "STEP"; }
+        if Store.selected-step < 0: Hint { text: "Select a step to edit it, or add one on the left."; }
+        if Store.selected-step >= 0: VerticalLayout {
+            spacing: 10px;
+            ChoiceGrid {
+                columns: 2;
+                cell-height: 26px;
+                items: Store.step-kind-names;
+                current: Store.step-kind;
+                selected(i) => { Store.set-step-kind(i); }
+            }
+            Divider { }
+            if Store.step-kind <= 2: CaptureBox { target: "step"; value: Store.step-key; }
+            if Store.step-kind >= 3 && Store.step-kind <= 5: ChoiceGrid {
+                items: Store.mouse-names;
+                current: Store.step-mouse;
+                selected(i) => { Store.set-step-mouse(i); }
+            }
+            if Store.step-kind == 0 || Store.step-kind == 3: FormRow {
+                label: "Hold for";
+                ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
+            }
+            if Store.step-kind == 6: FormRow {
+                label: "Wait";
+                ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
+            }
+            if Store.step-kind == 7: TextArea {
+                value: Store.step-text;
+                placeholder: "Text to type…";
+                edited(t) => { Store.set-step-text(t); }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Button { text: "↑"; horizontal-stretch: 1; clicked => { Store.move-step(-1); } }
+                Button { text: "↓"; horizontal-stretch: 1; clicked => { Store.move-step(1); } }
+                Button { text: "Duplicate"; horizontal-stretch: 2; clicked => { Store.duplicate-step(); } }
+                Button { text: "Delete"; danger: true; horizontal-stretch: 2; clicked => { Store.delete-step(); } }
+            }
+        }
+
+        Divider { }
+        SectionLabel { text: "USING THIS MACRO"; }
+        Hint {
+            text: "Open a profile, click a button or key, choose Macro and pick this macro. How it plays (once, repeat, while held or toggle) is set on each binding.";
+        }
+        Hint {
+            text: "Tip: games often miss key presses shorter than a frame. Keep holds at 15 ms or more.";
+        }
+    }
+}
+
+export component MacroView inherits VerticalLayout {
+    MacroHeader { }
+    Divider { }
+    HorizontalLayout {
+        vertical-stretch: 1;
+        StepList { horizontal-stretch: 1; max-width: 100000px; }
+        Rectangle { width: 1px; background: Theme.border; }
+        StepInspector { }
+    }
+}
