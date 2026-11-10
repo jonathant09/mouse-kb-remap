@@ -44,6 +44,25 @@ app that works with **any** mouse or keyboard.
 | Linux engine (evdev + uinput, X11 focus tracking) | Experimental: builds and passes unit tests, not yet tried on real hardware |
 | macOS engine | Not yet (the UI runs in preview mode) |
 
+## Input latency
+
+Measured on Windows 11 (release build, 1,000 samples per row): time from an input being
+sent until a hook further down the chain receives it, without and with mouse-kb-remap.
+
+| | Median | p95 | p99 | Max |
+| --- | --- | --- | --- | --- |
+| Key, without the app | 0.042 ms | 0.12 ms | 0.19 ms | 0.67 ms |
+| Key, with the app (not remapped) | 0.067 ms | 0.22 ms | 0.44 ms | 1.4 ms |
+| Mouse movement, without the app | 0.040 ms | 0.17 ms | 0.29 ms | 0.81 ms |
+| Mouse movement, with the app | 0.066 ms | 0.25 ms | 0.38 ms | 1.2 ms |
+| Remapped key, until the new key arrives | 0.075 ms | 0.26 ms | 0.36 ms | 1.7 ms |
+
+So the app adds about 0.025 ms to a typical input, around 2.5% of one report from a
+1,000 Hz mouse. When the active profile doesn't remap any mouse button or the wheel, the app
+doesn't watch the mouse at all and mouse movement isn't affected. The tests used
+`SendInput`, which enters Windows slightly earlier than real hardware but goes through the
+same hooks.
+
 ## Quick start (Windows)
 
 - **Prebuilt:** grab `mouse-kb-remap-windows-x64.zip` from
