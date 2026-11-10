@@ -197,7 +197,14 @@ impl Config {
                     cfg
                 }
                 Err(err) => {
-                    eprintln!("config: failed to parse {}: {err}; using defaults", path.display());
+                    // Keep the broken file so a typo in a hand edit never loses settings.
+                    let backup = path.with_file_name("config.broken.json");
+                    let _ = std::fs::copy(&path, &backup);
+                    eprintln!(
+                        "config: failed to parse {}: {err}; using defaults (saved a copy to {})",
+                        path.display(),
+                        backup.display()
+                    );
                     Config::default()
                 }
             },

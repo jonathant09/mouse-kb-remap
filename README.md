@@ -31,34 +31,43 @@ Early prototype (v0.1).
 | Area | State |
 | --- | --- |
 | UI (profiles, mouse and keyboard diagrams, bindings) | Working |
-| Windows engine (hooks, focus tracking, `SendInput`) | Written, needs real-world testing |
+| Windows engine (hooks, focus tracking, `SendInput`) | Builds in CI, needs real-world testing |
 | Linux / macOS engine | Not yet (the UI runs in preview mode) |
 
-## Building on Windows
+## Quick start (Windows)
 
-1. Install Rust: download `rustup-init.exe` from <https://rustup.rs> and accept the defaults.
-   If it asks for the **Visual Studio C++ Build Tools**, install them (it's the linker Rust
-   uses on Windows).
-2. Build and run:
+- **Prebuilt:** grab `mouse-kb-remap-windows-x64.zip` from
+  [Releases](https://github.com/jonathant09/mouse-kb-remap/releases), unzip, run `start.bat`.
+- **From source:** install Rust from <https://rustup.rs>, then:
 
-   ```powershell
-   cd mouse-kb-remap
-   cargo run            # debug build with a console window for logs
-   cargo run --release  # optimized build, no console window
-   ```
-
-The release binary lands in `target\release\mouse-kb-remap.exe`.
+  ```powershell
+  git clone https://github.com/jonathant09/mouse-kb-remap
+  cd mouse-kb-remap
+  .\start.bat          # builds into dist\ on first run, then launches
+  .\start.bat admin    # run as administrator (for games that run elevated)
+  .\start.bat build    # rebuild after pulling changes
+  ```
 
 Settings are saved to `%APPDATA%\mouse-kb-remap\config\config.json`.
 
 > **Games that run as admin** (Genshin Impact does, for its anti-cheat) only accept input
-> from programs that are also elevated. Right-click the exe and choose **Run as
-> administrator** for now. A "start elevated at login" option via Task Scheduler is on
-> the roadmap.
+> from programs that are also elevated. Use `start.bat admin` for those.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [User guide](docs/user-guide.md): profiles, remapping, inheritance, status bar
+- [Configuration](docs/configuration.md): `config.json` format and all key ids
+- [Troubleshooting](docs/troubleshooting.md): games, admin rights, anti-cheat, SmartScreen
+- [Architecture](docs/architecture.md): how the engine and UI fit together
+- [Building & releasing](docs/building.md): toolchain, CI, cutting a release
 
 ## Project layout
 
 ```
+start.bat            Launcher: run / build / run as admin
+docs/                Documentation
+.github/workflows/   Windows build + release CI
 src/
   main.rs            UI wiring: pushes state into Slint, handles callbacks
   config.rs          Profiles, bindings, JSON load/save

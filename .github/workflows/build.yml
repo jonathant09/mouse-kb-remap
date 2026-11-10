@@ -48,7 +48,7 @@ jobs:
           Copy-Item README.md, LICENSE, start.bat dist/
           Compress-Archive -Path dist/* -DestinationPath mouse-kb-remap-windows-x64.zip -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: mouse-kb-remap-windows-x64
           path: dist/
