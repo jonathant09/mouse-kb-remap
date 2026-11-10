@@ -15,7 +15,9 @@ cargo run                    # debug build, console window shows logs
 cargo run --release          # optimized, no console window
 cargo run -- --tray          # start hidden in the tray (what autostart does)
 cargo build --release        # exe at target\release\mouse-kb-remap.exe
-.\start.bat build            # release build, copied into dist\, then launched
+.\start.bat build            # release build, then launched
+.\start.bat install          # build + install/update Documents\mouse-kb-remap (see below)
+cargo run -- --quit          # ask the running copy to quit
 cargo test                   # unit tests (config, keys, dispatcher, scheduler, …)
 cargo clippy --all-targets   # lints (CI fails on warnings)
 cargo fmt                    # formatting (max width 120, see rustfmt.toml)
@@ -71,27 +73,45 @@ runs with a no-op engine and the status bar says *Engine unavailable on this OS*
 `.github/workflows/build.yml` runs on every push to `main`, on pull requests and on tags:
 
 1. **windows**: tests, clippy (warnings are errors), release build, compiler output as
-   annotations on the commit, and uploads `dist/` + the zip as a workflow artifact.
+   annotations on the commit; packages the exe and the versioned zip and uploads them as a
+   workflow artifact (so any build can be downloaded from its run page).
 2. **linux**: tests, clippy and a release build; uploads the binary as an experimental
-   artifact.
-3. **release** (only on `v*` tags): publishes a GitHub Release with `mouse-kb-remap.exe`
-   and `mouse-kb-remap-windows-x64.zip`. It's the only job with write permission.
+   artifact (not released).
+3. **release** (only on `v*` tags): publishes the GitHub Release, see below. It's the only
+   job with write permission.
 
 ## Cutting a release
 
-1. Bump `version` in `Cargo.toml` (the UI and `--version` read it from there).
-2. Commit, then tag and push:
+1. Bump `version` in `Cargo.toml` (the UI and `--version` read it from there) and run
+   `cargo build` so `Cargo.lock` follows.
+2. Add a `## <version>` section at the top of `CHANGELOG.md`: it becomes the release notes.
+3. Commit, then tag and push:
 
    ```powershell
-   git tag v0.2.0
-   git push origin main --tags
+   git tag v0.3.0
+   git push origin main v0.3.0
    ```
 
-3. The workflow attaches the exe and zip to the new release. Edit the generated release
-   notes if needed.
+4. The workflow checks the tag matches `Cargo.toml`, builds and tests on Windows and Linux,
+   and publishes the release **mouse-kb-remap 0.3.0** with two downloads:
+   `mouse-kb-remap-0.3.0-windows-x64.zip` (a `mouse-kb-remap` folder with the exe and the
+   license) and the bare `mouse-kb-remap.exe`. If you wrote the release by hand first, its
+   notes are kept and the files are attached to it.
 
-## `dist/`
+The exe runs on its own: `.cargo/config.toml` links the C runtime in, so users don't need the
+Visual C++ Redistributable, and the UI's images are compiled in.
 
-`start.bat build` (and the CI package step) puts the exe in `dist\`. The folder is in
-`.gitignore`: binaries in git history bloat every clone. Distribute builds through GitHub
-Releases instead.
+## Installing your own build
+
+`start.bat install` (or `scripts\install.ps1`) builds the release exe and installs it as
+`Documents\mouse-kb-remap\mouse-kb-remap.exe`, or updates it in place:
+
+1. a running exe can't be overwritten but can be renamed, so the old one is moved aside to
+   `mouse-kb-remap.old.exe` and the new one copied in;
+2. the running copy is asked to quit with `mouse-kb-remap.exe --quit` (which also reaches a
+   copy running as administrator);
+3. it's started again the way it starts at sign-in: through the startup task when that
+   points at this exe (as administrator, no prompt), otherwise normally, in the tray;
+4. the `.old.exe` is deleted (the app also deletes it when it next starts).
+
+`-NoBuild` skips the build; `-Dir <folder>` installs somewhere else.

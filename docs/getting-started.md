@@ -4,17 +4,26 @@ mouse-kb-remap runs on **Windows 10 and 11**. A Linux engine is included but exp
 (see [Troubleshooting](troubleshooting.md#linux-experimental)); on other systems the UI
 opens in preview mode with remapping disabled.
 
-## Option A: use a prebuilt exe
+## Install
 
-1. Download `mouse-kb-remap-windows-x64.zip` from the repository's **Releases** page, or
-   use the copy in the `dist\` folder if you have one.
-2. Unzip it anywhere, for example `C:\Tools\mouse-kb-remap\`.
-3. Double-click `start.bat`, or `mouse-kb-remap.exe` directly.
+1. Download the latest release from the repository's
+   [Releases page](https://github.com/jonathant09/mouse-kb-remap/releases/latest):
+   `mouse-kb-remap-<version>-windows-x64.zip` (a folder with the app), or just
+   `mouse-kb-remap.exe`.
+2. Unzip it anywhere you keep apps, for example `Documents\mouse-kb-remap\`.
+3. Run `mouse-kb-remap.exe`. There's nothing else to install.
 
 The exe isn't code-signed yet, so Windows SmartScreen may show "Windows protected your
 PC". Click **More info → Run anyway**. See [Troubleshooting](troubleshooting.md#smartscreen-warning).
 
-## Option B: build from source
+**Updating:** quit the app from its tray icon, replace `mouse-kb-remap.exe` with the new one
+and start it again. Your settings live in `%APPDATA%\mouse-kb-remap\config\`, not next to
+the exe, so they carry over. If you move the exe somewhere else, open
+**Settings → Start with Windows**: the app offers to point startup at the copy you're using.
+
+## Build from source
+
+Only needed if you want to change the app.
 
 1. Install Rust from <https://rustup.rs> and accept the defaults. If the installer asks for
    the **Visual Studio C++ Build Tools**, let it install them (Rust uses them to link on
@@ -29,17 +38,12 @@ PC". Click **More info → Run anyway**. See [Troubleshooting](troubleshooting.m
 
    The first build downloads dependencies and takes a few minutes. Later starts are instant.
 
-## `start.bat`
-
 | Command | What it does |
 | --- | --- |
-| `start.bat` | Runs the app. Builds it first if there's no exe yet. |
-| `start.bat build` | Rebuilds from source into `dist\`, then runs it. Use this after pulling changes. |
-| `start.bat admin` | Runs the app as administrator (one UAC prompt). |
-| `start.bat build admin` | Both. |
-
-It looks for the exe next to itself first (the release zip layout), then in `dist\`.
-
+| `start.bat` | Runs the app from this folder (`target\release\`). Builds it first if needed. |
+| `start.bat build` | Rebuilds, then runs it. Use this after changing or pulling code. |
+| `start.bat admin` | Runs it as administrator (one UAC prompt). |
+| `start.bat install` | Builds and installs the app to `Documents\mouse-kb-remap\`, or updates it there in place: the running copy is replaced and restarted the way it was running (as administrator through the startup task, with no prompt). |
 ## First run
 
 When the app opens you'll see two profiles:
@@ -65,8 +69,9 @@ Closing the window keeps mouse-kb-remap running in the tray (notification area).
 start when you sign in, open **Settings → Start with Windows** and pick **On**, or
 **On, as administrator** if you play games that run as admin.
 
-> If a game runs as administrator, Windows won't let a normal app send it input. Launch
-> with `start.bat admin` or use the administrator autostart. See
+> If a game runs as administrator, Windows won't let a normal app send it input. Run
+> it as administrator (right-click `mouse-kb-remap.exe` → **Run as administrator**) or use the
+> administrator autostart. See
 > [Troubleshooting](troubleshooting.md#remaps-dont-work-in-a-game).
 
 Next: the [user guide](user-guide.md).

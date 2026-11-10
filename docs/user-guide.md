@@ -120,7 +120,7 @@ mouse movement itself, so it works everywhere.
 | ● **Remapping on / paused** | Click to pause or resume all remapping |
 | **Focused** | The last program you used other than this one |
 | **Active profile** | The profile applied to that program |
-| Yellow warning | The focused program runs as admin and this app doesn't, so Windows is blocking remaps. Restart with `start.bat admin`. |
+| Yellow warning | The focused program runs as admin and this app doesn't, so Windows is blocking remaps. Run this app as administrator (right-click the exe → **Run as administrator**). |
 | **Admin / Standard user** | Whether this app itself is elevated |
 
 ## Tray

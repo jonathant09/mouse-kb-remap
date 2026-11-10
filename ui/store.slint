@@ -111,6 +111,7 @@ export global Store {
     // ---- settings ------------------------------------------------------------------
     in property <int> autostart;           // 0 off, 1 on, 2 on as admin
     in property <bool> autostart-supported;
+    in property <string> autostart-other;  // startup opens this other copy
     in property <bool> close-to-tray;
     in property <string> config-path;
     in property <string> notice;           // result of the last settings action
@@ -181,6 +182,7 @@ export global Store {
     callback delete-step();
 
     callback set-autostart(int);
+    callback claim-autostart();            // point startup at this copy
     callback set-close-to-tray(bool);
     callback import-profiles();
     callback export-profile();

@@ -2,7 +2,7 @@
 
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
-import { Button, Divider, Hint, SectionLabel, Segmented, Switch } from "widgets.slint";
+import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch } from "widgets.slint";
 
 component Card inherits Rectangle {
     in property <string> title;
@@ -43,6 +43,17 @@ export component SettingsView inherits Rectangle {
                     items: ["Off", "On", "On, as administrator"];
                     current: Store.autostart;
                     selected(i) => { Store.set-autostart(i); }
+                }
+                if Store.autostart-other != "": Callout {
+                    text: "Start with Windows opens another copy of the app: " + Store.autostart-other;
+                }
+                if Store.autostart-other != "": HorizontalLayout {
+                    alignment: start;
+                    Button {
+                        text: "Use this copy instead";
+                        primary: true;
+                        clicked => { Store.claim-autostart(); }
+                    }
                 }
                 Hint {
                     text: !Store.autostart-supported ? "Not available on this system yet."

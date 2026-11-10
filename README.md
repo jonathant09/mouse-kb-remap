@@ -35,6 +35,22 @@ app that works with **any** mouse or keyboard.
 
 ![Macro editor](docs/screenshot-light.png)
 
+## Installation
+
+1. [Download the latest release](https://github.com/jonathant09/mouse-kb-remap/releases/latest):
+   `mouse-kb-remap-<version>-windows-x64.zip`, or just `mouse-kb-remap.exe`.
+2. Unzip it anywhere you keep apps, for example your Documents folder.
+3. Run `mouse-kb-remap.exe`. Nothing else to install (Windows 10 and 11).
+
+The exe isn't code-signed yet, so Windows SmartScreen may warn the first time: click
+**More info → Run anyway**. Settings are saved to `%APPDATA%\mouse-kb-remap\config\`, so
+replacing the exe with a newer version keeps them. To have it start when you sign in, use
+*Settings → Start with Windows*.
+
+> **Games that run as admin** (Genshin Impact does, for its anti-cheat) only accept input
+> from programs that are also elevated. Use *Settings → Start with Windows → On, as
+> administrator*, or right-click the exe → **Run as administrator**.
+
 ## Status
 
 | Area | State |
@@ -63,25 +79,19 @@ doesn't watch the mouse at all and mouse movement isn't affected. The tests used
 `SendInput`, which enters Windows slightly earlier than real hardware but goes through the
 same hooks.
 
-## Quick start (Windows)
+## Building from source
 
-- **Prebuilt:** grab `mouse-kb-remap-windows-x64.zip` from
-  [Releases](https://github.com/jonathant09/mouse-kb-remap/releases), unzip, run `start.bat`.
-- **From source:** install Rust from <https://rustup.rs>, then:
+Only needed to change the app. Install Rust from <https://rustup.rs>, then:
 
-  ```powershell
-  git clone https://github.com/jonathant09/mouse-kb-remap
-  cd mouse-kb-remap
-  .\start.bat          # builds into dist\ on first run, then launches
-  .\start.bat admin    # run as administrator (for games that run elevated)
-  .\start.bat build    # rebuild after pulling changes
-  ```
+```powershell
+git clone https://github.com/jonathant09/mouse-kb-remap
+cd mouse-kb-remap
+.\start.bat           # build and run from this folder
+.\start.bat install   # build and install, or update in place, Documents\mouse-kb-remap
+cargo test            # tests
+```
 
-Settings are saved to `%APPDATA%\mouse-kb-remap\config\config.json`.
-
-> **Games that run as admin** (Genshin Impact does, for its anti-cheat) only accept input
-> from programs that are also elevated. Use `start.bat admin`, or *Settings → Start with
-> Windows → On, as administrator*.
+See [Building & releasing](docs/building.md).
 
 ## Documentation
 
@@ -96,7 +106,10 @@ Settings are saved to `%APPDATA%\mouse-kb-remap\config\config.json`.
 ## Project layout
 
 ```
-start.bat            Launcher: run / build / run as admin
+start.bat            From source: run / build / run as admin / install to Documents
+CHANGELOG.md         Release notes (each release's notes come from here)
+.cargo/config.toml   Links the C runtime into the exe (no installs needed)
+scripts/             install.ps1 (local install / update), release-notes.sh
 assets/              App icon (SVG source, PNGs, .ico)
 tools/               render-icon.mjs: regenerates the icon files
 docs/                Documentation

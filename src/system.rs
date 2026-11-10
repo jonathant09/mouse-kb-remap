@@ -31,21 +31,62 @@ impl Autostart {
 /// Command-line flag used by autostart: start hidden in the tray.
 pub const TRAY_FLAG: &str = "--tray";
 
+/// Command-line flag: ask the running copy to quit, then exit (used by the
+/// install script to replace the exe).
+pub const QUIT_FLAG: &str = "--quit";
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub enum QuitResult {
+    /// No copy was running.
+    NotRunning,
+    /// The running copy quit.
+    Quit,
+    /// A copy is running but couldn't be reached (an older version running
+    /// as admin) or didn't quit in time.
+    Failed,
+}
+
+/// Whether `path` is this running exe.
+pub fn is_this_exe(path: &str) -> bool {
+    let Ok(me) = std::env::current_exe() else { return false };
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let a = canon(&me).to_string_lossy().to_lowercase();
+    let b = canon(std::path::Path::new(path)).to_string_lossy().to_lowercase();
+    a == b
+}
+
+/// Delete the exe the installer moved aside (`<name>.old.exe`) when it put
+/// a new version in place of a running one.
+pub fn remove_replaced_exe() {
+    if let Ok(me) = std::env::current_exe() {
+        let old = me.with_extension("old.exe");
+        if old.exists() {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+}
+
 #[cfg(windows)]
 pub use win::*;
 
 #[cfg(windows)]
 mod win {
-    use super::{Autostart, TRAY_FLAG};
+    use super::{Autostart, QuitResult, TRAY_FLAG};
     use std::os::windows::process::CommandExt;
     use windows::core::{w, HSTRING, PCWSTR};
-    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE, HLOCAL,
+    };
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::System::Registry::{
         RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ,
     };
     use windows::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, GetExitCodeProcess, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
-        INFINITE,
+        CreateEventW, CreateMutexW, GetExitCodeProcess, OpenEventW, SetEvent, WaitForMultipleObjects,
+        WaitForSingleObject, EVENT_MODIFY_STATE, INFINITE,
     };
     use windows::Win32::UI::Shell::{
         ShellExecuteExW, ShellExecuteW, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NO_CONSOLE, SHELLEXECUTEINFOW,
@@ -70,26 +111,73 @@ mod win {
     const TASK_NAME: &str = "mouse-kb-remap";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+    /// Security for the single-instance objects: any signed-in user's process
+    /// may use them, and the integrity label is lowered to medium, so a normal
+    /// (non-admin) launch can still reach a copy running as administrator to
+    /// show it or ask it to quit.
+    struct OpenSecurity {
+        sd: PSECURITY_DESCRIPTOR,
+        attrs: SECURITY_ATTRIBUTES,
+    }
+
+    impl OpenSecurity {
+        fn new() -> Option<Self> {
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    w!("D:(A;;GA;;;AU)S:(ML;;NW;;;ME)"),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    None,
+                )
+                .ok()?;
+            }
+            Some(OpenSecurity {
+                sd,
+                attrs: SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: sd.0,
+                    bInheritHandle: false.into(),
+                },
+            })
+        }
+    }
+
+    impl Drop for OpenSecurity {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(self.sd.0)));
+            }
+        }
+    }
+
+    fn signal(kind: &str) -> bool {
+        unsafe {
+            OpenEventW(EVENT_MODIFY_STATE, false, &instance_name(kind))
+                .and_then(|e| {
+                    let r = SetEvent(e);
+                    let _ = CloseHandle(e);
+                    r
+                })
+                .is_ok()
+        }
+    }
+
     /// Make sure only one copy runs (two would install two sets of hooks).
     /// Returns false if another copy is running; it is asked to show its
-    /// window. `on_show` is called (on a background thread) whenever a later
-    /// launch asks this copy to show itself.
-    pub fn single_instance(on_show: impl Fn() + Send + 'static) -> bool {
+    /// window. `on_show` / `on_quit` are called (on a background thread) when
+    /// a later launch asks this copy to show itself, or to quit (`--quit`).
+    pub fn single_instance(on_show: impl Fn() + Send + 'static, on_quit: impl Fn() + Send + 'static) -> bool {
+        let security = OpenSecurity::new();
+        let attrs = security.as_ref().map(|s| &s.attrs as *const SECURITY_ATTRIBUTES);
         unsafe {
-            let mutex = CreateMutexW(None, false, &instance_name("instance"));
+            let mutex = CreateMutexW(attrs, false, &instance_name("instance"));
             let already = match &mutex {
                 Ok(_) => GetLastError() == ERROR_ALREADY_EXISTS,
-                Err(_) => true, // access denied: created by an elevated copy
+                Err(_) => true, // access denied: made by an older copy running as admin
             };
             if already {
-                let signalled = OpenEventW(EVENT_MODIFY_STATE, false, &instance_name("show"))
-                    .and_then(|e| {
-                        let r = SetEvent(e);
-                        let _ = CloseHandle(e);
-                        r
-                    })
-                    .is_ok();
-                if !signalled {
+                if !signal("show") {
                     message_box(
                         "mouse-kb-remap is already running as administrator.\n\n\
                          Open it from its tray icon, or quit it there first.",
@@ -99,18 +187,50 @@ mod win {
             }
             // Keep the mutex for the life of the process.
             std::mem::forget(mutex);
-            if let Ok(event) = CreateEventW(None, false, false, &instance_name("show")) {
-                let event = event.0 as usize;
+            let show = CreateEventW(attrs, false, false, &instance_name("show"));
+            let quit = CreateEventW(attrs, false, false, &instance_name("quit"));
+            if let (Ok(show), Ok(quit)) = (show, quit) {
+                let handles = [show.0 as usize, quit.0 as usize];
                 std::thread::spawn(move || loop {
-                    let h = HANDLE(event as *mut _);
-                    if WaitForSingleObject(h, INFINITE).0 != 0 {
-                        break;
+                    let hs = handles.map(|h| HANDLE(h as *mut _));
+                    match WaitForMultipleObjects(&hs, false, INFINITE).0 {
+                        0 => on_show(),
+                        1 => on_quit(),
+                        _ => break,
                     }
-                    on_show();
                 });
             }
             true
         }
+    }
+
+    /// Ask the running copy to quit, and wait (up to 10 s) until it has.
+    pub fn request_quit() -> QuitResult {
+        use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+        use windows::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+        let running = || unsafe {
+            match OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, &instance_name("instance")) {
+                Ok(h) => {
+                    let _ = CloseHandle(h);
+                    true
+                }
+                Err(e) => e.code() != ERROR_FILE_NOT_FOUND.to_hresult(),
+            }
+        };
+        if !running() {
+            return QuitResult::NotRunning;
+        }
+        if !signal("quit") {
+            return QuitResult::Failed;
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(10) {
+            if !running() {
+                return QuitResult::Quit;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        QuitResult::Failed
     }
 
     pub fn message_box(text: &str) {
@@ -324,6 +444,87 @@ mod win {
         }
     }
 
+    /// The exe the scheduled task starts.
+    fn task_command() -> Option<String> {
+        let out = std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", TASK_NAME, "/XML"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // The XML comes back as UTF-16 or ANSI depending on the console;
+        // decode either, then unescape.
+        let raw = if out.stdout.len() > 1 && out.stdout[1] == 0 {
+            let units: Vec<u16> = out
+                .stdout
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let start = raw.find("<Command>")? + "<Command>".len();
+        let end = start + raw[start..].find("</Command>")?;
+        Some(
+            raw[start..end]
+                .trim()
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&"),
+        )
+    }
+
+    /// The exe the registry Run entry starts.
+    fn run_value_path() -> Option<String> {
+        let mut size = 0u32;
+        unsafe {
+            if RegGetValueW(
+                HKEY_CURRENT_USER,
+                RUN_KEY,
+                APP_NAME,
+                RRF_RT_REG_SZ,
+                None,
+                None,
+                Some(&mut size),
+            ) != ERROR_SUCCESS
+            {
+                return None;
+            }
+            let mut buf = vec![0u16; (size as usize).div_ceil(2)];
+            if RegGetValueW(
+                HKEY_CURRENT_USER,
+                RUN_KEY,
+                APP_NAME,
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr() as *mut _),
+                Some(&mut size),
+            ) != ERROR_SUCCESS
+            {
+                return None;
+            }
+            let value = String::from_utf16_lossy(&buf);
+            let value = value.trim_end_matches('\0').trim();
+            Some(match value.strip_prefix('"') {
+                Some(rest) => rest.split('"').next().unwrap_or_default().to_string(),
+                None => value.split(" --").next().unwrap_or_default().to_string(),
+            })
+        }
+    }
+
+    /// The exe the startup entry starts, if one is set up.
+    pub fn autostart_target() -> Option<String> {
+        task_command().or_else(run_value_path)
+    }
+
     pub fn autostart_status() -> Autostart {
         if task_exists() {
             Autostart::Elevated
@@ -443,10 +644,18 @@ pub use other::*;
 
 #[cfg(not(windows))]
 mod other {
-    use super::Autostart;
+    use super::{Autostart, QuitResult};
 
-    pub fn single_instance(_on_show: impl Fn() + Send + 'static) -> bool {
+    pub fn single_instance(_on_show: impl Fn() + Send + 'static, _on_quit: impl Fn() + Send + 'static) -> bool {
         true
+    }
+
+    pub fn request_quit() -> QuitResult {
+        QuitResult::NotRunning
+    }
+
+    pub fn autostart_target() -> Option<String> {
+        None
     }
 
     pub fn open(target: &str) {

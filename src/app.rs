@@ -79,6 +79,8 @@ struct State {
     elevation_blocked: bool,
     recent: Vec<String>,
     autostart: Autostart,
+    /// Exe the startup entry opens when it isn't this one (another copy).
+    autostart_other: String,
     notice: (String, bool),
 }
 
@@ -142,6 +144,11 @@ pub fn show_window_from_any_thread() {
     let _ = slint::invoke_from_event_loop(|| with_app(|app| app.show_window()));
 }
 
+/// Quit, as asked by `mouse-kb-remap --quit` (from any thread).
+pub fn quit_from_any_thread() {
+    let _ = slint::invoke_from_event_loop(|| with_app(|app| app.quit()));
+}
+
 pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     system::stop_raw_keyboard_input();
@@ -175,7 +182,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             focus_self: true,
             elevation_blocked: false,
             recent: Vec::new(),
-            autostart: system::autostart_status(),
+            autostart: Autostart::Off,
+            autostart_other: String::new(),
             notice: (String::new(), false),
         }),
         engine,
@@ -228,6 +236,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
 
     app.refresh();
+    app.check_autostart();
     if !start_hidden {
         app.show_window();
     }
@@ -721,8 +730,32 @@ impl App {
         }
     }
 
-    fn set_autostart(&self, mode: Autostart) {
-        if mode == self.st.borrow().autostart {
+    /// Read the startup entry in the background (schtasks is slow) and note
+    /// whether it opens this copy.
+    fn check_autostart(&self) {
+        std::thread::spawn(|| {
+            let status = system::autostart_status();
+            let target = if status == Autostart::Off {
+                None
+            } else {
+                system::autostart_target()
+            };
+            let other = target.filter(|t| !system::is_this_exe(t)).unwrap_or_default();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| {
+                    app.nav(|_, st| {
+                        st.autostart = status;
+                        st.autostart_other = other;
+                    })
+                })
+            });
+        });
+    }
+
+    /// `force`: set it up again even if the mode is unchanged (to point it at
+    /// this copy).
+    fn set_autostart(&self, mode: Autostart, force: bool) {
+        if mode == self.st.borrow().autostart && !force {
             return;
         }
         self.notice(
@@ -740,6 +773,7 @@ impl App {
             let _ = slint::invoke_from_event_loop(move || {
                 with_app(|app| {
                     app.st.borrow_mut().autostart = status;
+                    app.check_autostart();
                     match result {
                         Ok(()) => app.notice(
                             match status {
@@ -1114,6 +1148,7 @@ impl App {
 
         // Settings
         s.set_autostart(st.autostart.index());
+        s.set_autostart_other(st.autostart_other.clone().into());
         s.set_close_to_tray(cfg.close_to_tray);
         s.set_notice(st.notice.0.clone().into());
         s.set_notice_error(st.notice.1);
@@ -1166,10 +1201,13 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     }
 
     // ---- navigation & profiles ------------------------------------------------------
-    on!(on_open_settings, | | nav |st: &mut State| {
-        st.view = 2;
-        st.autostart = system::autostart_status();
-    });
+    {
+        let a = app.clone();
+        s.on_open_settings(move || {
+            a.nav(|_, st| st.view = 2);
+            a.check_autostart();
+        });
+    }
     on!(on_select_profile, |i| nav |st: &mut State| {
         st.view = 0;
         st.profile = (i.max(0) as usize).min(st.cfg.profiles.len() - 1);
@@ -1584,7 +1622,11 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     });
 
     // ---- settings ------------------------------------------------------------------
-    on!(on_set_autostart, |i| app |a: &Rc<App>| a.set_autostart(Autostart::from_index(i)));
+    on!(on_set_autostart, |i| app |a: &Rc<App>| a.set_autostart(Autostart::from_index(i), false));
+    on!(on_claim_autostart, | | app |a: &Rc<App>| {
+        let mode = a.st.borrow().autostart;
+        a.set_autostart(mode, true);
+    });
     on!(on_set_close_to_tray, |on| edit |st: &mut State| st.cfg.close_to_tray = on);
     on!(on_import_profiles, | | app |a: &Rc<App>| a.import());
     on!(on_export_profile, | | app |a: &Rc<App>| a.export(false));

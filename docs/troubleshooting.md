@@ -10,7 +10,8 @@ Work through these in order:
    to the profile.
 2. **Does the game run as administrator?** If the status bar shows the yellow
    *"Focused app runs as admin"* warning, Windows' UIPI is blocking a non-admin app from
-   seeing or sending input to it. Start mouse-kb-remap with `start.bat admin`, or set
+   seeing or sending input to it. Run mouse-kb-remap as administrator (right-click the exe →
+   **Run as administrator**), or set
    *Settings → Start with Windows → On, as administrator*. Many games with kernel
    anti-cheat run elevated, Genshin Impact included.
 3. **Is remapping paused?** The dot at the bottom left should be green (*Remapping on*).
@@ -69,9 +70,9 @@ your Windows version, what was running, and `mouse-kb-remap.log` from the config
 
 ## "mouse-kb-remap is already running as administrator"
 
-Only one copy runs at a time. Starting it again opens the running copy, except when that
-copy runs as administrator and the new one doesn't (Windows doesn't let it). Open it from its
-tray icon, or quit it there first.
+Only one copy runs at a time; starting it again opens the running one. Versions before 0.2.0
+couldn't be reached that way when they ran as administrator and showed this message instead:
+open the old copy from its tray icon and quit it there, then start the new one.
 
 ## Anti-cheat and game rules
 

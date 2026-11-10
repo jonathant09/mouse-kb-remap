@@ -1,5 +1,9 @@
 name: build
 
+# Every push and pull request: tests, lints and builds on Windows and Linux.
+# Pushing a version tag (v0.3.0) also publishes a GitHub release with the
+# ready-to-run Windows downloads (see docs/building.md#cutting-a-release).
+
 on:
   push:
     branches: [main]
@@ -49,22 +53,29 @@ jobs:
             Write-Output "::${kind} title=rustc::$msg"
           }
 
+      # What users download: one exe that runs on its own (the C runtime is
+      # linked in, see .cargo/config.toml), and a zip of a folder holding it.
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/mouse-kb-remap.exe dist/
-          Copy-Item README.md, LICENSE, start.bat dist/
-          Compress-Archive -Path dist/* -DestinationPath mouse-kb-remap-windows-x64.zip -Force
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $exe = 'target/release/mouse-kb-remap.exe'
+          $reported = (& $exe --version | Out-String).Trim()
+          if ($reported -ne "mouse-kb-remap $version") { throw "the exe reports '$reported', expected $version" }
+          New-Item -ItemType Directory -Force dist/mouse-kb-remap | Out-Null
+          Copy-Item $exe, LICENSE dist/mouse-kb-remap/
+          Compress-Archive -Path dist/mouse-kb-remap -DestinationPath "dist/mouse-kb-remap-$version-windows-x64.zip" -Force
+          Copy-Item $exe dist/mouse-kb-remap.exe
 
       - uses: actions/upload-artifact@v5
         with:
           name: mouse-kb-remap-windows-x64
           path: |
-            dist/
-            mouse-kb-remap-windows-x64.zip
+            dist/*.zip
+            dist/mouse-kb-remap.exe
+          if-no-files-found: error
 
-  # The Linux backend is experimental: built and unit-tested here.
+  # The Linux backend is experimental: built and unit-tested here, not released.
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +104,8 @@ jobs:
           name: mouse-kb-remap-linux-x64-experimental
           path: target/release/mouse-kb-remap
 
+  # Tag v0.3.0 -> release "mouse-kb-remap 0.3.0", notes from that version's
+  # CHANGELOG.md section, Windows downloads attached.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [windows, linux]
@@ -100,13 +113,36 @@ jobs:
     permissions:
       contents: write # publish release assets
     steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v5
         with:
           name: mouse-kb-remap-windows-x64
+          path: assets
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/mouse-kb-remap.exe
-            mouse-kb-remap-windows-x64.zip
-          generate_release_notes: true
+      - name: The tag names the version being built
+        run: |
+          tag="${{ github.ref_name }}"
+          version=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f 2)
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Create the release, or attach the builds to it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          ls -l assets
+          if gh release view "$tag" > /dev/null 2>&1; then
+            # Written by hand already: keep its notes, replace builds of the same name.
+            gh release upload "$tag" assets/*.zip assets/mouse-kb-remap.exe --clobber
+          else
+            bash scripts/release-notes.sh "$version" > notes.md
+            gh release create "$tag" assets/*.zip assets/mouse-kb-remap.exe \
+              --title "mouse-kb-remap $version" \
+              --notes-file notes.md \
+              --verify-tag
+          fi
