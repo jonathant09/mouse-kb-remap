@@ -2,7 +2,7 @@
 
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
-import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch } from "widgets.slint";
+import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch, ValueField } from "widgets.slint";
 import { CaptureBox } from "controls.slint";
 
 component SwitchRow inherits HorizontalLayout {
@@ -183,6 +183,66 @@ export component SettingsView inherits Rectangle {
                         font-size: Theme.font-sm;
                         vertical-alignment: center;
                     }
+                }
+            }
+
+            Card {
+                title: "CONTROLLERS";
+                max-width: 640px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { horizontal-stretch: 1; text: "Button names on the drawing"; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    Segmented {
+                        items: ["Xbox", "PlayStation", "Nintendo"];
+                        current: Store.pad-labels;
+                        selected(i) => { Store.set-pad-labels(i); }
+                    }
+                }
+                Hint { text: "Buttons are matched by position, so the bottom face button is the same input on every controller (A, Cross, or B on Nintendo)."; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { horizontal-stretch: 1; text: "Gyro speed (1-20)"; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    ValueField { width: 60px; value: Store.pad-gyro-speed; committed(v) => { Store.set-pad-number("gyro", v); } }
+                }
+                SwitchRow {
+                    text: "Invert gyro left / right";
+                    checked: Store.pad-invert-x;
+                    toggled(on) => { Store.set-pad-flag("invert_x", on); }
+                }
+                SwitchRow {
+                    text: "Invert gyro up / down";
+                    checked: Store.pad-invert-y;
+                    toggled(on) => { Store.set-pad-flag("invert_y", on); }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { horizontal-stretch: 1; text: "Touchpad speed (1-20)"; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    ValueField { width: 60px; value: Store.pad-touch-speed; committed(v) => { Store.set-pad-number("touch", v); } }
+                }
+                Divider { }
+                SwitchRow {
+                    text: "Xbox-style controllers";
+                    hint: "Xbox controllers and anything that works like one (XInput).";
+                    checked: Store.pad-xinput;
+                    toggled(on) => { Store.set-pad-flag("xinput", on); }
+                }
+                SwitchRow {
+                    text: "PlayStation, Switch, Steam and other controllers";
+                    hint: "Read directly over USB or Bluetooth, shared with games and Steam. Turn this off if a tool like DS4Windows already turns your controller into an Xbox one, so its buttons don't count twice.";
+                    checked: Store.pad-direct;
+                    toggled(on) => { Store.set-pad-flag("direct", on); }
+                }
+                SwitchRow {
+                    text: "Skip Steam's virtual controllers";
+                    hint: "While Steam Input is on, Steam adds an Xbox-style copy of your controller; the app reads the real one instead.";
+                    checked: Store.pad-skip-steam;
+                    toggled(on) => { Store.set-pad-flag("skip_steam", on); }
+                }
+                SwitchRow {
+                    text: "Turn off the Steam Deck's / Steam Controller's own mouse mode";
+                    hint: "Without Steam running, these move the mouse with the trackpads and click with the triggers by themselves. Turn this on when the app should be the only thing reading them.";
+                    checked: Store.pad-lizard;
+                    toggled(on) => { Store.set-pad-flag("lizard", on); }
                 }
             }
 

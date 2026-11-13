@@ -149,6 +149,7 @@ component Canvas inherits Rectangle {
         width: parent.width;
         height: parent.height - 30px;
         buttons: Store.pad-buttons;
+        glyphs: Store.pad-glyphs;
         selected: Store.selected-input;
         select(id) => { Store.select-input(id); }
     }
@@ -169,23 +170,50 @@ component Canvas inherits Rectangle {
     }
 
     // Controller tools (below the layer banner and device choice, if shown)
-    if Store.device-tab == 2: HorizontalLayout {
+    if Store.device-tab == 2: VerticalLayout {
         x: parent.width - self.width - 16px;
         y: 12px + (Store.layer != 0 ? 36px : 0) + (Store.device-names.length > 1 ? 36px : 0);
         width: self.preferred-width;
-        height: 28px;
-        spacing: 10px;
-        Text { text: "Pointer moves with"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
-        Segmented {
-            items: Store.stick-items;
-            current: Store.stick-current;
-            selected(i) => { Store.set-stick(i); }
+        height: self.preferred-height;
+        spacing: 6px;
+        HorizontalLayout {
+            alignment: end;
+            height: 28px;
+            spacing: 10px;
+            Text { text: "Stick moves pointer"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Segmented {
+                items: Store.stick-items;
+                current: Store.stick-current;
+                selected(i) => { Store.set-stick(i); }
+            }
+            Text { text: "Speed"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            ValueField {
+                width: 54px;
+                value: Store.stick-speed;
+                committed(v) => { Store.set-stick-speed(v); }
+            }
         }
-        Text { text: "Speed"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
-        ValueField {
-            width: 54px;
-            value: Store.stick-speed;
-            committed(v) => { Store.set-stick-speed(v); }
+        HorizontalLayout {
+            alignment: end;
+            height: 28px;
+            spacing: 10px;
+            Text { text: "Gyro"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Segmented {
+                items: Store.gyro-items;
+                current: Store.gyro-current;
+                selected(i) => { Store.set-gyro(i); }
+            }
+            Text { text: "Touchpad"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Segmented {
+                items: Store.touch-items;
+                current: Store.touch-current;
+                selected(i) => { Store.set-touch(i); }
+            }
+            Button {
+                text: Store.pad-detecting ? "Press a button…" : "Detect button";
+                primary: Store.pad-detecting;
+                clicked => { Store.detect-pad(); }
+            }
         }
     }
 

@@ -28,6 +28,8 @@ impl Engine {
 
     pub fn capture_device(&self, _on: bool) {}
 
+    pub fn detect_pad(&self, _on: bool) {}
+
     pub fn start_recording(&self) -> bool {
         false
     }

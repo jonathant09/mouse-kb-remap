@@ -68,12 +68,37 @@ plain remap). Buttons without per-device bindings are not affected.
 
 ## Controller buttons do nothing
 
-- The app reads controllers through XInput: Xbox controllers and most PC gamepads. A
-  PlayStation or Switch controller needs a tool that presents it as an Xbox controller
-  (DS4Windows, or the driver's "XInput mode").
-- It only reads the controller while the active profile remaps a controller input or moves
-  the pointer with a stick. `mouse-kb-remap.log` says *controller 1 connected* once it does.
+- It only reads controllers while the active profile remaps a controller input or moves the
+  pointer with one. `mouse-kb-remap.log` then says *controller: … connected (XInput)* or
+  *controller: reading <name>*.
+- Check *Settings → Controllers*: *Xbox-style controllers* covers Xbox and XInput pads,
+  *PlayStation, Switch, Steam and other controllers* everything else.
+- An unknown controller's buttons are numbered: use **Detect button** on the Controller tab
+  and press the button to find which one it is.
+- If a **Switch** controller does nothing over Bluetooth, unpair and pair it again: it has to
+  accept the app's request for full reports.
+- **The original Steam Controller (2015)** isn't read directly; with Steam running, its
+  desktop layout can send keys the app remaps. **Switch 2** controllers aren't supported yet.
 - A game still sees the original buttons as well; the app can't hide them.
+
+## Controller buttons count twice
+
+Something else presents the same controller as an Xbox controller too: DS4Windows,
+BetterJoy, DSX, or Steam Input. Steam's copies are skipped by default; for the others, turn
+off one of the two sources in *Settings → Controllers* (or hide the real controller in that
+tool's settings, e.g. HidHide for DS4Windows, and keep *Xbox-style controllers* on).
+
+## Gyro or touchpad does nothing, or the gyro drifts
+
+- **Gyro** needs a PlayStation, Switch or Steam controller (Xbox controllers have none) and
+  either *Gyro: On* for the profile or a button bound to the **Gyro** action held down.
+- Let the controller lie still for a second: the app learns the gyro's resting drift then.
+  If it moves the wrong way, use the invert switches in *Settings → Controllers*.
+- On Bluetooth, a PlayStation controller sends motion and touchpad only in its full report
+  mode, which the app requests when a profile uses them; reconnect it if it was connected
+  before the app started.
+- A Steam Deck or Steam Controller moves the mouse with its own trackpad too unless Steam is
+  running or *Turn off … own mouse mode* is on.
 
 ## A per-device binding doesn't apply
 

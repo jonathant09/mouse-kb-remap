@@ -53,9 +53,16 @@ export global Store {
     in property <int> device-current;      // 0 all devices
     in property <string> device-note;      // shown instead of the drawing ("" none)
     in property <[MouseBtn]> pad-buttons;
+    in property <[string]> pad-glyphs;     // short glyphs for the drawing, by PadButton order
     in property <[string]> stick-items;    // what moves the pointer
     in property <int> stick-current;
     in property <string> stick-speed;
+    in property <[string]> gyro-items;     // gyro moves the pointer: (Same as Default,) Off, On
+    in property <int> gyro-current;
+    in property <[string]> touch-items;    // touchpad moves the pointer
+    in property <int> touch-current;
+    in property <bool> pad-detecting;      // waiting for a controller press to select it
+    in property <bool> gyro-toggle;        // Gyro action: toggle instead of hold
     in property <int> layer;               // 0 base, 1 shift, 2-3
     in property <[string]> layer-names: ["Base", "Shift", "Layer 2", "Layer 3"];
     in property <string> layer-banner;     // "SHIFT LAYER · hold Back to use"
@@ -177,6 +184,15 @@ export global Store {
     in property <[DeviceItem]> devices;    // named devices
     in property <bool> adding-device;      // waiting for a press on the new device
     in property <bool> keyboards-per-device; // the platform can tell keyboards apart
+    in property <string> pad-gyro-speed;
+    in property <string> pad-touch-speed;
+    in property <bool> pad-invert-x;
+    in property <bool> pad-invert-y;
+    in property <int> pad-labels;          // 0 Xbox, 1 PlayStation, 2 Nintendo
+    in property <bool> pad-xinput;         // read Xbox-style controllers
+    in property <bool> pad-direct;         // read other controllers directly
+    in property <bool> pad-skip-steam;     // skip Steam's virtual controllers
+    in property <bool> pad-lizard;         // turn off Steam devices' own mouse mode
 
     // ---- status bar ----------------------------------------------------------------
     in property <string> focused-app;
@@ -213,6 +229,13 @@ export global Store {
     callback tab-changed();                // device-tab was changed in the UI
     callback set-stick(int);               // index into stick-items
     callback set-stick-speed(string);
+    callback set-gyro(int);                // index into gyro-items
+    callback set-touch(int);               // index into touch-items
+    callback detect-pad();                 // start / stop waiting for a controller press
+    callback set-gyro-toggle(bool);
+    callback set-pad-number(string, string); // "gyro" / "touch", value
+    callback set-pad-flag(string, bool);   // "invert_x", "invert_y", "xinput", "direct", "skip_steam", "lizard"
+    callback set-pad-labels(int);
     callback add-device();                 // start / stop waiting for a press
     callback rename-device(int, string);
     callback remove-device(int);

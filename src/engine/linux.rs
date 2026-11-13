@@ -17,13 +17,13 @@
 //! (see docs/troubleshooting.md for the udev rule).
 
 use super::dispatch::{Ctx, Dispatcher, Phase, Sink};
-use super::pad::{self, PadReading};
+use super::pad::{self, PadReading, PadState, PointerSettings};
 use super::player::{self, Cmd, Out};
 use super::{
     match_device, pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo,
     HotkeyBinding, Input, Layers, RecEvent, WindowInfo,
 };
-use crate::config::{MouseButton, StickPointer, SystemCommand};
+use crate::config::{MouseButton, PadButton, PadSettings, StickPointer, SystemCommand};
 
 use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::HashSet;
@@ -200,23 +200,25 @@ fn code_to_button(code: u16) -> Option<MouseButton> {
     BUTTONS.iter().find(|(_, c)| *c == code).map(|(b, _)| *b)
 }
 
-/// Controller buttons (evdev code → `PadReading` bit). Codes as the xpad
-/// driver uses them; some drivers swap X and Y.
-const PAD_KEYS: &[(u16, u16)] = &[
-    (0x130, pad::PAD_A),     // BTN_SOUTH
-    (0x131, pad::PAD_B),     // BTN_EAST
-    (0x133, pad::PAD_X),     // BTN_X / BTN_NORTH
-    (0x134, pad::PAD_Y),     // BTN_Y / BTN_WEST
-    (0x136, pad::PAD_LB),    // BTN_TL
-    (0x137, pad::PAD_RB),    // BTN_TR
-    (0x13a, pad::PAD_BACK),  // BTN_SELECT
-    (0x13b, pad::PAD_START), // BTN_START
-    (0x13d, pad::PAD_LS),    // BTN_THUMBL
-    (0x13e, pad::PAD_RS),    // BTN_THUMBR
-    (0x220, pad::PAD_UP),    // BTN_DPAD_UP
-    (0x221, pad::PAD_DOWN),
-    (0x222, pad::PAD_LEFT),
-    (0x223, pad::PAD_RIGHT),
+/// Controller buttons by evdev code. The kernel drivers (xpad,
+/// hid-playstation, hid-nintendo, hid-steam) report by position like this
+/// app; a few older drivers swap X and Y.
+const PAD_KEYS: &[(u16, PadButton)] = &[
+    (0x130, PadButton::A),     // BTN_SOUTH
+    (0x131, PadButton::B),     // BTN_EAST
+    (0x133, PadButton::Y),     // BTN_NORTH
+    (0x134, PadButton::X),     // BTN_WEST
+    (0x136, PadButton::Lb),    // BTN_TL
+    (0x137, PadButton::Rb),    // BTN_TR
+    (0x13a, PadButton::Back),  // BTN_SELECT
+    (0x13b, PadButton::Start), // BTN_START
+    (0x13c, PadButton::Guide), // BTN_MODE
+    (0x13d, PadButton::Ls),    // BTN_THUMBL
+    (0x13e, PadButton::Rs),    // BTN_THUMBR
+    (0x220, PadButton::Up),    // BTN_DPAD_UP
+    (0x221, PadButton::Down),
+    (0x222, PadButton::Left),
+    (0x223, PadButton::Right),
 ];
 const BTN_TL2: u16 = 0x138;
 const BTN_TR2: u16 = 0x139;
@@ -286,6 +288,11 @@ struct Shared {
     /// The last controller reading, for moving the pointer with a stick.
     stick: Mutex<PadReading>,
     stick_speed: AtomicU32,
+    pad: Mutex<PadSettings>,
+    /// "Detect button": the next controller press selects that input.
+    detect: AtomicBool,
+    /// The Gyro action holds (or toggled) the gyro mouse on.
+    gyro_held: AtomicBool,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -346,6 +353,9 @@ impl Engine {
             pointer: (AtomicI32::new(0), AtomicI32::new(0)),
             stick: Mutex::new(PadReading::default()),
             stick_speed: AtomicU32::new(compiled.stick_speed),
+            pad: Mutex::new(compiled.pad.clone()),
+            detect: AtomicBool::new(false),
+            gyro_held: AtomicBool::new(false),
         });
         recompute_active(&WindowInfo::default(), false);
 
@@ -396,7 +406,14 @@ impl Engine {
         }
         sh.devices_gen.fetch_add(1, Ordering::SeqCst);
         sh.stick_speed.store(compiled.stick_speed, Ordering::SeqCst);
+        if let Ok(mut p) = sh.pad.lock() {
+            *p = compiled.pad.clone();
+        }
         profile_changed_elsewhere();
+    }
+
+    pub fn detect_pad(&self, on: bool) {
+        shared().detect.store(on, Ordering::SeqCst);
     }
 
     pub fn capture_device(&self, on: bool) {
@@ -486,16 +503,27 @@ enum Kind {
     Grab,
     /// Game controller: read only, games keep seeing it.
     Pad,
+    /// A controller's motion sensors (gyro), read only.
+    Motion,
 }
 
 /// What to do with a device. Keyboards and mice are grabbed; game
-/// controllers are read; touchpads, tablets and joysticks are left alone.
+/// controllers and their motion sensors are read; touchpads (the desktop
+/// already handles a PlayStation touchpad) and tablets are left alone.
 fn wanted(dev: &Device) -> Option<Kind> {
     if dev.name() == Some(VIRTUAL_NAME) {
         return None;
     }
+    if dev.properties().contains(evdev::PropType::ACCELEROMETER) {
+        return Some(Kind::Motion);
+    }
     let keys = dev.supported_keys();
-    if keys.is_some_and(|k| k.contains(KeyCode(0x130)) && k.contains(KeyCode(0x131))) {
+    let has = |code: u16| keys.is_some_and(|k| k.contains(KeyCode(code)));
+    // A gamepad (or one Joy-Con), or a joystick with buttons.
+    if (has(0x130) && has(0x131))
+        || (has(0x220) && has(0x136))
+        || (has(0x120) && dev.supported_absolute_axes().is_some())
+    {
         return Some(Kind::Pad);
     }
     if dev.supported_absolute_axes().is_some_and(|a| a.iter().next().is_some()) {
@@ -543,6 +571,7 @@ fn device_scanner() {
                 match kind {
                     Kind::Grab => device_loop(dev),
                     Kind::Pad => pad_loop(dev),
+                    Kind::Motion => motion_loop(dev),
                 }
                 // Unplugged (or failed): allow a re-grab when it comes back.
                 if let Ok(mut g) = grabbed.lock() {
@@ -650,6 +679,17 @@ fn scale_axis(value: i32, min: i32, max: i32, trigger: bool) -> i32 {
     }
 }
 
+/// Numbered button of a joystick-style key code (unknown layouts):
+/// `BTN_TRIGGER`.. (0x120-0x12f) are buttons 1-16, `BTN_TRIGGER_HAPPY1`..
+/// (0x2c0-0x2cf) buttons 17-32.
+fn numbered_button(code: u16) -> Option<u8> {
+    match code {
+        0x120..=0x12f => Some((code - 0x120 + 1) as u8),
+        0x2c0..=0x2cf => Some((code - 0x2c0 + 17) as u8),
+        _ => None,
+    }
+}
+
 /// A game controller: build up a reading from its events, and at each
 /// report turn the changes into inputs. Not grabbed, so nothing is
 /// swallowed: games keep seeing the controller.
@@ -669,7 +709,7 @@ fn pad_loop(mut dev: Device) {
     };
     let mut device = DeviceMatch::new(&dev);
     let mut reading = PadReading::default();
-    let mut mask = 0u32;
+    let mut state = PadState::default();
     let sh = shared();
     loop {
         let events: Vec<InputEvent> = match dev.fetch_events() {
@@ -677,7 +717,7 @@ fn pad_loop(mut dev: Device) {
             Err(e) => {
                 crate::log!("engine: controller read failed: {e}");
                 // Unplugged: release whatever was held.
-                for (b, _) in pad::changes(mask, 0) {
+                for (b, _) in state.release_all() {
                     dispatch(Input::Pad(b), Phase::Up, device.index());
                 }
                 return;
@@ -690,16 +730,23 @@ fn pad_loop(mut dev: Device) {
                     if value == 1 {
                         device.pressed();
                     }
-                    if let Some((_, bit)) = PAD_KEYS.iter().find(|(c, _)| *c == code) {
+                    if let Some((_, b)) = PAD_KEYS.iter().find(|(c, _)| *c == code) {
                         if value != 0 {
-                            reading.buttons |= bit;
+                            reading.buttons |= pad::bit(*b);
                         } else {
-                            reading.buttons &= !bit;
+                            reading.buttons &= !pad::bit(*b);
                         }
                     } else if code == BTN_TL2 {
                         reading.lt = if value != 0 { 255 } else { 0 };
                     } else if code == BTN_TR2 {
                         reading.rt = if value != 0 { 255 } else { 0 };
+                    } else if let Some(n) = numbered_button(code) {
+                        let b = 1u32 << (n - 1);
+                        if value != 0 {
+                            reading.numbered |= b;
+                        } else {
+                            reading.numbered &= !b;
+                        }
                     }
                 }
                 EV_ABS => {
@@ -714,15 +761,15 @@ fn pad_loop(mut dev: Device) {
                         ABS_RZ => reading.rt = scale_axis(value, min, max, true) as u8,
                         ABS_HAT0X | ABS_HAT0Y => {
                             let (neg, pos) = if code == ABS_HAT0X {
-                                (pad::PAD_LEFT, pad::PAD_RIGHT)
+                                (PadButton::Left, PadButton::Right)
                             } else {
-                                (pad::PAD_UP, pad::PAD_DOWN)
+                                (PadButton::Up, PadButton::Down)
                             };
-                            reading.buttons &= !(neg | pos);
+                            reading.buttons &= !(pad::bit(neg) | pad::bit(pos));
                             if value < 0 {
-                                reading.buttons |= neg;
+                                reading.buttons |= pad::bit(neg);
                             } else if value > 0 {
-                                reading.buttons |= pos;
+                                reading.buttons |= pad::bit(pos);
                             }
                         }
                         _ => {}
@@ -732,15 +779,89 @@ fn pad_loop(mut dev: Device) {
                     if let Ok(mut s) = sh.stick.lock() {
                         *s = reading;
                     }
-                    let next = pad::pad_mask(&reading, mask);
-                    for (b, down) in pad::changes(mask, next) {
+                    // Pointer movement from the stick runs on its own thread
+                    // (a held stick sends no events); gyro on the motion device.
+                    let (changes, _) = state.update(&reading, 0.0, &PointerSettings::default(), false);
+                    for (b, down) in changes {
+                        if down && sh.detect.swap(false, Ordering::SeqCst) {
+                            (sh.on_event)(EngineEvent::PadDetected {
+                                input: format!("pad:{}", b.id()),
+                            });
+                            continue;
+                        }
                         dispatch(
                             Input::Pad(b),
                             if down { Phase::Down } else { Phase::Up },
                             device.index(),
                         );
                     }
-                    mask = next;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A controller's motion sensors (a separate device on Linux): gyro moves
+/// the pointer while the profile or the Gyro action asks for it. Axis
+/// resolution is in units per degree per second.
+fn motion_loop(mut dev: Device) {
+    let mut res = [16.0f32; 3];
+    if let Ok(infos) = dev.get_absinfo() {
+        for (axis, info) in infos {
+            let i = match axis.0 {
+                ABS_RX => 0,
+                ABS_RY => 1,
+                ABS_RZ => 2,
+                _ => continue,
+            };
+            if info.resolution() > 0 {
+                res[i] = info.resolution() as f32;
+            }
+        }
+    }
+    let sh = shared();
+    let mut gyro = [0.0f32; 3];
+    let mut mouse = pad::GyroMouse::default();
+    let mut last = Instant::now();
+    loop {
+        let events: Vec<InputEvent> = match dev.fetch_events() {
+            Ok(it) => it.collect(),
+            Err(_) => return,
+        };
+        for ev in events {
+            let (ty, code, value) = (ev.event_type().0, ev.code(), ev.value());
+            match (ty, code) {
+                (EV_ABS, ABS_RX) => gyro[0] = value as f32 / res[0],
+                (EV_ABS, ABS_RY) => gyro[1] = value as f32 / res[1],
+                (EV_ABS, ABS_RZ) => gyro[2] = value as f32 / res[2],
+                (EV_SYN, SYN_REPORT) => {
+                    let now = Instant::now();
+                    let dt = now.duration_since(last).as_secs_f32().min(0.05);
+                    last = now;
+                    let layers = sh.active.read().ok().and_then(|a| a.clone());
+                    let on = sh.enabled.load(Ordering::Relaxed)
+                        && (layers.as_ref().is_some_and(|l| l.gyro_pointer) || sh.gyro_held.load(Ordering::Relaxed));
+                    let settings = sh.pad.lock().map(|p| p.clone()).unwrap_or_default();
+                    let s = PointerSettings {
+                        gyro_speed: settings.gyro_speed,
+                        gyro_invert_x: settings.gyro_invert_x,
+                        gyro_invert_y: settings.gyro_invert_y,
+                        ..Default::default()
+                    };
+                    let (dx, dy) = mouse.update(gyro, dt, &s, on);
+                    if dx != 0 || dy != 0 {
+                        let mut events = Vec::new();
+                        out_to_events(
+                            &Out::Move {
+                                x: dx,
+                                y: dy,
+                                absolute: false,
+                            },
+                            &mut events,
+                        );
+                        emit_raw(&events);
+                    }
                 }
                 _ => {}
             }
@@ -1013,6 +1134,10 @@ impl Sink for UinputSink<'_> {
             self.sh.pointer.0.load(Ordering::Relaxed),
             self.sh.pointer.1.load(Ordering::Relaxed),
         ))
+    }
+
+    fn gyro(&mut self, on: bool) {
+        self.sh.gyro_held.store(on, Ordering::Relaxed);
     }
 }
 

@@ -19,7 +19,8 @@ cargo build --release        # exe at target\release\mouse-kb-remap.exe
 .\start.bat install          # build + install/update Documents\mouse-kb-remap (see below)
 cargo run -- --quit          # ask the running copy to quit
 cargo test                   # unit tests (config, keys, dispatcher, scheduler, …)
-cargo test list_devices -- --ignored --nocapture   # the mice and controllers Windows reports here
+cargo test list_devices -- --ignored --nocapture       # the mice and XInput slots Windows reports here
+cargo test list_controllers -- --ignored --nocapture   # the controllers the app would read over HID
 cargo clippy --all-targets   # lints (CI fails on warnings)
 cargo fmt                    # formatting (max width 120, see rustfmt.toml)
 ```

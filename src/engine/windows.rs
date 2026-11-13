@@ -21,13 +21,14 @@
 //! Controller events arrive from the controller thread as thread messages.
 
 use super::dispatch::{wheel_for, Ctx, Dispatcher, Phase, Sink};
+use super::pad::PointerSettings;
 use super::player::{self, Cmd, Out};
 use super::win_devices::{self, WM_PAD, WM_RAW_BUTTON};
 use super::{
     pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo, HotkeyBinding, Input,
     Layers, RecEvent, WindowInfo,
 };
-use crate::config::{MouseButton, PadButton};
+use crate::config::{MouseButton, PadSettings};
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -157,6 +158,7 @@ struct Shared {
     recording: AtomicBool,
     record: Mutex<Option<Recording>>,
     stick_speed: AtomicU32,
+    pad: Mutex<PadSettings>,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -222,6 +224,7 @@ impl Engine {
             recording: AtomicBool::new(false),
             record: Mutex::new(None),
             stick_speed: AtomicU32::new(compiled.stick_speed),
+            pad: Mutex::new(compiled.pad.clone()),
         });
         let sh = shared();
         win_devices::set_devices(compiled.devices);
@@ -260,6 +263,9 @@ impl Engine {
             *h = Arc::new(compiled.hotkeys);
         }
         sh.stick_speed.store(compiled.stick_speed, Ordering::SeqCst);
+        if let Ok(mut p) = sh.pad.lock() {
+            *p = compiled.pad.clone();
+        }
         win_devices::set_devices(compiled.devices);
         profile_changed_elsewhere();
     }
@@ -267,6 +273,10 @@ impl Engine {
     pub fn capture_device(&self, on: bool) {
         win_devices::set_capture(on);
         post_engine(WM_UPDATE_HOOKS);
+    }
+
+    pub fn detect_pad(&self, on: bool) {
+        win_devices::set_detect(on);
     }
 
     pub fn force_profile(&self, index: Option<usize>) {
@@ -395,9 +405,8 @@ fn engine_thread() {
                         continue;
                     }
                     WM_PAD => {
-                        let i = msg.wParam.0 & 0xFF;
-                        if let Some(&b) = PadButton::ALL.get(i) {
-                            let phase = if msg.wParam.0 & 0x100 != 0 {
+                        if let Some(b) = win_devices::pad_from_code(msg.wParam.0) {
+                            let phase = if msg.wParam.0 & win_devices::PAD_RELEASED != 0 {
                                 Phase::Up
                             } else {
                                 Phase::Down
@@ -443,11 +452,25 @@ fn update_mouse_hook() {
     let sh = shared();
     let active = sh.active.read().ok().and_then(|a| a.clone());
     let wanted = sh.recording.load(Ordering::SeqCst) || active.as_ref().is_some_and(|l| l.uses_mouse());
+    let settings = sh.pad.lock().map(|p| p.clone()).unwrap_or_default();
+    let pointer = PointerSettings {
+        stick: active.as_ref().map(|l| l.stick_pointer).unwrap_or_default(),
+        stick_speed: sh.stick_speed.load(Ordering::SeqCst),
+        gyro: active.as_ref().is_some_and(|l| l.gyro_pointer),
+        gyro_speed: settings.gyro_speed,
+        gyro_invert_x: settings.gyro_invert_x,
+        gyro_invert_y: settings.gyro_invert_y,
+        touch: active.as_ref().is_some_and(|l| l.touch_pointer),
+        touch_speed: settings.touch_speed,
+    };
     win_devices::update(
         active.as_ref().is_some_and(|l| l.mouse_device_bindings()),
         active.as_ref().is_some_and(|l| l.uses_pad()),
-        active.as_ref().map(|l| l.stick_pointer).unwrap_or_default(),
-        sh.stick_speed.load(Ordering::SeqCst),
+        active
+            .as_ref()
+            .is_some_and(|l| l.gyro_pointer || l.touch_pointer || l.gyro_bound),
+        pointer,
+        settings,
     );
     let busy = DISPATCH.with(|d| d.borrow().holds_mouse()) || DEFERRED.with(|q| !q.borrow().is_empty());
     MOUSE_HOOK.with(|hook| match (wanted, hook.get()) {
@@ -1117,7 +1140,12 @@ fn original_mouse_input(msg: u32, mouse_data: u32) -> INPUT {
     mouse_input(flags, data)
 }
 
-/// Move the pointer by (dx, dy) like a mouse would (controller stick).
+/// Whether remapping is on (controller pointer movement pauses with it).
+pub(super) fn remapping_on() -> bool {
+    shared().enabled.load(Ordering::Relaxed)
+}
+
+/// Move the pointer by (dx, dy) like a mouse would (controller stick, gyro, touchpad).
 pub(super) fn send_move(dx: i32, dy: i32) {
     send(&[move_input(dx, dy, false)]);
 }
@@ -1188,6 +1216,10 @@ impl Sink for HookSink<'_> {
         let mut p = POINT::default();
         unsafe { GetCursorPos(&mut p) }.ok()?;
         Some((p.x, p.y))
+    }
+
+    fn gyro(&mut self, on: bool) {
+        win_devices::set_gyro_held(on);
     }
 }
 

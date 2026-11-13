@@ -486,7 +486,17 @@ export component Inspector inherits Rectangle {
                     if Store.selected-kind == 10: TapHoldEditor { }
                     if Store.selected-kind == 11: SystemEditor { }
                     if Store.selected-kind == 12: GestureEditor { }
-                    if Store.selected-kind == 13: Hint { text: "This input is blocked while the profile is active."; }
+                    if Store.selected-kind == 13: VerticalLayout {
+                        spacing: 8px;
+                        Hint { text: "Tilt the controller to move the pointer (PlayStation, Switch and Steam controllers have a gyro). Speed and direction are in Settings → Controllers."; }
+                        Segmented {
+                            items: ["While held", "Toggle on / off"];
+                            current: Store.gyro-toggle ? 1 : 0;
+                            selected(i) => { Store.set-gyro-toggle(i == 1); }
+                        }
+                        Hint { text: "\"While held\" is the usual way to aim: hold the button, tilt, let go to stop."; }
+                    }
+                    if Store.selected-kind == 14: Hint { text: "This input is blocked while the profile is active."; }
 
                     if !Store.selected-is-combo && Store.slot == 0: VerticalLayout {
                         spacing: 10px;

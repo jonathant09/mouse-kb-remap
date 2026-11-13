@@ -35,6 +35,8 @@ pub trait Sink {
     /// Where the pointer is now, in pixels (only differences matter), for
     /// gestures. `None` if unknown.
     fn pointer(&mut self) -> Option<(i32, i32)>;
+    /// The Gyro action turned the controller gyro mouse on or off.
+    fn gyro(&mut self, _on: bool) {}
 }
 
 /// What the dispatcher needs to know about the world for one event.
@@ -86,6 +88,9 @@ pub struct Dispatcher {
     lifted: Vec<(Input, Vec<u16>)>,
     /// Gesture inputs held, with the pointer position at the press.
     gestures: Vec<(Input, Option<(i32, i32)>)>,
+    /// Inputs holding the gyro mouse on, and whether it is toggled on.
+    gyro_hold: u32,
+    gyro_lock: bool,
 }
 
 fn mod_vks(mods: u8) -> impl DoubleEndedIterator<Item = u16> {
@@ -450,7 +455,22 @@ impl Dispatcher {
                 target: target.clone(),
                 tap: false,
             }),
+            Target::Gyro { toggle: false } => {
+                self.gyro_hold += 1;
+                sink.gyro(self.gyro_on());
+            }
+            Target::Gyro { toggle: true } => self.toggle_gyro(sink),
         }
+    }
+
+    fn gyro_on(&self) -> bool {
+        self.gyro_hold > 0 || self.gyro_lock
+    }
+
+    fn toggle_gyro(&mut self, sink: &mut impl Sink) {
+        self.gyro_lock = !self.gyro_lock;
+        sink.gyro(self.gyro_on());
+        sink.notice(format!("Gyro mouse {}", if self.gyro_lock { "on" } else { "off" }));
     }
 
     fn release(&mut self, input: Input, target: &Target, sink: &mut impl Sink) {
@@ -468,10 +488,17 @@ impl Dispatcher {
                 sink.out(Out::Button { button: b, down: false });
                 sink.flush();
             }
-            Target::Disabled | Target::TapHold(_) | Target::Layer { toggle: true, .. } => {}
+            Target::Disabled
+            | Target::TapHold(_)
+            | Target::Layer { toggle: true, .. }
+            | Target::Gyro { toggle: true } => {}
             Target::Layer { layer, toggle: false } => {
                 let n = &mut self.layer_hold[layer as usize];
                 *n = n.saturating_sub(1);
+            }
+            Target::Gyro { toggle: false } => {
+                self.gyro_hold = self.gyro_hold.saturating_sub(1);
+                sink.gyro(self.gyro_on());
             }
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Release(input)),
             Target::Gesture(ref spec) => {
@@ -530,7 +557,12 @@ impl Dispatcher {
                     self.tap(input, &t, sink, immediate);
                 }
             }
-            Target::Disabled | Target::Layer { .. } | Target::Sensitivity(_) | Target::TapHold(_) => {}
+            Target::Gyro { toggle: true } => self.toggle_gyro(sink),
+            Target::Disabled
+            | Target::Layer { .. }
+            | Target::Sensitivity(_)
+            | Target::TapHold(_)
+            | Target::Gyro { toggle: false } => {}
         }
     }
 
@@ -627,6 +659,9 @@ mod tests {
         }
         fn pointer(&mut self) -> Option<(i32, i32)> {
             Some(self.pointer)
+        }
+        fn gyro(&mut self, on: bool) {
+            self.events.push(format!("gyro {on}"));
         }
     }
 
@@ -778,6 +813,39 @@ mod tests {
         assert_eq!(press(&mut t, Some(0)), Some(k(0x41, true)));
         assert_eq!(press(&mut t, Some(1)), Some(k(0xA2, false)));
         assert!(t.s.out.contains(&k(0x43, true)));
+    }
+
+    #[test]
+    fn gyro_action_holds_or_toggles() {
+        let rb = Input::Pad(crate::config::PadButton::Rb);
+        let lb = Input::Pad(crate::config::PadButton::Lb);
+        let mut t = T::new(layers(
+            vec![
+                (rb, Target::Gyro { toggle: false }),
+                (lb, Target::Gyro { toggle: true }),
+            ],
+            vec![],
+        ));
+        t.down(rb);
+        t.up(rb);
+        assert_eq!(t.s.events, vec!["gyro true", "gyro false"]);
+        t.s.events.clear();
+        t.down(lb);
+        t.up(lb);
+        t.down(rb); // held while toggled on: stays on after release
+        t.up(rb);
+        t.down(lb);
+        assert_eq!(
+            t.s.events,
+            vec![
+                "gyro true",
+                "Gyro mouse on",
+                "gyro true",
+                "gyro true",
+                "gyro false",
+                "Gyro mouse off"
+            ]
+        );
     }
 
     #[test]

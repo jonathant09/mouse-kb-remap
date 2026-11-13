@@ -9,17 +9,20 @@
 //!   raw input. The thread only registers for raw input while it's needed
 //!   (per-device bindings, or adding a device), because every mouse movement
 //!   then wakes it.
-//! * **Controller thread.** Polls XInput controllers while the active profile
-//!   uses one, turns button, trigger and stick changes into input events for
-//!   the engine thread, and moves the pointer with a stick.
+//! * **Controllers.** An XInput thread polls Xbox-style controllers;
+//!   `win_hid.rs` reads PlayStation, Switch, Steam and other controllers.
+//!   Both hand every reading to `on_reading`, which turns changes into input
+//!   events for the engine thread and moves the pointer (stick, gyro,
+//!   touchpad). Nothing is read while the active profile doesn't use a
+//!   controller.
 
-use super::pad::{self, PadReading};
+use super::pad::{PadReading, PadState, PointerSettings};
 use super::{match_device, DeviceIndex, EngineEvent};
-use crate::config::{Device, PadButton, StickPointer};
+use crate::config::{Device, PadButton, PadSettings};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -28,7 +31,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPA
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::XboxController::{XInputGetState, XINPUT_STATE};
 use windows::Win32::UI::Input::{
@@ -43,9 +46,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// To the engine thread: a mouse's raw report. `wParam` = raw button flags
 /// (`RI_MOUSE_*`), `lParam` = device index + 1, or 0 when not a named device.
 pub const WM_RAW_BUTTON: u32 = WM_APP + 3;
-/// To the engine thread: a controller input changed. `wParam` = index in
-/// `PadButton::ALL`, plus 0x100 when released; `lParam` as above.
+/// To the engine thread: a controller input changed. `wParam` = `pad_code`,
+/// plus `PAD_RELEASED` when released; `lParam` as above.
 pub const WM_PAD: u32 = WM_APP + 4;
+pub const PAD_RELEASED: usize = 0x1_0000;
 /// To the raw input thread: register or unregister as needed.
 const WM_REGISTER: u32 = WM_APP + 1;
 
@@ -55,7 +59,7 @@ const RAW_PRESSES: u16 = 0x0001 | 0x0004 | 0x0010 | 0x0040 | 0x0100 | 0x0400 | 0
 /// Device id used for synthetic input while testing (`ACCEPT_INJECTED`).
 const INJECTED_ID: &str = "injected";
 
-/// How often controllers are read: 250 times a second.
+/// How often XInput controllers are read: 250 times a second.
 const PAD_POLL: Duration = Duration::from_millis(4);
 /// Unplugged controller slots are slow to ask about; check them this often.
 const PAD_RESCAN: Duration = Duration::from_secs(1);
@@ -65,10 +69,26 @@ static RAW_WANTED: AtomicBool = AtomicBool::new(false);
 static RAW_ON: AtomicBool = AtomicBool::new(false);
 static CAPTURE: AtomicBool = AtomicBool::new(false);
 static PAD_WANTED: AtomicBool = AtomicBool::new(false);
-static STICK: AtomicU8 = AtomicU8::new(0);
-static STICK_SPEED: AtomicU32 = AtomicU32::new(10);
+/// Gyro or touchpad pointer in use (some controllers need switching to
+/// their full reports for that).
+static MOTION: AtomicBool = AtomicBool::new(false);
+/// "Detect button": the next controller press selects that input.
+static DETECT: AtomicBool = AtomicBool::new(false);
+static GYRO_HELD: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 static DEVICES: RwLock<Vec<Device>> = RwLock::new(Vec::new());
+
+#[derive(Clone, Default)]
+struct PadConfig {
+    pointer: PointerSettings,
+    settings: PadSettings,
+}
+
+static PAD_CONFIG: Mutex<Option<PadConfig>> = Mutex::new(None);
+
+fn pad_config() -> PadConfig {
+    PAD_CONFIG.lock().ok().and_then(|c| c.clone()).unwrap_or_default()
+}
 
 struct Ctx {
     on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>,
@@ -78,7 +98,7 @@ struct Ctx {
 
 static CTX: OnceLock<Ctx> = OnceLock::new();
 
-/// Start both threads (they idle until needed).
+/// Start the threads (they idle until needed).
 pub fn start(on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>, accept_injected: bool, magic: usize) {
     let _ = CTX.set(Ctx {
         on_event,
@@ -90,9 +110,10 @@ pub fn start(on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>, accept_injected: 
         .spawn(raw_thread)
         .expect("failed to spawn raw input thread");
     std::thread::Builder::new()
-        .name("remap-controller".into())
-        .spawn(pad_thread)
+        .name("remap-xinput".into())
+        .spawn(xinput_thread)
         .expect("failed to spawn controller thread");
+    super::win_hid::start();
 }
 
 /// The named devices changed.
@@ -103,20 +124,15 @@ pub fn set_devices(devices: Vec<Device>) {
     GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
-/// What the active profile needs: device reports for mouse buttons, and
-/// controller polling (with the stick that moves the pointer).
-pub fn update(raw: bool, pad: bool, stick: StickPointer, speed: u32) {
+/// What the active profile needs: device reports for mouse buttons,
+/// controllers (and how they move the pointer).
+pub fn update(raw: bool, pad: bool, motion: bool, pointer: PointerSettings, settings: PadSettings) {
     RAW_WANTED.store(raw, Ordering::SeqCst);
     PAD_WANTED.store(pad, Ordering::SeqCst);
-    STICK.store(
-        match stick {
-            StickPointer::Off => 0,
-            StickPointer::Left => 1,
-            StickPointer::Right => 2,
-        },
-        Ordering::SeqCst,
-    );
-    STICK_SPEED.store(speed.clamp(1, 20), Ordering::SeqCst);
+    MOTION.store(motion, Ordering::SeqCst);
+    if let Ok(mut c) = PAD_CONFIG.lock() {
+        *c = Some(PadConfig { pointer, settings });
+    }
     post_raw(WM_REGISTER);
 }
 
@@ -126,10 +142,63 @@ pub fn set_capture(on: bool) {
     post_raw(WM_REGISTER);
 }
 
+/// Report the next controller input pressed (to select it in the UI).
+pub fn set_detect(on: bool) {
+    DETECT.store(on, Ordering::SeqCst);
+}
+
+/// The Gyro action is holding the gyro mouse on (or toggled it).
+pub fn set_gyro_held(on: bool) {
+    GYRO_HELD.store(on, Ordering::SeqCst);
+}
+
 /// Whether device reports are coming (so holding back mouse buttons for
 /// them is worth it).
 pub fn reporting() -> bool {
     RAW_ON.load(Ordering::SeqCst) && RAW_WANTED.load(Ordering::SeqCst)
+}
+
+/// Whether controllers should be read at all right now.
+fn pads_needed() -> bool {
+    PAD_WANTED.load(Ordering::SeqCst) || CAPTURE.load(Ordering::SeqCst) || DETECT.load(Ordering::SeqCst)
+}
+
+/// Read controllers directly over HID (`win_hid.rs`).
+pub fn wants_direct() -> bool {
+    pads_needed() && pad_config().settings.direct
+}
+
+fn wants_xinput() -> bool {
+    pads_needed() && pad_config().settings.xinput
+}
+
+/// Gyro or touchpad pointer in use.
+pub fn wants_motion() -> bool {
+    MOTION.load(Ordering::SeqCst)
+}
+
+/// Turn off Steam devices' own mouse mode while reading them.
+pub fn steam_lizard_off() -> bool {
+    pad_config().settings.steam_lizard_off
+}
+
+/// `WM_PAD` code of a controller input.
+pub fn pad_code(b: PadButton) -> usize {
+    match b {
+        PadButton::Button(n) => 0x100 + n as usize - 1,
+        b => PadButton::ALL.iter().position(|x| *x == b).unwrap_or(0),
+    }
+}
+
+/// The controller input of a `WM_PAD` code.
+pub fn pad_from_code(code: usize) -> Option<PadButton> {
+    let code = code & !PAD_RELEASED;
+    if code >= 0x100 {
+        let n = code - 0x100 + 1;
+        (n <= PadButton::MAX_NUMBERED as usize).then_some(PadButton::Button(n as u8))
+    } else {
+        PadButton::ALL.get(code).copied()
+    }
 }
 
 fn post_raw(message: u32) {
@@ -343,137 +412,226 @@ fn product_name(path: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Controllers (XInput)
+// Controllers
 // ---------------------------------------------------------------------------
 
-fn pad_thread() {
-    let mut masks = [0u32; 4];
-    let mut connected = [false; 4];
-    let mut rest = [(0.0f32, 0.0f32); 4];
-    let mut last_scan = Instant::now() - PAD_RESCAN;
-    let mut last = Instant::now();
-    loop {
-        let capture = CAPTURE.load(Ordering::SeqCst);
-        if !PAD_WANTED.load(Ordering::SeqCst) && !capture {
-            // Idle: forget state, so nothing counts as held when it resumes.
-            masks = [0; 4];
-            connected = [false; 4];
-            last_scan = Instant::now() - PAD_RESCAN;
-            std::thread::sleep(Duration::from_millis(200));
-            last = Instant::now();
-            continue;
+/// One controller being read (an XInput slot or a HID device).
+pub struct Source {
+    /// `Device::id`: `xinput:1`, or the HID device path.
+    pub id: String,
+    pub name: String,
+    state: PadState,
+    last: Option<Instant>,
+    generation: u32,
+    device: Option<DeviceIndex>,
+}
+
+impl Source {
+    pub fn new(id: String, name: String) -> Self {
+        Source {
+            id,
+            name,
+            state: PadState::default(),
+            last: None,
+            generation: u32::MAX,
+            device: None,
         }
-        let now = Instant::now();
-        let dt = now.duration_since(last).as_secs_f32().min(0.05);
-        last = now;
-        let rescan = now.duration_since(last_scan) >= PAD_RESCAN;
-        if rescan {
-            last_scan = now;
+    }
+
+    pub fn has_reported(&self) -> bool {
+        self.last.is_some()
+    }
+
+    /// The named device this controller is, kept up to date with the list.
+    fn device(&mut self) -> Option<DeviceIndex> {
+        let generation = GENERATION.load(Ordering::SeqCst);
+        if generation != self.generation {
+            self.generation = generation;
+            self.device = DEVICES.read().ok().and_then(|d| match_device(&d, &self.id));
         }
-        for slot in 0..4 {
-            if !connected[slot] && !rescan {
-                continue;
-            }
-            let mut state = XINPUT_STATE::default();
-            if unsafe { XInputGetState(slot as u32, &mut state) } != 0 {
-                if connected[slot] {
-                    // Unplugged: release whatever was held.
-                    send_changes(slot, masks[slot], 0);
-                    masks[slot] = 0;
-                    crate::log!("engine: controller {} disconnected", slot + 1);
-                }
-                connected[slot] = false;
-                continue;
-            }
-            if !connected[slot] {
-                connected[slot] = true;
-                crate::log!("engine: controller {} connected", slot + 1);
-            }
-            let g = state.Gamepad;
-            let reading = PadReading {
-                buttons: g.wButtons.0,
-                lt: g.bLeftTrigger,
-                rt: g.bRightTrigger,
-                lx: g.sThumbLX,
-                ly: g.sThumbLY,
-                rx: g.sThumbRX,
-                ry: g.sThumbRY,
-            };
-            let mask = pad::pad_mask(&reading, masks[slot]);
-            if capture && mask & !masks[slot] != 0 {
-                captured(format!("xinput:{}", slot + 1), format!("Controller {}", slot + 1));
-            }
-            if PAD_WANTED.load(Ordering::SeqCst) {
-                send_changes(slot, masks[slot], mask);
-                let (sx, sy) = match STICK.load(Ordering::SeqCst) {
-                    1 => (reading.lx, reading.ly),
-                    2 => (reading.rx, reading.ry),
-                    _ => (0, 0),
-                };
-                let (dx, dy) = pad::stick_move(sx, sy, STICK_SPEED.load(Ordering::SeqCst), dt, &mut rest[slot]);
-                if dx != 0 || dy != 0 {
-                    super::windows::send_move(dx, dy);
-                }
-            }
-            masks[slot] = mask;
-        }
-        std::thread::sleep(PAD_POLL);
+        self.device
     }
 }
 
-/// Tell the engine thread about inputs that went down or up.
-fn send_changes(slot: usize, before: u32, after: u32) {
-    if before == after {
-        return;
+/// A controller sent a reading: report what changed to the engine thread
+/// and move the pointer.
+pub fn on_reading(src: &mut Source, r: &PadReading) {
+    let now = Instant::now();
+    let dt = src
+        .last
+        .map_or(0.004, |t| now.duration_since(t).as_secs_f32())
+        .min(0.05);
+    src.last = Some(now);
+    let config = pad_config();
+    let wanted = PAD_WANTED.load(Ordering::SeqCst) && super::windows::remapping_on();
+    let pointer = if wanted {
+        config.pointer
+    } else {
+        PointerSettings::default()
+    };
+    let (changes, moved) = src
+        .state
+        .update(r, dt, &pointer, wanted && GYRO_HELD.load(Ordering::SeqCst));
+    if let Some(&(b, _)) = changes.iter().find(|(_, down)| *down) {
+        if CAPTURE.load(Ordering::SeqCst) {
+            captured(src.id.clone(), src.name.clone());
+        }
+        if DETECT.swap(false, Ordering::SeqCst) {
+            if let Some(c) = CTX.get() {
+                (c.on_event)(EngineEvent::PadDetected {
+                    input: format!("pad:{}", b.id()),
+                });
+            }
+            return;
+        }
     }
-    let device = DEVICES
-        .read()
-        .ok()
-        .and_then(|d| match_device(&d, &format!("xinput:{}", slot + 1)));
-    for (b, down) in pad::changes(before, after) {
-        let i = PadButton::ALL.iter().position(|x| *x == b).unwrap_or(0);
+    if PAD_WANTED.load(Ordering::SeqCst) {
+        send_changes(src.device(), &changes);
+    }
+    if moved != (0, 0) {
+        super::windows::send_move(moved.0, moved.1);
+    }
+}
+
+/// A controller went away: release whatever it held.
+pub fn on_gone(src: &mut Source) {
+    let changes = src.state.release_all();
+    send_changes(src.device(), &changes);
+}
+
+fn send_changes(device: Option<DeviceIndex>, changes: &[(PadButton, bool)]) {
+    for &(b, down) in changes {
         super::windows::post_engine_with(
             WM_PAD,
-            WPARAM(i | if down { 0 } else { 0x100 }),
+            WPARAM(pad_code(b) | if down { 0 } else { PAD_RELEASED }),
             LPARAM(device.map_or(0, |d| d as isize + 1)),
         );
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use windows::Win32::UI::Input::{GetRawInputDeviceList, RAWINPUTDEVICELIST, RIM_TYPEMOUSE};
+type GetStateFn = unsafe extern "system" fn(u32, *mut XINPUT_STATE) -> u32;
+type GetCapsExFn = unsafe extern "system" fn(u32, u32, u32, *mut CapsEx) -> u32;
 
-    /// Lists the mice and controllers on this PC as the app would name them.
-    /// `cargo test list_devices -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn list_devices() {
-        let mut n = 0u32;
-        let size = std::mem::size_of::<RAWINPUTDEVICELIST>() as u32;
-        unsafe { GetRawInputDeviceList(None, &mut n, size) };
-        let mut list = vec![RAWINPUTDEVICELIST::default(); n as usize];
-        let got = unsafe { GetRawInputDeviceList(Some(list.as_mut_ptr()), &mut n, size) };
-        assert_ne!(got, u32::MAX);
-        let mut mice = 0;
-        for d in &list[..got as usize] {
-            if d.dwType != RIM_TYPEMOUSE {
+/// `XINPUT_CAPABILITIES_EX`: the documented capabilities, then vendor and
+/// product ids.
+#[repr(C)]
+#[derive(Default)]
+struct CapsEx {
+    caps: [u8; 20],
+    vendor: u16,
+    product: u16,
+    version: u16,
+    unknown1: u16,
+    unknown2: u32,
+}
+
+/// XInput's unnamed exports: `XInputGetStateEx` (ordinal 100) also reports
+/// the Guide button, `XInputGetCapabilitiesEx` (108) the vendor / product.
+struct XInputEx {
+    get_state: Option<GetStateFn>,
+    get_caps: Option<GetCapsExFn>,
+}
+
+impl XInputEx {
+    fn load() -> Self {
+        unsafe {
+            let Ok(lib) = LoadLibraryW(w!("xinput1_4.dll")) else {
+                return XInputEx {
+                    get_state: None,
+                    get_caps: None,
+                };
+            };
+            let ordinal = |n: usize| GetProcAddress(lib, windows::core::PCSTR(n as *const u8));
+            XInputEx {
+                get_state: ordinal(100).map(|f| std::mem::transmute::<_, GetStateFn>(f)),
+                get_caps: ordinal(108).map(|f| std::mem::transmute::<_, GetCapsExFn>(f)),
+            }
+        }
+    }
+
+    fn state(&self, slot: u32, state: &mut XINPUT_STATE) -> u32 {
+        unsafe {
+            match self.get_state {
+                Some(f) => f(slot, state),
+                None => XInputGetState(slot, state),
+            }
+        }
+    }
+
+    /// Vendor and product of the controller in a slot, if XInput says.
+    fn ids(&self, slot: u32) -> Option<(u16, u16)> {
+        let f = self.get_caps?;
+        let mut caps = CapsEx::default();
+        (unsafe { f(1, slot, 0, &mut caps) } == 0).then_some((caps.vendor, caps.product))
+    }
+}
+
+/// Steam Input's virtual Xbox controller.
+const STEAM_VIRTUAL: (u16, u16) = (0x28DE, 0x11FF);
+
+fn xinput_thread() {
+    let ex = XInputEx::load();
+    let mut sources: [Option<Source>; 4] = Default::default();
+    let mut skipped = [false; 4];
+    let mut last_scan = Instant::now() - PAD_RESCAN;
+    loop {
+        if !wants_xinput() {
+            for s in sources.iter_mut() {
+                if let Some(mut src) = s.take() {
+                    on_gone(&mut src);
+                }
+            }
+            skipped = [false; 4];
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        let rescan = last_scan.elapsed() >= PAD_RESCAN;
+        if rescan {
+            last_scan = Instant::now();
+        }
+        let skip_virtual = pad_config().settings.skip_steam_virtual;
+        for slot in 0..4u32 {
+            let i = slot as usize;
+            if sources[i].is_none() && !skipped[i] && !rescan {
                 continue;
             }
-            let path = device_path(d.hDevice).expect("device path");
-            println!("mouse: {:?} → {}", product_name(&path), path);
-            mice += 1;
-        }
-        assert!(mice > 0, "no mouse found");
-        for slot in 0..4 {
             let mut state = XINPUT_STATE::default();
-            let connected = unsafe { XInputGetState(slot, &mut state) } == 0;
-            println!(
-                "controller slot {}: {}",
-                slot + 1,
-                if connected { "connected" } else { "empty" }
-            );
+            if ex.state(slot, &mut state) != 0 {
+                if let Some(mut src) = sources[i].take() {
+                    on_gone(&mut src);
+                    crate::log!("controller: {} disconnected", src.name);
+                }
+                skipped[i] = false;
+                continue;
+            }
+            if sources[i].is_none() {
+                if skipped[i] {
+                    continue;
+                }
+                if skip_virtual && ex.ids(slot) == Some(STEAM_VIRTUAL) {
+                    crate::log!("controller: skipping Steam's virtual controller {}", slot + 1);
+                    skipped[i] = true;
+                    continue;
+                }
+                let name = format!("Controller {}", slot + 1);
+                crate::log!("controller: {name} connected (XInput)");
+                sources[i] = Some(Source::new(format!("xinput:{}", slot + 1), name));
+            }
+            let g = state.Gamepad;
+            let reading = PadReading {
+                buttons: super::pad::from_xinput(g.wButtons.0),
+                lt: g.bLeftTrigger,
+                rt: g.bRightTrigger,
+                lx: g.sThumbLX.max(-32767),
+                ly: g.sThumbLY.max(-32767),
+                rx: g.sThumbRX.max(-32767),
+                ry: g.sThumbRY.max(-32767),
+                ..Default::default()
+            };
+            if let Some(src) = sources[i].as_mut() {
+                on_reading(src, &reading);
+            }
         }
+        std::thread::sleep(PAD_POLL);
     }
 }

@@ -87,6 +87,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 | **Tap / hold** | One action on a quick press, another when held, optionally a third on a double tap ([Tap / hold](#tap--hold)) |
 | **System** | Lock the PC, mute the microphone, switch audio output, act on the focused window, switch profile ([System actions](#system-actions)) |
 | **Gesture** | Hold and move the mouse up, down, left or right, then let go: a different action per direction ([Gestures](#gestures)) |
+| **Gyro** | Hold (or toggle) to move the pointer by tilting a controller ([Moving the pointer](#moving-the-pointer)) |
 | **Off** | The input is swallowed and does nothing |
 
 Remapped inputs are outlined in the accent color. On the keyboard, the new key is printed in
@@ -190,23 +191,64 @@ the middle of the screen.
 
 ## Controllers
 
-The **Controller** tab shows an Xbox-style controller. Every button, both triggers, the d-pad
+The **Controller** tab shows a generic controller. Every button, both triggers, the d-pad
 and each stick pushed up, down, left or right (past half way) can be remapped like a mouse
 button: to keys, mouse buttons, macros, layers, tap / hold and so on. Combos work too, e.g.
 *Ctrl + A*.
 
-**Pointer moves with** (top right) lets the left or right stick move the mouse pointer while
-this profile is active, faster the further you push it; **Speed** is 1–20. Other profiles
-use Default's choice unless they pick their own (*Same as Default*), so a game profile can
-turn it off.
+Buttons are matched **by position**: the bottom face button is the same input on every
+controller (A on Xbox, Cross on PlayStation, B on Nintendo). *Settings → Controllers →
+Button names* shows the names of the controller you use.
 
-On Windows this works with controllers that use XInput: Xbox controllers and most PC
-gamepads (PlayStation controllers through DS4Windows or a similar tool). The app reads the
-controller only while the active profile uses it.
+| Controller | Read through | Extras |
+| --- | --- | --- |
+| Xbox One / Series / 360, and pads that work like one | XInput | Guide button |
+| DualShock 4, DualSense, DualSense Edge | USB or Bluetooth | PS button, touchpad click, mic button, Edge back paddles (*Extra 1 / 2*) and Fn buttons (*Extra 3 / 4*), gyro, touchpad |
+| Switch Pro Controller, Joy-Cons | USB or Bluetooth | Home, Capture, Joy-Con SL / SR (*Extra* buttons), gyro. Two Joy-Cons act as one controller. |
+| Steam Deck (Windows on a Deck), Steam Controller (2025) | USB, Bluetooth or its dongle | Steam and quick access (…) buttons, L4 / R4 (*Extra 1 / 2*), L5 / R5 (*Extra 3 / 4*), trackpad clicks, gyro, right trackpad |
+| Anything else that calls itself a gamepad or joystick (Bluetooth phone controllers, 8BitDo in DirectInput mode, arcade sticks…) | USB or Bluetooth | Sticks and d-pad by position; buttons as *Button 1–32* |
 
-Remapping can't hide a controller's buttons from games: a game that reads the controller
-still sees them. Remap buttons the game doesn't use, or use the controller to drive other
-apps (a media PC, a browser, a second screen while gaming).
+For buttons that aren't on the drawing (numbered buttons, the Steam left trackpad click),
+click **Detect button** and press it: it gets selected, like *Detect key* on the keyboard.
+
+### Moving the pointer
+
+Three settings at the top right, each per profile (other profiles use Default's choice
+unless they pick their own, so a game profile can turn them off):
+
+- **Stick moves pointer**: the left or right stick moves the pointer, faster the further
+  you push it; **Speed** is 1–20.
+- **Gyro**: turning the controller left or right moves the pointer sideways, tilting it up
+  or down moves it up and down (PlayStation, Switch and Steam controllers). To aim only
+  while you hold a button, leave it *Off* and bind that button to the **Gyro** action
+  (*While held*, or *Toggle on / off*). The gyro learns its own drift while the controller
+  lies still for a second.
+- **Touchpad**: the PlayStation touchpad or the Steam right trackpad moves the pointer like
+  a laptop touchpad. Bind *Touchpad click* to *Left click* to click with it.
+
+Gyro and touchpad speed, and which way the gyro moves, are in *Settings → Controllers*.
+
+### Steam, DS4Windows and games
+
+- The app reads controllers **shared**: games and Steam keep reading them too. That also
+  means remapping can't hide a controller's buttons from a game: remap buttons the game
+  doesn't use, or use the controller to drive other apps (a media PC, a browser, a second
+  screen while gaming).
+- **Steam Input** adds an Xbox-style copy of a controller while it's on. *Skip Steam's
+  virtual controllers* (on by default) keeps the app on the real one, so nothing counts
+  twice.
+- Tools like **DS4Windows** or **BetterJoy** also add an Xbox copy. If buttons count twice,
+  turn off either *Xbox-style controllers* or *PlayStation, Switch, Steam and other
+  controllers* in *Settings → Controllers*.
+- Without Steam running, a **Steam Deck** or **Steam Controller** moves the mouse with its
+  trackpads and clicks with its triggers by itself. *Turn off the Steam Deck's / Steam
+  Controller's own mouse mode* stops that while the app reads it (it comes back a few
+  seconds after the app stops).
+- A **PlayStation controller on Bluetooth** only sends its gyro and touchpad after a
+  program asks for them (Steam does). The app asks only when a profile uses the gyro or
+  touchpad; games that read the controller through DirectInput may lose it until it
+  reconnects.
+- The app reads controllers only while the active profile uses one.
 
 ## Devices
 

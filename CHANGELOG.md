@@ -2,11 +2,22 @@
 
 ## 0.4.0
 
-- **Game controllers.** A new *Controller* tab maps the buttons, triggers, d-pad and stick
-  directions of an Xbox-style controller (XInput) to keys, mouse buttons, macros and every
-  other action, with layers, combos and tap / hold like any other input. A stick can move the
-  pointer, per profile, at a speed you choose. Games still see the controller's own buttons,
-  so remap ones the game doesn't use or use the controller in other apps.
+- **Game controllers.** A new *Controller* tab maps every button, trigger, d-pad direction and
+  stick direction to keys, mouse buttons, macros and every other action, with layers, combos
+  and tap / hold like any other input. Supported: Xbox and XInput controllers (now with the
+  Guide button), DualShock 4, DualSense and DualSense Edge (PS button, touchpad click, mic
+  button, Edge paddles and Fn buttons), Switch Pro Controller and Joy-Cons (Home, Capture,
+  SL / SR; two Joy-Cons act as one controller), the Steam Deck and the Steam Controller
+  (2025) with their back buttons, and any other gamepad or joystick (Bluetooth phone
+  controllers, 8BitDo in DirectInput mode…) as numbered buttons, which *Detect button*
+  picks for you. Button names can follow Xbox, PlayStation or Nintendo.
+- **Pointer from a controller**, per profile: a stick, the gyro (tilt to aim, always or
+  while a *Gyro* button is held or toggled) or the touchpad (PlayStation touchpad, Steam
+  trackpad). Speeds and inversion in *Settings → Controllers*.
+- **Works alongside Steam and other tools**: controllers are read shared, Steam Input's
+  virtual Xbox copies are skipped, and the Steam Deck's / Steam Controller's own mouse mode
+  can be turned off while the app reads them. Games still see a controller's own buttons, so
+  remap ones the game doesn't use or use the controller in other apps.
 - **Mouse gestures.** The *Gesture* action: hold a button, move the mouse up, down, left or
   right and let go to do something different for each direction; letting go without moving
   does what the button did (a normal click by default). The distance to move is adjustable.

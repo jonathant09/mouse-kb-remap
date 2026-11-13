@@ -18,12 +18,17 @@ use std::sync::Arc;
 
 pub mod dispatch;
 pub mod pad;
+// Read directly over HID on Windows; on Linux the kernel drivers do this.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub mod pad_hid;
 pub mod player;
 
 #[cfg(windows)]
 mod win_actions;
 #[cfg(windows)]
 mod win_devices;
+#[cfg(windows)]
+mod win_hid;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -88,6 +93,11 @@ pub enum EngineEvent {
         /// What the device calls itself, for a first name.
         name: String,
     },
+    /// A controller input was pressed while "Detect button" was on.
+    PadDetected {
+        /// Input id, e.g. `pad:button7`.
+        input: String,
+    },
 }
 
 /// Index into `Compiled::devices` (and `Config::devices`).
@@ -134,6 +144,10 @@ pub enum Target {
     TapHold(Arc<TapHold>),
     /// Decided on release by how far the pointer moved.
     Gesture(Arc<Gesture>),
+    /// Controller gyro moves the pointer while held, or toggle it.
+    Gyro {
+        toggle: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -215,6 +229,11 @@ pub struct Layers {
     pub combos: [Vec<ComboBinding>; LAYER_COUNT],
     /// Controller stick that moves the pointer.
     pub stick_pointer: StickPointer,
+    /// The controller gyro / touchpad moves the pointer.
+    pub gyro_pointer: bool,
+    pub touch_pointer: bool,
+    /// Some input is bound to the Gyro action.
+    pub gyro_bound: bool,
 }
 
 impl Layers {
@@ -242,7 +261,11 @@ impl Layers {
     /// pointer), so the controller has to be read.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn uses_pad(&self) -> bool {
-        self.stick_pointer != StickPointer::Off || self.inputs().any(|i| matches!(i, Input::Pad(_)))
+        self.stick_pointer != StickPointer::Off
+            || self.gyro_pointer
+            || self.touch_pointer
+            || self.gyro_bound
+            || self.inputs().any(|i| matches!(i, Input::Pad(_)))
     }
 
     /// Whether `input` does anything on any layer.
@@ -350,6 +373,9 @@ pub struct Compiled {
     /// Pointer speed for a controller stick (1-20).
     #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub stick_speed: u32,
+    /// Gyro, touchpad and which controllers to read.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    pub pad: crate::config::PadSettings,
 }
 
 /// Which named device a backend device id belongs to: an exact id match,
@@ -604,6 +630,7 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
             )))
         }
         Action::System { command } => system_target(*command),
+        Action::Gyro { toggle } => Target::Gyro { toggle: *toggle },
         Action::TapHold {
             tap,
             hold,
@@ -740,6 +767,8 @@ pub fn compile(cfg: &Config) -> Compiled {
         let own = (index > 0).then(|| &cfg.profiles[index]);
         let mut layers = Layers {
             stick_pointer: cfg.stick_pointer(index),
+            gyro_pointer: cfg.gyro_pointer(index),
+            touch_pointer: cfg.touch_pointer(index),
             ..Layers::default()
         };
         for (l, inherited) in default.iter().enumerate() {
@@ -761,6 +790,16 @@ pub fn compile(cfg: &Config) -> Compiled {
             layers.device_maps[l] = parts.device;
             layers.combos[l] = parts.combos;
         }
+        let is_gyro = |t: &Target| match t {
+            Target::Gyro { .. } => true,
+            Target::TapHold(th) => [&th.tap, &th.hold, &th.double]
+                .iter()
+                .any(|p| matches!(p, Some(Target::Gyro { .. }))),
+            _ => false,
+        };
+        layers.gyro_bound = layers.maps.iter().flat_map(|m| m.values()).any(is_gyro)
+            || layers.device_maps.iter().flat_map(|m| m.values()).any(is_gyro)
+            || layers.combos.iter().flatten().any(|c| is_gyro(&c.target));
         layers
     };
     let mut profiles: Vec<CompiledProfile> = cfg
@@ -789,6 +828,7 @@ pub fn compile(cfg: &Config) -> Compiled {
         hotkeys: compile_hotkeys(cfg),
         devices: cfg.devices.clone(),
         stick_speed: cfg.stick_speed.clamp(1, 20),
+        pad: cfg.pad.clone(),
     }
 }
 
@@ -876,6 +916,12 @@ impl Engine {
     /// `EngineEvent::DeviceCaptured` (the press itself goes through).
     pub fn capture_device(&self, on: bool) {
         self.inner.capture_device(on);
+    }
+
+    /// Report the next controller input pressed as
+    /// `EngineEvent::PadDetected` (instead of acting on it).
+    pub fn detect_pad(&self, on: bool) {
+        self.inner.detect_pad(on);
     }
 
     /// Start recording keys and mouse buttons for a macro.

@@ -122,7 +122,8 @@ impl MouseButton {
 }
 
 /// A game controller (gamepad) button, or a stick pushed in one direction,
-/// as an input. Xbox names; other controllers map to the same positions.
+/// as an input. Named by position, with Xbox names (A is the bottom face
+/// button on every controller: Cross on PlayStation, B on Nintendo).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PadButton {
     A,
@@ -149,10 +150,28 @@ pub enum PadButton {
     RsDown,
     RsLeft,
     RsRight,
+    /// Xbox / PS / Home / Steam button.
+    Guide,
+    /// Xbox Share, Switch Capture, Steam "…" (quick access).
+    Share,
+    /// PlayStation touchpad click, Steam right trackpad click.
+    Touchpad,
+    /// DualSense microphone button.
+    Mic,
+    /// Extra buttons: back paddles, Joy-Con SL / SR, Steam L4 / R4 / L5 / R5.
+    P1,
+    P2,
+    P3,
+    P4,
+    /// Steam left trackpad click.
+    LeftPad,
+    /// Numbered button of a controller the app doesn't know (1-32).
+    Button(u8),
 }
 
 impl PadButton {
-    pub const ALL: [PadButton; 24] = [
+    /// Every named input, in the order of their bits (see `engine::pad::bit`).
+    pub const ALL: [PadButton; 33] = [
         PadButton::A,
         PadButton::B,
         PadButton::X,
@@ -177,10 +196,22 @@ impl PadButton {
         PadButton::RsDown,
         PadButton::RsLeft,
         PadButton::RsRight,
+        PadButton::Guide,
+        PadButton::Share,
+        PadButton::Touchpad,
+        PadButton::Mic,
+        PadButton::P1,
+        PadButton::P2,
+        PadButton::P3,
+        PadButton::P4,
+        PadButton::LeftPad,
     ];
 
-    pub fn id(self) -> &'static str {
-        match self {
+    /// Highest numbered button.
+    pub const MAX_NUMBERED: u8 = 32;
+
+    pub fn id(self) -> String {
+        let s = match self {
             PadButton::A => "a",
             PadButton::B => "b",
             PadButton::X => "x",
@@ -205,15 +236,33 @@ impl PadButton {
             PadButton::RsDown => "rs_down",
             PadButton::RsLeft => "rs_left",
             PadButton::RsRight => "rs_right",
-        }
+            PadButton::Guide => "guide",
+            PadButton::Share => "share",
+            PadButton::Touchpad => "touchpad",
+            PadButton::Mic => "mic",
+            PadButton::P1 => "p1",
+            PadButton::P2 => "p2",
+            PadButton::P3 => "p3",
+            PadButton::P4 => "p4",
+            PadButton::LeftPad => "left_pad",
+            PadButton::Button(n) => return format!("button{n}"),
+        };
+        s.to_string()
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
+        if let Some(n) = id.strip_prefix("button") {
+            return n
+                .parse::<u8>()
+                .ok()
+                .filter(|n| (1..=Self::MAX_NUMBERED).contains(n))
+                .map(PadButton::Button);
+        }
         Self::ALL.into_iter().find(|b| b.id() == id)
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
+    pub fn name(self) -> String {
+        let s = match self {
             PadButton::A => "A",
             PadButton::B => "B",
             PadButton::X => "X",
@@ -238,7 +287,18 @@ impl PadButton {
             PadButton::RsDown => "Right stick down",
             PadButton::RsLeft => "Right stick left",
             PadButton::RsRight => "Right stick right",
-        }
+            PadButton::Guide => "Guide / Home",
+            PadButton::Share => "Share / Capture",
+            PadButton::Touchpad => "Touchpad click",
+            PadButton::Mic => "Mic button",
+            PadButton::P1 => "Extra 1",
+            PadButton::P2 => "Extra 2",
+            PadButton::P3 => "Extra 3",
+            PadButton::P4 => "Extra 4",
+            PadButton::LeftPad => "Left trackpad click",
+            PadButton::Button(n) => return format!("Button {n}"),
+        };
+        s.to_string()
     }
 
     pub fn detail(self) -> &'static str {
@@ -252,9 +312,29 @@ impl PadButton {
             | PadButton::RsDown
             | PadButton::RsLeft
             | PadButton::RsRight => "Controller stick, pushed past half way",
+            PadButton::Guide => "Xbox, PS, Home or Steam button",
+            PadButton::Share => "Xbox Share, Switch Capture, Steam quick access (…)",
+            PadButton::Touchpad => "PlayStation touchpad click, Steam right trackpad click",
+            PadButton::Mic => "DualSense microphone button",
+            PadButton::P1 => "Left back paddle · Joy-Con (L) SL · Steam L4",
+            PadButton::P2 => "Right back paddle · Joy-Con (R) SR · Steam R4",
+            PadButton::P3 => "DualSense Edge left Fn · Joy-Con (L) SR · Steam L5",
+            PadButton::P4 => "DualSense Edge right Fn · Joy-Con (R) SL · Steam R5",
+            PadButton::LeftPad => "Steam left trackpad click",
+            PadButton::Button(_) => "Button of a controller without a known layout",
             _ => "Controller button",
         }
     }
+}
+
+/// Which button names the controller drawing shows.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PadLabels {
+    #[default]
+    Xbox,
+    PlayStation,
+    Nintendo,
 }
 
 /// Which controller stick moves the mouse pointer.
@@ -616,6 +696,11 @@ pub enum Action {
         #[serde(default = "d40")]
         distance: u32,
     },
+    /// Controller gyro moves the pointer while held, or toggle it.
+    Gyro {
+        #[serde(default, skip_serializing_if = "is_false")]
+        toggle: bool,
+    },
 }
 
 impl Action {
@@ -730,6 +815,7 @@ impl Action {
                 s
             }
             Action::System { command } => command.name().to_string(),
+            Action::Gyro { toggle } => format!("Gyro mouse ({})", if *toggle { "toggle" } else { "hold" }),
             Action::Gesture {
                 tap,
                 up,
@@ -793,6 +879,7 @@ impl Action {
             Action::TapHold { .. } => "T/H".to_string(),
             Action::System { .. } => "Sys".to_string(),
             Action::Gesture { .. } => "Gst".to_string(),
+            Action::Gyro { .. } => "Gyr".to_string(),
         }
     }
 }
@@ -922,6 +1009,12 @@ pub struct Profile {
     /// profile (off for Default itself).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stick_pointer: Option<StickPointer>,
+    /// Tilting the controller moves the pointer (gyro). `None`: same as Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gyro_pointer: Option<bool>,
+    /// The controller's touchpad moves the pointer. `None`: same as Default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_pointer: Option<bool>,
 }
 
 impl Profile {
@@ -934,6 +1027,8 @@ impl Profile {
             shift_bindings: BTreeMap::new(),
             layers: vec![],
             stick_pointer: None,
+            gyro_pointer: None,
+            touch_pointer: None,
         }
     }
 
@@ -1210,6 +1305,48 @@ pub struct Config {
     /// Pointer speed when a controller stick moves it (1-20).
     #[serde(default = "d10")]
     pub stick_speed: u32,
+    /// Controller settings: gyro and touchpad speeds, button names, which
+    /// controllers are read.
+    #[serde(default)]
+    pub pad: PadSettings,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct PadSettings {
+    /// Pointer speed when the gyro moves it (1-20).
+    pub gyro_speed: u32,
+    pub gyro_invert_x: bool,
+    pub gyro_invert_y: bool,
+    /// Pointer speed when the touchpad moves it (1-20).
+    pub touch_speed: u32,
+    pub labels: PadLabels,
+    /// Read Xbox-style controllers (XInput).
+    pub xinput: bool,
+    /// Read PlayStation, Switch, Steam and other controllers directly (HID).
+    pub direct: bool,
+    /// Skip Steam's virtual Xbox controllers (Steam Input), which copy a real
+    /// controller the app may already be reading.
+    pub skip_steam_virtual: bool,
+    /// Turn off the Steam Deck's / Steam Controller's own mouse and keyboard
+    /// mode while the app reads it.
+    pub steam_lizard_off: bool,
+}
+
+impl Default for PadSettings {
+    fn default() -> Self {
+        PadSettings {
+            gyro_speed: 10,
+            gyro_invert_x: false,
+            gyro_invert_y: false,
+            touch_speed: 10,
+            labels: PadLabels::Xbox,
+            xinput: true,
+            direct: true,
+            skip_steam_virtual: true,
+            steam_lizard_off: false,
+        }
+    }
 }
 
 fn d10() -> u32 {
@@ -1254,6 +1391,7 @@ impl Default for Config {
             check_updates: false,
             devices: vec![],
             stick_speed: 10,
+            pad: PadSettings::default(),
         }
     }
 }
@@ -1430,6 +1568,24 @@ impl Config {
     }
 
     /// The stick that moves the pointer in profile `index`.
+    /// Whether the gyro moves the pointer in profile `index`.
+    pub fn gyro_pointer(&self, index: usize) -> bool {
+        self.profiles
+            .get(index)
+            .and_then(|p| p.gyro_pointer)
+            .or_else(|| self.profiles.first().and_then(|p| p.gyro_pointer))
+            .unwrap_or(false)
+    }
+
+    /// Whether the touchpad moves the pointer in profile `index`.
+    pub fn touch_pointer(&self, index: usize) -> bool {
+        self.profiles
+            .get(index)
+            .and_then(|p| p.touch_pointer)
+            .or_else(|| self.profiles.first().and_then(|p| p.touch_pointer))
+            .unwrap_or(false)
+    }
+
     pub fn stick_pointer(&self, index: usize) -> StickPointer {
         self.profiles
             .get(index)

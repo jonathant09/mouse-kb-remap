@@ -34,8 +34,10 @@ app that works with **any** mouse or keyboard.
   - **off**
 - **Combos as triggers**: Ctrl + Back, Right click + Left click, Shift + Wheel… do
   something other than the button alone.
-- **Game controllers** (XInput): remap buttons, triggers, d-pad and stick directions like
-  any other input, and move the pointer with a stick.
+- **Game controllers**: Xbox, PlayStation (DualShock 4, DualSense, Edge), Switch (Pro, Joy-Cons),
+  Steam Deck and Steam Controller, and any other gamepad: remap every button, trigger, d-pad and
+  stick direction like any other input, and move the pointer with a stick, the gyro or the
+  touchpad. Works alongside Steam.
 - **Bindings for one device**: give a second mouse, a trackball or a controller its own
   bindings (keyboards too on Linux).
 - **Macros** can move the pointer and randomize their delays.
@@ -75,7 +77,7 @@ replacing the exe with a newer version keeps them. To have it start when you sig
 | Area | State |
 | --- | --- |
 | Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, layers, tap / hold, gestures, per-device bindings, hotkeys, system actions, notifications, the command line and updating tested end-to-end on Windows 11 |
-| Controllers (XInput) | Working in unit tests; not yet tried with a real controller |
+| Controllers (XInput, PlayStation, Switch, Steam, other HID) | Report formats checked against SDL and unit-tested; reading tested on Windows 11 with no controller attached; not yet tried with real controllers |
 | UI (profiles, mouse and keyboard diagrams, macro editor, settings) | Working |
 | Linux engine (evdev + uinput, X11 focus tracking) | Experimental: builds and passes unit tests, not yet tried on real hardware |
 | macOS engine | Not yet (the UI runs in preview mode) |
@@ -152,7 +154,9 @@ src/
     windows.rs       Low-level hooks, timers, focus tracking, SendInput (Windows)
     win_actions.rs   System actions: audio, microphone, windows, lock (Windows)
     win_devices.rs   Which mouse a button came from (raw input), controllers (Windows)
-    pad.rs           Controller readings → inputs, stick → pointer
+    win_hid.rs       Controllers read directly over USB / Bluetooth (Windows)
+    pad_hid.rs       PlayStation, Switch and Steam controller report formats
+    pad.rs           Controller readings → inputs; stick, gyro, touchpad → pointer
     linux.rs         evdev grab + uinput output, X11 focus (Linux, experimental)
     fallback.rs      No-op engine so the UI runs on other OSes
 ui/
@@ -185,11 +189,13 @@ ui/
 - [x] Hotkeys and command line, on-screen notifications, undo / redo
 - [x] Window-title, path and fullscreen profile rules; system and window actions
 - [x] Mouse moves and random delays in macros; updates from inside the app
-- [x] Game controllers (XInput), stick as pointer
+- [x] Game controllers: Xbox, PlayStation, Switch, Steam Deck / Controller, generic HID;
+      stick, gyro and touchpad as pointer
 - [x] Mouse gestures (follow the pointer, so no mouse-movement hook is needed)
 - [x] Bindings for one mouse or controller (raw input on Windows, no driver needed); for one
       keyboard on Linux
-- [ ] Try controllers with real hardware; hide remapped controller buttons from games (needs
+- [ ] Try controllers with real hardware; the original Steam Controller (2015) and Switch 2
+      controllers; hide remapped controller buttons from games (needs
       a virtual controller driver such as ViGEmBus)
 - [ ] Bindings for one keyboard on Windows (needs a filter driver such as Interception, which
       anti-cheats often block)

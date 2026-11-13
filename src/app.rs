@@ -3,8 +3,8 @@
 
 use crate::config::{
     self, clean_device_name, combo_label, per_second, split_device, Action, Combo, Config, Device, Hotkey, Hotkeys,
-    Macro, MacroMode, MacroStep, Modifier, MouseButton, Output, PadButton, Profile, StickPointer, SystemCommand,
-    ThemeMode, LAYER_COUNT,
+    Macro, MacroMode, MacroStep, Modifier, MouseButton, Output, PadButton, PadLabels, Profile, StickPointer,
+    SystemCommand, ThemeMode, LAYER_COUNT,
 };
 use crate::engine::{self, AppCommand, Engine, EngineEvent, RecEvent};
 use crate::system::{self, Autostart};
@@ -56,10 +56,11 @@ const K_SENS: i32 = 9;
 const K_TAPHOLD: i32 = 10;
 const K_SYSTEM: i32 = 11;
 const K_GESTURE: i32 = 12;
-const K_OFF: i32 = 13;
+const K_GYRO: i32 = 13;
+const K_OFF: i32 = 14;
 
 /// Choices for a binding, in kind order.
-const KIND_NAMES: [&str; 14] = [
+const KIND_NAMES: [&str; 15] = [
     "Default",
     "Key",
     "Mouse",
@@ -73,11 +74,12 @@ const KIND_NAMES: [&str; 14] = [
     "Tap / hold",
     "System",
     "Gesture",
+    "Gyro",
     "Off",
 ];
 
 /// Choices for a part of a tap / hold binding, and their kinds.
-const SLOT_NAMES: [&str; 11] = [
+const SLOT_NAMES: [&str; 12] = [
     "Nothing",
     "Key",
     "Mouse",
@@ -89,9 +91,10 @@ const SLOT_NAMES: [&str; 11] = [
     "Layer",
     "Sensitivity",
     "System",
+    "Gyro",
 ];
-const SLOT_KINDS: [i32; 11] = [
-    K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM,
+const SLOT_KINDS: [i32; 12] = [
+    K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM, K_GYRO,
 ];
 const SLOT_TITLES: [&str; 4] = ["", "On tap", "On hold", "On double tap"];
 const GESTURE_TITLES: [&str; 6] = [
@@ -153,7 +156,9 @@ struct State {
     /// Device whose bindings are shown: 0 all devices, n `cfg.devices[n - 1]`.
     device: usize,
     /// Waiting for a press on a device to add.
+    /// (Next field: waiting for a controller press to select it.)
     adding_device: bool,
+    detecting: bool,
     /// Selected input id (`key:A`, `mouse:back`, a combo like
     /// `ctrl+mouse:back`) or empty.
     input: String,
@@ -388,6 +393,7 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
             layer: 0,
             device: 0,
             adding_device: false,
+            detecting: false,
             input: String::new(),
             slot: 0,
             pending_kind: None,
@@ -585,6 +591,7 @@ fn kind_of(action: &Action) -> i32 {
         Action::TapHold { .. } => K_TAPHOLD,
         Action::System { .. } => K_SYSTEM,
         Action::Gesture { .. } => K_GESTURE,
+        Action::Gyro { .. } => K_GYRO,
         Action::Disabled => K_OFF,
     }
 }
@@ -673,9 +680,7 @@ fn plain_label(input: &str) -> String {
             .map(|b| b.name().to_string())
             .unwrap_or_else(|| m.to_string())
     } else if let Some(p) = input.strip_prefix("pad:") {
-        PadButton::from_id(p)
-            .map(|b| b.name().to_string())
-            .unwrap_or_else(|| p.to_string())
+        PadButton::from_id(p).map(pad_name).unwrap_or_else(|| p.to_string())
     } else {
         input.to_string()
     };
@@ -689,34 +694,131 @@ fn plain_label(input: &str) -> String {
 /// keyboards apart (see engine/win_devices.rs); Linux reads each one.
 const KEYBOARDS_PER_DEVICE: bool = cfg!(target_os = "linux");
 
-/// Short names for the controller drawing's lists.
-fn short_pad_label(b: PadButton) -> &'static str {
-    match b {
-        PadButton::A => "A",
-        PadButton::B => "B",
-        PadButton::X => "X",
-        PadButton::Y => "Y",
-        PadButton::Lb => "LB",
-        PadButton::Rb => "RB",
-        PadButton::Lt => "LT",
-        PadButton::Rt => "RT",
-        PadButton::Back => "View",
-        PadButton::Start => "Menu",
-        PadButton::Ls => "LS click",
-        PadButton::Rs => "RS click",
-        PadButton::Up => "D-pad ↑",
-        PadButton::Down => "D-pad ↓",
-        PadButton::Left => "D-pad ←",
-        PadButton::Right => "D-pad →",
-        PadButton::LsUp => "LS ↑",
-        PadButton::LsDown => "LS ↓",
-        PadButton::LsLeft => "LS ←",
-        PadButton::LsRight => "LS →",
-        PadButton::RsUp => "RS ↑",
-        PadButton::RsDown => "RS ↓",
-        PadButton::RsLeft => "RS ←",
-        PadButton::RsRight => "RS →",
+thread_local! {
+    /// Controller button names in use (set by `refresh`), for labels made
+    /// outside it.
+    static PAD_STYLE: std::cell::Cell<PadLabels> = const { std::cell::Cell::new(PadLabels::Xbox) };
+}
+
+/// A controller input's name in the chosen style: "Cross ×" for the bottom
+/// face button with PlayStation names, Xbox's descriptive names otherwise.
+fn pad_name(b: PadButton) -> String {
+    let style = PAD_STYLE.with(|s| s.get());
+    let short = short_pad_label(b, style);
+    if style != PadLabels::Xbox && short != short_pad_label(b, PadLabels::Xbox) {
+        short
+    } else {
+        b.name()
     }
+}
+
+/// What's printed on a part of the controller drawing.
+fn pad_glyph(b: PadButton, style: PadLabels) -> &'static str {
+    use PadLabels::{Nintendo, PlayStation};
+    match (b, style) {
+        (PadButton::A, PlayStation) => "×",
+        (PadButton::B, PlayStation) => "○",
+        (PadButton::X, PlayStation) => "□",
+        (PadButton::Y, PlayStation) => "△",
+        (PadButton::A, Nintendo) => "B",
+        (PadButton::B, Nintendo) => "A",
+        (PadButton::X, Nintendo) => "Y",
+        (PadButton::Y, Nintendo) => "X",
+        (PadButton::A, _) => "A",
+        (PadButton::B, _) => "B",
+        (PadButton::X, _) => "X",
+        (PadButton::Y, _) => "Y",
+        (PadButton::Lb, PlayStation) => "L1",
+        (PadButton::Rb, PlayStation) => "R1",
+        (PadButton::Lt, PlayStation) => "L2",
+        (PadButton::Rt, PlayStation) => "R2",
+        (PadButton::Ls, PlayStation) => "L3",
+        (PadButton::Rs, PlayStation) => "R3",
+        (PadButton::Lb, Nintendo) => "L",
+        (PadButton::Rb, Nintendo) => "R",
+        (PadButton::Lt, Nintendo) => "ZL",
+        (PadButton::Rt, Nintendo) => "ZR",
+        (PadButton::Lb, _) => "LB",
+        (PadButton::Rb, _) => "RB",
+        (PadButton::Lt, _) => "LT",
+        (PadButton::Rt, _) => "RT",
+        (PadButton::Ls, _) => "LS",
+        (PadButton::Rs, _) => "RS",
+        (PadButton::Guide, PlayStation) => "PS",
+        (PadButton::Guide, Nintendo) => "⌂",
+        (PadButton::Guide, _) => "G",
+        (PadButton::Touchpad, _) => "touchpad",
+        _ => "",
+    }
+}
+
+/// Short names for the controller drawing, in the chosen button style.
+/// Positions stay the same: Xbox A, PlayStation Cross and Nintendo B are all
+/// the bottom face button.
+fn short_pad_label(b: PadButton, style: PadLabels) -> String {
+    use PadLabels::{Nintendo, PlayStation};
+    let s = match (b, style) {
+        (PadButton::A, PlayStation) => "Cross ×",
+        (PadButton::B, PlayStation) => "Circle ○",
+        (PadButton::X, PlayStation) => "Square □",
+        (PadButton::Y, PlayStation) => "Triangle △",
+        (PadButton::Lb, PlayStation) => "L1",
+        (PadButton::Rb, PlayStation) => "R1",
+        (PadButton::Lt, PlayStation) => "L2",
+        (PadButton::Rt, PlayStation) => "R2",
+        (PadButton::Back, PlayStation) => "Create",
+        (PadButton::Start, PlayStation) => "Options",
+        (PadButton::Ls, PlayStation) => "L3",
+        (PadButton::Rs, PlayStation) => "R3",
+        (PadButton::Guide, PlayStation) => "PS",
+        (PadButton::A, Nintendo) => "B",
+        (PadButton::B, Nintendo) => "A",
+        (PadButton::X, Nintendo) => "Y",
+        (PadButton::Y, Nintendo) => "X",
+        (PadButton::Lb, Nintendo) => "L",
+        (PadButton::Rb, Nintendo) => "R",
+        (PadButton::Lt, Nintendo) => "ZL",
+        (PadButton::Rt, Nintendo) => "ZR",
+        (PadButton::Back, Nintendo) => "Minus −",
+        (PadButton::Start, Nintendo) => "Plus +",
+        (PadButton::Guide, Nintendo) => "Home",
+        (PadButton::Share, Nintendo) => "Capture",
+        (PadButton::A, _) => "A",
+        (PadButton::B, _) => "B",
+        (PadButton::X, _) => "X",
+        (PadButton::Y, _) => "Y",
+        (PadButton::Lb, _) => "LB",
+        (PadButton::Rb, _) => "RB",
+        (PadButton::Lt, _) => "LT",
+        (PadButton::Rt, _) => "RT",
+        (PadButton::Back, _) => "View",
+        (PadButton::Start, _) => "Menu",
+        (PadButton::Ls, _) => "LS click",
+        (PadButton::Rs, _) => "RS click",
+        (PadButton::Up, _) => "D-pad ↑",
+        (PadButton::Down, _) => "D-pad ↓",
+        (PadButton::Left, _) => "D-pad ←",
+        (PadButton::Right, _) => "D-pad →",
+        (PadButton::LsUp, _) => "LS ↑",
+        (PadButton::LsDown, _) => "LS ↓",
+        (PadButton::LsLeft, _) => "LS ←",
+        (PadButton::LsRight, _) => "LS →",
+        (PadButton::RsUp, _) => "RS ↑",
+        (PadButton::RsDown, _) => "RS ↓",
+        (PadButton::RsLeft, _) => "RS ←",
+        (PadButton::RsRight, _) => "RS →",
+        (PadButton::Guide, _) => "Guide",
+        (PadButton::Share, _) => "Share",
+        (PadButton::Touchpad, _) => "Touchpad",
+        (PadButton::Mic, _) => "Mic",
+        (PadButton::P1, _) => "Extra 1",
+        (PadButton::P2, _) => "Extra 2",
+        (PadButton::P3, _) => "Extra 3",
+        (PadButton::P4, _) => "Extra 4",
+        (PadButton::LeftPad, _) => "L pad click",
+        (PadButton::Button(n), _) => return format!("Button {n}"),
+    };
+    s.to_string()
 }
 
 /// The recognisable part of a device id, for the device list:
@@ -1076,6 +1178,18 @@ impl App {
             EngineEvent::Command(cmd) => self.command(cmd),
             EngineEvent::Notice(text) => self.osd(&text),
             EngineEvent::DeviceCaptured { id, name } => self.device_captured(id, name),
+            EngineEvent::PadDetected { input } => {
+                if let Some(ui) = self.ui() {
+                    let s = ui.global::<Store>();
+                    s.set_device_tab(2);
+                    s.set_inspector_tab(0);
+                }
+                self.nav(|_, st| {
+                    st.detecting = false;
+                    let id = format!("{input}{}", st.device_suffix());
+                    st.select_input(&id);
+                });
+            }
         }
     }
 
@@ -1668,6 +1782,7 @@ impl App {
         let st = self.st.borrow();
         let s = ui.global::<Store>();
         let cfg = &st.cfg;
+        PAD_STYLE.with(|s| s.set(cfg.pad.labels));
         let profile = &cfg.profiles[st.profile];
         let bindings = st.bindings();
 
@@ -1777,13 +1892,19 @@ impl App {
                     };
                     MouseBtn {
                         id: id.clone().into(),
-                        label: short_pad_label(*b).into(),
+                        label: short_pad_label(*b, cfg.pad.labels).into(),
                         detail: b.detail().into(),
                         value: value.into(),
                         mapped: action.is_some(),
                         supported: true,
                     }
                 })
+                .collect(),
+        ));
+        s.set_pad_glyphs(model(
+            PadButton::ALL
+                .iter()
+                .map(|b| SharedString::from(pad_glyph(*b, cfg.pad.labels)))
                 .collect(),
         ));
         let (stick_items, stick_current) = if st.profile == 0 {
@@ -1809,6 +1930,45 @@ impl App {
         s.set_stick_items(model(stick_items.into_iter().map(SharedString::from).collect()));
         s.set_stick_current(stick_current);
         s.set_stick_speed(cfg.stick_speed.to_string().into());
+        // Gyro / touchpad: Off / On, or (other profiles) Same as Default first.
+        let on_off = |own: Option<bool>| -> (Vec<SharedString>, i32) {
+            if st.profile == 0 {
+                (vec!["Off".into(), "On".into()], own.unwrap_or(false) as i32)
+            } else {
+                (
+                    vec!["Same as Default".into(), "Off".into(), "On".into()],
+                    match own {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    },
+                )
+            }
+        };
+        let (items, current) = on_off(profile.gyro_pointer);
+        s.set_gyro_items(model(items));
+        s.set_gyro_current(current);
+        let (items, current) = on_off(profile.touch_pointer);
+        s.set_touch_items(model(items));
+        s.set_touch_current(current);
+        s.set_pad_detecting(st.detecting);
+        if let Some(Action::Gyro { toggle }) = st.action() {
+            s.set_gyro_toggle(*toggle);
+        }
+        let p = &cfg.pad;
+        s.set_pad_gyro_speed(p.gyro_speed.to_string().into());
+        s.set_pad_touch_speed(p.touch_speed.to_string().into());
+        s.set_pad_invert_x(p.gyro_invert_x);
+        s.set_pad_invert_y(p.gyro_invert_y);
+        s.set_pad_labels(match p.labels {
+            PadLabels::Xbox => 0,
+            PadLabels::PlayStation => 1,
+            PadLabels::Nintendo => 2,
+        });
+        s.set_pad_xinput(p.xinput);
+        s.set_pad_direct(p.direct);
+        s.set_pad_skip_steam(p.skip_steam_virtual);
+        s.set_pad_lizard(p.steam_lizard_off);
 
         // Keyboard
         s.set_keys(model(
@@ -2466,6 +2626,61 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     on!(on_add_device, | | app |a: &Rc<App>| a.toggle_add_device());
     {
         let a = app.clone();
+        s.on_detect_pad(move || {
+            let on = !a.st.borrow().detecting;
+            a.engine.detect_pad(on);
+            a.nav(|_, st| st.detecting = on);
+        });
+    }
+    // Gyro / touchpad pointer: (Same as Default,) Off, On.
+    fn on_off_choice(profile: usize, i: i32) -> Option<bool> {
+        match if profile == 0 { i + 1 } else { i } {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+    on!(on_set_gyro, |i| edit |st: &mut State| {
+        let p = st.profile;
+        st.cfg.profiles[p].gyro_pointer = on_off_choice(p, i).filter(|on| p > 0 || *on);
+    });
+    on!(on_set_touch, |i| edit |st: &mut State| {
+        let p = st.profile;
+        st.cfg.profiles[p].touch_pointer = on_off_choice(p, i).filter(|on| p > 0 || *on);
+    });
+    on!(on_set_gyro_toggle, |on| edit |st: &mut State| {
+        if let Some(Action::Gyro { toggle }) = st.action_mut() {
+            *toggle = on;
+        }
+    });
+    on!(on_set_pad_number, |field, value| edit |st: &mut State| {
+        let Ok(v) = value.trim().parse::<u32>() else { return };
+        let v = v.clamp(1, 20);
+        match field.as_str() {
+            "gyro" => st.cfg.pad.gyro_speed = v,
+            _ => st.cfg.pad.touch_speed = v,
+        }
+    });
+    on!(on_set_pad_flag, |field, on| edit |st: &mut State| {
+        let p = &mut st.cfg.pad;
+        match field.as_str() {
+            "invert_x" => p.gyro_invert_x = on,
+            "invert_y" => p.gyro_invert_y = on,
+            "xinput" => p.xinput = on,
+            "direct" => p.direct = on,
+            "skip_steam" => p.skip_steam_virtual = on,
+            _ => p.steam_lizard_off = on,
+        }
+    });
+    on!(on_set_pad_labels, |i| edit |st: &mut State| {
+        st.cfg.pad.labels = match i {
+            1 => PadLabels::PlayStation,
+            2 => PadLabels::Nintendo,
+            _ => PadLabels::Xbox,
+        };
+    });
+    {
+        let a = app.clone();
         s.on_rename_device(move |i, name| {
             let name = clean_device_name(&name);
             a.edit(|_, st| {
@@ -2999,6 +3214,7 @@ fn set_kind(st: &mut State, kind: i32) {
                 });
             }
         }
+        K_GYRO => st.set_action(Action::Gyro { toggle: false }),
         K_GESTURE => {
             if st.slot == 0 {
                 // Letting go without moving does what the button did.

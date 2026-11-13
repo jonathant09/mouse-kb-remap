@@ -38,8 +38,10 @@ tables, and the engine sends the UI events.
 | `src/engine/player.rs` | `Scheduler` (timed playback state machine, unit-tested) and the worker loop |
 | `src/engine/windows.rs` | Hooks, timers, focus tracking (exe, path, title, fullscreen), elevation checks, key capture, recording, `SendInput` |
 | `src/engine/win_actions.rs` | System actions: lock, microphone, audio output, window actions |
-| `src/engine/win_devices.rs` | Raw input thread (which mouse a button came from, adding a device) and XInput controller polling |
-| `src/engine/pad.rs` | Controller readings → pressed inputs (with hysteresis), stick → pointer movement; shared by both backends |
+| `src/engine/win_devices.rs` | Raw input thread (which mouse a button came from, adding a device), XInput polling, the shared controller path (`on_reading`) |
+| `src/engine/win_hid.rs` | Controllers read directly over HID: enumeration, one reader thread each, generic report-descriptor parsing |
+| `src/engine/pad_hid.rs` | Report formats of PlayStation, Switch and Steam controllers (pure functions, unit-tested) |
+| `src/engine/pad.rs` | Controller readings → pressed inputs (with hysteresis); stick, gyro and touchpad → pointer movement; shared by both backends |
 | `src/engine/linux.rs` | evdev grab per device (controllers read, not grabbed), uinput output, X11 focus tracking |
 | `src/engine/fallback.rs` | No-op engine for other OSes (UI preview) |
 | `ui/store.slint` | The `Store` global: every property and callback shared with Rust |
@@ -177,13 +179,34 @@ end-to-end tests exercise this path.
 
 ### Controllers
 
-The controller thread in `win_devices.rs` polls XInput every 4 ms while the active profile
-uses a controller (`Layers::uses_pad`), checking empty slots once a second (asking about an
-unplugged slot is slow). `pad::pad_mask` turns a reading into pressed inputs, with
-hysteresis for triggers (a third) and stick directions (half way); changes go to the engine
-thread as `WM_PAD` and through the dispatcher like keys. They can't be swallowed: XInput is
-read-only. A stick chosen in the profile moves the pointer with relative `SendInput` moves
-(`pad::stick_move`: dead zone, then speed growing with the square of the tilt).
+Controllers are read only while the active profile uses one (`Layers::uses_pad`), from two
+sources that both produce a `pad::PadReading` and hand it to `win_devices::on_reading`:
+
+- **XInput** (`win_devices.rs`): polled every 4 ms, empty slots once a second (asking about
+  an unplugged slot is slow). The unnamed export `XInputGetStateEx` (ordinal 100) adds the
+  Guide button; `XInputGetCapabilitiesEx` (108) gives vendor / product, which identifies
+  Steam Input's virtual pad (28DE:11FF) to skip.
+- **HID** (`win_hid.rs`): a scanner enumerates HID interfaces every 2 s (SetupAPI), skipping
+  XInput ones (`IG_` in the path) and anything that isn't a gamepad or joystick (Steam
+  devices: their vendor-defined interface). Each controller gets a thread doing overlapped
+  `ReadFile`s on a shared handle, so games and Steam keep reading it. Known controllers are
+  parsed by `pad_hid.rs` (DualShock 4, DualSense, Switch Pro / Joy-Cons, Steam Deck, Steam
+  Controller 2025; layouts follow SDL's HIDAPI drivers); others through the report
+  descriptor (`HidP_GetUsages` for numbered buttons, `HidP_GetUsageValue` for axes and the
+  hat). Switch controllers get output reports for full reports with motion; PlayStation
+  controllers on Bluetooth get a feature-report read (which switches them to full reports)
+  only when gyro or touchpad is in use; Steam devices optionally get the feature reports
+  that turn off their own mouse mode, resent every 2 s.
+
+`PadState` (`pad.rs`) turns readings into pressed inputs, with hysteresis for triggers (a
+third) and stick directions (half way); changes go to the engine thread as `WM_PAD` and
+through the dispatcher like keys. They can't be swallowed: controllers are read shared. The
+same state moves the pointer with relative `SendInput` moves from the stick
+(`pad::stick_move`: dead zone, then speed growing with the square of the tilt), the gyro
+(`GyroMouse`: learns its drift while still, yaw → x, pitch → y) and the touchpad
+(`TouchMouse`, relative). Gyro readings are in degrees per second in SDL's axis convention,
+so every controller turns the same way. `Target::Gyro` (the *Gyro* action) reaches the
+controller threads through `Sink::gyro`.
 
 Keys are sent as **scan codes** (`KEYEVENTF_SCANCODE`, with `KEYEVENTF_EXTENDEDKEY` when
 `MapVirtualKeyW(.., MAPVK_VK_TO_VSC_EX)` reports an `E0`/`E1` prefix). Many games read
@@ -236,9 +259,14 @@ evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y
 
 Since each device has its own thread, per-device bindings need nothing special: the thread
 knows its device (`evdev:vendor:product:name`) and passes it in `Ctx::device`, keyboards
-included. Game controllers (devices with `BTN_SOUTH` and `BTN_EAST`) are read without a grab;
-their keys and axes fill the same `PadReading` as XInput, and a ticker thread moves the
-pointer with a stick through uinput.
+included. Game controllers (face buttons, or a d-pad and shoulder button for a single
+Joy-Con, or joystick buttons) are read without a grab: the kernel drivers (xpad,
+hid-playstation, hid-nintendo, hid-steam) already report by position, so their keys and axes
+fill the same `PadReading` directly, with unknown buttons as numbered ones. A ticker thread
+moves the pointer with a stick through uinput; a controller's motion sensors are a separate
+device (`INPUT_PROP_ACCELEROMETER`) whose gyro, scaled by the axis resolution, drives a
+`GyroMouse`. Touchpads are left to the desktop, which already treats a PlayStation touchpad
+as one.
 
 ## Safety rules
 

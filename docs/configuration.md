@@ -92,6 +92,7 @@ typo never loses your profiles.
 | `macros` | array | `[]` | Macro library, referenced by name |
 | `devices` | array | `[]` | Named mice and controllers: `{ "name": "Trackball", "id": … }` (below) |
 | `stick_speed` | number | `10` | Pointer speed (1–20) when a controller stick moves the pointer |
+| `pad` | object | | Controller settings: `gyro_speed`, `touch_speed` (1–20, default 10), `gyro_invert_x`, `gyro_invert_y`, `labels` (`"xbox"`, `"play_station"`, `"nintendo"`), `xinput`, `direct`, `skip_steam_virtual` (all three on by default), `steam_lizard_off` (off) |
 
 ## Profile
 
@@ -104,6 +105,7 @@ typo never loses your profiles.
 | `shift_bindings` | object | Layer 1 (the shift layer), used while an input bound to it is held or toggled (optional) |
 | `layers` | object[] | Layers 2 and 3, the same kind of map (optional) |
 | `stick_pointer` | `"off"` / `"left"` / `"right"` | Controller stick that moves the pointer. Left out: same as Default (off for Default itself). |
+| `gyro_pointer`, `touch_pointer` | bool | The controller gyro / touchpad moves the pointer. Left out: same as Default (off for Default itself). |
 
 Entries in `apps`, all case-insensitive, `*` and `?` as wildcards:
 
@@ -131,7 +133,12 @@ XButton1), `mouse:forward` (button 5 / XButton2), `mouse:wheel_up`, `mouse:wheel
 (triggers, pressed past a third), `pad:back` (View), `pad:start` (Menu), `pad:ls`, `pad:rs`
 (stick clicks), `pad:up`, `pad:down`, `pad:left`, `pad:right` (d-pad), and the sticks pushed
 past half way: `pad:ls_up`, `pad:ls_down`, `pad:ls_left`, `pad:ls_right`, `pad:rs_up`,
-`pad:rs_down`, `pad:rs_left`, `pad:rs_right`.
+`pad:rs_down`, `pad:rs_left`, `pad:rs_right`; `pad:guide` (Xbox, PS, Home, Steam), `pad:share`
+(Share, Capture, Steam quick access), `pad:touchpad` (touchpad or Steam right trackpad click),
+`pad:mic`, `pad:p1` … `pad:p4` (back paddles, Joy-Con SL / SR, Steam L4 / R4 / L5 / R5, see
+the user guide), `pad:left_pad` (Steam left trackpad click), and `pad:button1` … `pad:button32`
+for numbered buttons of controllers without a known layout. Buttons are named by position, Xbox
+style: `pad:a` is the bottom face button (Cross, or B on Nintendo).
 
 **Combos:** parts joined by `+`; the last is the input pressed, the others must be held:
 modifiers (`ctrl`, `shift`, `alt`, `win`, either side) and other input ids. For example
@@ -156,6 +163,7 @@ comes from). Bindings for a device that isn't in `devices` are ignored.
 | --- | --- |
 | `\\?\HID#VID_…&PID_…#…` | A mouse on Windows (its raw input device path). If the exact path isn't connected (another USB port), a device with the same vendor, product and interface matches, then one with the same vendor and product. |
 | `xinput:1` … `xinput:4` | A controller in that XInput slot (Windows) |
+| `\\?\HID#VID_054C&PID_0CE6…` | A PlayStation, Switch, Steam or other controller read directly (Windows; its HID device path, matched like a mouse's) |
 | `evdev:vendor:product:name` | Any input device on Linux, e.g. `evdev:046d:c539:Logitech G502` |
 
 Use *Settings → Devices → Add a device* rather than writing ids by hand.
@@ -176,6 +184,7 @@ Use *Settings → Devices → Add a device* rather than writing ids by hand.
 | `{ "type": "tap_hold", "tap": {…}, "hold": {…}, "double": {…}, "hold_ms": 200, "double_ms": 250 }` | An action on a tap, one when held for `hold_ms`, one on a double tap within `double_ms`. Each part is optional and is any action except another `tap_hold`. |
 | `{ "type": "system", "command": "mute_mic" }` | `lock_pc`, `mute_mic`, `next_audio_output`, `minimize_window`, `maximize_window` (toggles), `always_on_top` (toggles), `next_monitor`, `close_window`, `next_profile`, `auto_profile` |
 | `{ "type": "gesture", "tap": {…}, "up": {…}, "down": {…}, "left": {…}, "right": {…}, "distance": 40 }` | Hold, move the pointer at least `distance` pixels and let go: the part for the direction moved most. `tap`: let go without moving that far. Each part is optional and is any action except a `tap_hold` or `gesture`. |
+| `{ "type": "gyro", "toggle": false }` | Controller gyro moves the pointer while held, or (`toggle`) switch it on and off |
 | `{ "type": "disabled" }` | Swallow the input |
 
 ## Macros
