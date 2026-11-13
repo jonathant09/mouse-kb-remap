@@ -5,8 +5,22 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Current on-disk format. v2 added macros, turbo, combos and the shift layer;
-/// v1 files load unchanged.
-pub const CONFIG_VERSION: u32 = 2;
+/// v3 added layers 2-3, tap / hold, combos as triggers, system actions,
+/// hotkeys and app rules. Older files load unchanged.
+pub const CONFIG_VERSION: u32 = 3;
+
+/// Binding layers per profile: base, shift (layer 1), layer 2, layer 3.
+pub const LAYER_COUNT: usize = 4;
+
+/// Name of a binding layer, as shown in the UI.
+pub fn layer_name(layer: usize) -> &'static str {
+    match layer {
+        0 => "Base",
+        1 => "Shift",
+        2 => "Layer 2",
+        _ => "Layer 3",
+    }
+}
 
 /// Environment variable that points the app at a different config file
 /// (portable installs, testing).
@@ -238,6 +252,64 @@ fn d50() -> u32 {
 fn d5() -> u32 {
     5
 }
+fn d200() -> u32 {
+    200
+}
+fn d250() -> u32 {
+    250
+}
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// Things outside the input stream a button can do (`Action::System`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCommand {
+    LockPc,
+    MuteMic,
+    NextAudioOutput,
+    MinimizeWindow,
+    MaximizeWindow,
+    AlwaysOnTop,
+    NextMonitor,
+    CloseWindow,
+    NextProfile,
+    AutoProfile,
+}
+
+impl SystemCommand {
+    pub const ALL: [SystemCommand; 10] = [
+        SystemCommand::LockPc,
+        SystemCommand::MuteMic,
+        SystemCommand::NextAudioOutput,
+        SystemCommand::MinimizeWindow,
+        SystemCommand::MaximizeWindow,
+        SystemCommand::AlwaysOnTop,
+        SystemCommand::NextMonitor,
+        SystemCommand::CloseWindow,
+        SystemCommand::NextProfile,
+        SystemCommand::AutoProfile,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            SystemCommand::LockPc => "Lock PC",
+            SystemCommand::MuteMic => "Mute microphone",
+            SystemCommand::NextAudioOutput => "Next audio output",
+            SystemCommand::MinimizeWindow => "Minimize window",
+            SystemCommand::MaximizeWindow => "Maximize / restore",
+            SystemCommand::AlwaysOnTop => "Always on top",
+            SystemCommand::NextMonitor => "Move to next monitor",
+            SystemCommand::CloseWindow => "Close window",
+            SystemCommand::NextProfile => "Next profile",
+            SystemCommand::AutoProfile => "Automatic profile",
+        }
+    }
+}
 
 /// What an input does when it is remapped.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -299,13 +371,84 @@ pub enum Action {
         args: String,
     },
     /// Hold to switch to the profile's shift layer (like G-Shift / Hypershift).
+    /// Older configs only: loaded as `Layer { layer: 1, toggle: false }`.
     Shift,
     /// Hold to lower (or raise) the pointer speed, a "sniper" button.
     /// `speed` is the Windows pointer speed, 1-20 (10 is the default).
     Sensitivity { speed: u32 },
+    /// Use binding layer `layer` (1-3) while held, or toggle it on and off.
+    Layer {
+        layer: u8,
+        #[serde(default, skip_serializing_if = "is_false")]
+        toggle: bool,
+    },
+    /// One action on a tap, another when held (and optionally a third on a
+    /// double tap). Pressing another input while this one is held also
+    /// counts as holding it, so it works as a modifier.
+    TapHold {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tap: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hold: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        double: Option<Box<Action>>,
+        /// Held at least this long counts as a hold.
+        #[serde(default = "d200")]
+        hold_ms: u32,
+        /// A second press within this time after a tap is a double tap.
+        #[serde(default = "d250")]
+        double_ms: u32,
+    },
+    /// Lock the PC, mute the microphone, move the focused window…
+    System { command: SystemCommand },
 }
 
 impl Action {
+    /// The action in tap / hold slot `slot` (1 tap, 2 hold, 3 double).
+    pub fn slot(&self, slot: usize) -> Option<&Action> {
+        match self {
+            Action::TapHold { tap, hold, double, .. } => match slot {
+                1 => tap.as_deref(),
+                2 => hold.as_deref(),
+                3 => double.as_deref(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Option<Box<Action>>> {
+        match self {
+            Action::TapHold { tap, hold, double, .. } => match slot {
+                1 => Some(tap),
+                2 => Some(hold),
+                3 => Some(double),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Call `f` on this action and every action nested in it.
+    pub fn walk(&self, f: &mut impl FnMut(&Action)) {
+        f(self);
+        if let Action::TapHold { tap, hold, double, .. } = self {
+            for a in [tap, hold, double].into_iter().flatten() {
+                a.walk(f);
+            }
+        }
+    }
+
+    /// Like `walk`, mutably.
+    pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut Action)) {
+        f(self);
+        if let Action::TapHold { tap, hold, double, .. } = self {
+            for a in [tap, hold, double].into_iter().flatten() {
+                a.walk_mut(f);
+            }
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Action::Key { key, mods } => combo_label(key, mods),
@@ -335,6 +478,22 @@ impl Action {
             }
             Action::Shift => "Shift layer (hold)".to_string(),
             Action::Sensitivity { speed } => format!("Sensitivity {speed}/20 (hold)"),
+            Action::Layer { layer, toggle } => {
+                let name = match layer {
+                    1 => "Shift layer".to_string(),
+                    n => format!("Layer {n}"),
+                };
+                format!("{name} ({})", if *toggle { "toggle" } else { "hold" })
+            }
+            Action::TapHold { tap, hold, double, .. } => {
+                let part = |a: &Option<Box<Action>>| a.as_ref().map(|a| a.label()).unwrap_or_else(|| "nothing".into());
+                let mut s = format!("Tap {} · hold {}", part(tap), part(hold));
+                if double.is_some() {
+                    s.push_str(&format!(" · double {}", part(double)));
+                }
+                s
+            }
+            Action::System { command } => command.name().to_string(),
         }
     }
 
@@ -370,6 +529,10 @@ impl Action {
             Action::Launch { .. } => "Run".to_string(),
             Action::Shift => "Shft".to_string(),
             Action::Sensitivity { .. } => "Sns".to_string(),
+            Action::Layer { layer: 1, .. } => "Shft".to_string(),
+            Action::Layer { layer, .. } => format!("L{layer}"),
+            Action::TapHold { .. } => "T/H".to_string(),
+            Action::System { .. } => "Sys".to_string(),
         }
     }
 }
@@ -417,6 +580,14 @@ pub enum MacroStep {
     Text {
         text: String,
     },
+    /// Move the pointer by (x, y) counts like a mouse would, or to the
+    /// screen position (x, y) in pixels when `absolute`.
+    MouseMove {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        absolute: bool,
+    },
 }
 
 impl MacroStep {
@@ -438,6 +609,8 @@ impl MacroStep {
             }
             MacroStep::Delay { ms } => ("Delay", format!("{ms} ms")),
             MacroStep::Text { text } => ("Type text", format!("\"{text}\"")),
+            MacroStep::MouseMove { x, y, absolute: false } => ("Move by", format!("{x:+}, {y:+}")),
+            MacroStep::MouseMove { x, y, absolute: true } => ("Move to", format!("{x}, {y}")),
         }
     }
 }
@@ -447,20 +620,44 @@ pub struct Macro {
     pub name: String,
     #[serde(default)]
     pub steps: Vec<MacroStep>,
+    /// Make every delay up to this much shorter or longer, at random.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jitter_ms: u32,
 }
+
+impl Macro {
+    pub fn new(name: impl Into<String>, steps: Vec<MacroStep>) -> Self {
+        Macro {
+            name: name.into(),
+            steps,
+            jitter_ms: 0,
+        }
+    }
+}
+
+pub type BindingMap = BTreeMap<String, Action>;
+
+static NO_BINDINGS: BindingMap = BTreeMap::new();
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Profile {
     pub name: String,
-    /// Executable names (e.g. `GenshinImpact.exe`) that activate this profile
-    /// while their window is focused. Empty for the Default profile.
+    /// What activates this profile (see `AppRule`): executable names such as
+    /// `GenshinImpact.exe`, full paths, or `title:` window titles. Empty for
+    /// the Default profile.
     #[serde(default)]
     pub apps: Vec<String>,
+    /// Only activate while the matching window covers its whole screen.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fullscreen_only: bool,
     #[serde(default)]
-    pub bindings: BTreeMap<String, Action>,
-    /// Bindings used while an input bound to `Action::Shift` is held.
+    pub bindings: BindingMap,
+    /// Layer 1, used while an input bound to it is held (the shift layer).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub shift_bindings: BTreeMap<String, Action>,
+    pub shift_bindings: BindingMap,
+    /// Layers 2 and 3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<BindingMap>,
 }
 
 impl Profile {
@@ -468,38 +665,240 @@ impl Profile {
         Profile {
             name: name.into(),
             apps: vec![],
+            fullscreen_only: false,
             bindings: BTreeMap::new(),
             shift_bindings: BTreeMap::new(),
+            layers: vec![],
         }
     }
 
-    /// Bindings of layer 0 (base) or 1 (shift).
-    pub fn layer(&self, layer: usize) -> &BTreeMap<String, Action> {
-        if layer == 1 {
-            &self.shift_bindings
-        } else {
-            &self.bindings
+    /// Bindings of a layer: 0 base, 1 shift, 2-3.
+    pub fn layer(&self, layer: usize) -> &BindingMap {
+        match layer {
+            0 => &self.bindings,
+            1 => &self.shift_bindings,
+            n => self.layers.get(n - 2).unwrap_or(&NO_BINDINGS),
         }
     }
 
-    pub fn layer_mut(&mut self, layer: usize) -> &mut BTreeMap<String, Action> {
-        if layer == 1 {
-            &mut self.shift_bindings
-        } else {
-            &mut self.bindings
+    pub fn layer_mut(&mut self, layer: usize) -> &mut BindingMap {
+        match layer {
+            0 => &mut self.bindings,
+            1 => &mut self.shift_bindings,
+            n => {
+                let i = (n - 2).min(LAYER_COUNT - 3);
+                while self.layers.len() <= i {
+                    self.layers.push(BTreeMap::new());
+                }
+                &mut self.layers[i]
+            }
         }
+    }
+
+    /// Drop empty trailing layers so they don't clutter the file.
+    pub fn tidy(&mut self) {
+        while self.layers.last().is_some_and(|l| l.is_empty()) {
+            self.layers.pop();
+        }
+    }
+
+    fn maps(&self) -> impl Iterator<Item = &BindingMap> {
+        [&self.bindings, &self.shift_bindings]
+            .into_iter()
+            .chain(self.layers.iter())
+    }
+
+    fn maps_mut(&mut self) -> impl Iterator<Item = &mut BindingMap> {
+        [&mut self.bindings, &mut self.shift_bindings]
+            .into_iter()
+            .chain(self.layers.iter_mut())
     }
 
     pub fn binding_count(&self) -> usize {
-        self.bindings.len() + self.shift_bindings.len()
+        self.maps().map(|m| m.len()).sum()
     }
 
+    /// Every top-level binding action, all layers.
     pub fn all_actions(&self) -> impl Iterator<Item = &Action> {
-        self.bindings.values().chain(self.shift_bindings.values())
+        self.maps().flat_map(|m| m.values())
     }
 
     pub fn all_actions_mut(&mut self) -> impl Iterator<Item = &mut Action> {
-        self.bindings.values_mut().chain(self.shift_bindings.values_mut())
+        self.maps_mut().flat_map(|m| m.values_mut())
+    }
+
+    /// Whether any action, nested ones included, plays macro `name`.
+    pub fn uses_macro(&self, name: &str) -> bool {
+        let mut found = false;
+        for a in self.all_actions() {
+            a.walk(&mut |a| found |= matches!(a, Action::Macro { name: n, .. } if n == name));
+        }
+        found
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Combos: an input id that needs other keys or buttons held
+// ---------------------------------------------------------------------------
+
+/// A binding id like `ctrl+mouse:back` or `mouse:right+mouse:left`: hold the
+/// modifiers and inputs before the last part, then press the last one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Combo {
+    pub mods: Vec<Modifier>,
+    /// Other inputs that must be held (`key:Q`, `mouse:right`).
+    pub held: Vec<String>,
+    pub trigger: String,
+}
+
+impl Combo {
+    pub fn parse(id: &str) -> Option<Combo> {
+        if !id.contains('+') {
+            return None;
+        }
+        let mut parts: Vec<&str> = id.split('+').collect();
+        let trigger = parts.pop()?.to_string();
+        let mut mods = Vec::new();
+        let mut held = Vec::new();
+        for p in parts {
+            match Modifier::ALL.iter().find(|m| m.name().eq_ignore_ascii_case(p)) {
+                Some(m) => mods.push(*m),
+                None if p.contains(':') => held.push(p.to_string()),
+                None => return None,
+            }
+        }
+        if (mods.is_empty() && held.is_empty()) || !trigger.contains(':') {
+            return None;
+        }
+        Some(Combo { mods, held, trigger })
+    }
+
+    /// Canonical id; a combo with nothing held is just the trigger's id.
+    pub fn id(&self) -> String {
+        let mut mods = self.mods.clone();
+        mods.sort();
+        mods.dedup();
+        let mut held = self.held.clone();
+        held.sort();
+        held.dedup();
+        held.retain(|h| *h != self.trigger);
+        let mut parts: Vec<String> = mods.iter().map(|m| m.name().to_ascii_lowercase()).collect();
+        parts.extend(held);
+        parts.push(self.trigger.clone());
+        parts.join("+")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App rules: which windows activate a profile
+// ---------------------------------------------------------------------------
+
+/// One entry of `Profile::apps`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppRule {
+    /// `game.exe`, `*launcher*.exe`: the executable's file name.
+    Exe(String),
+    /// `C:\Games\*\game.exe`: the executable's full path.
+    Path(String),
+    /// `title:YouTube`: the window title contains this (or matches it, with
+    /// wildcards).
+    Title(String),
+}
+
+impl AppRule {
+    pub fn parse(text: &str) -> AppRule {
+        let t = text.trim();
+        if let Some(title) = t.strip_prefix("title:") {
+            AppRule::Title(title.trim().to_lowercase())
+        } else if t.contains('\\') || t.contains('/') {
+            AppRule::Path(t.to_lowercase())
+        } else {
+            AppRule::Exe(t.to_lowercase())
+        }
+    }
+
+    /// How specific a match is (higher wins), or None. `exe`, `path` and
+    /// `title` must be lower-cased.
+    pub fn matches(&self, exe: &str, path: &str, title: &str) -> Option<u8> {
+        let has_wild = |p: &str| p.contains('*') || p.contains('?');
+        match self {
+            AppRule::Exe(p) if !p.is_empty() => (if has_wild(p) { glob_match(p, exe) } else { p == exe }).then_some(1),
+            AppRule::Path(p) => (if has_wild(p) { glob_match(p, path) } else { p == path }).then_some(2),
+            AppRule::Title(p) if !p.is_empty() => (if has_wild(p) {
+                glob_match(p, title)
+            } else {
+                title.contains(p.as_str())
+            })
+            .then_some(3),
+            _ => None,
+        }
+    }
+}
+
+/// Wildcard match: `*` any run of characters, `?` any one character.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
+// ---------------------------------------------------------------------------
+// App hotkeys
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Hotkey {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mods: Vec<Modifier>,
+}
+
+/// Keys that control the app itself. They work everywhere, even while
+/// remapping is paused.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Hotkeys {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<Hotkey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_profile: Option<Hotkey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_profile: Option<Hotkey>,
+}
+
+impl Hotkeys {
+    pub const NAMES: [&'static str; 3] = ["Pause / resume remapping", "Next profile", "Back to automatic profile"];
+
+    pub fn get(&self, i: usize) -> Option<&Hotkey> {
+        match i {
+            0 => self.pause.as_ref(),
+            1 => self.next_profile.as_ref(),
+            _ => self.auto_profile.as_ref(),
+        }
+    }
+
+    pub fn slot_mut(&mut self, i: usize) -> &mut Option<Hotkey> {
+        match i {
+            0 => &mut self.pause,
+            1 => &mut self.next_profile,
+            _ => &mut self.auto_profile,
+        }
     }
 }
 
@@ -531,6 +930,15 @@ pub struct Config {
     /// Macro library, referenced by name from `Action::Macro`.
     #[serde(default)]
     pub macros: Vec<Macro>,
+    #[serde(default)]
+    pub hotkeys: Hotkeys,
+    /// Show on-screen notifications (profile switches, toggles). Off unless
+    /// turned on in Settings.
+    #[serde(default)]
+    pub notifications: bool,
+    /// Look for a new version at start and once a day. Off unless turned on.
+    #[serde(default)]
+    pub check_updates: bool,
 }
 
 fn default_version() -> u32 {
@@ -566,8 +974,23 @@ impl Default for Config {
             full_keyboard: false,
             profiles: vec![Profile::new("Default"), genshin],
             macros: vec![],
+            hotkeys: Hotkeys::default(),
+            notifications: false,
+            check_updates: false,
         }
     }
+}
+
+/// Older files hold the shift layer as `{ "type": "shift" }`.
+fn migrate_action(a: &mut Action) {
+    a.walk_mut(&mut |a| {
+        if matches!(a, Action::Shift) {
+            *a = Action::Layer {
+                layer: 1,
+                toggle: false,
+            };
+        }
+    });
 }
 
 impl Config {
@@ -606,6 +1029,10 @@ impl Config {
         if cfg.profiles.is_empty() {
             cfg.profiles = Config::default().profiles;
         }
+        for p in &mut cfg.profiles {
+            p.all_actions_mut().for_each(migrate_action);
+            p.layers.truncate(LAYER_COUNT - 2);
+        }
         cfg.version = CONFIG_VERSION;
         Ok(cfg)
     }
@@ -628,17 +1055,6 @@ impl Config {
         }
     }
 
-    /// Index of the profile that should be active for a focused executable.
-    pub fn profile_for_exe(&self, exe: &str) -> usize {
-        self.profiles
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, p)| p.apps.iter().any(|a| a.eq_ignore_ascii_case(exe)))
-            .map(|(i, _)| i)
-            .unwrap_or(0)
-    }
-
     pub fn find_macro(&self, name: &str) -> Option<&Macro> {
         self.macros.iter().find(|m| m.name == name)
     }
@@ -657,24 +1073,33 @@ impl Config {
     /// when `new` is `None`). Returns how many bindings changed.
     pub fn retarget_macro(&mut self, old: &str, new: Option<&str>) -> usize {
         let mut changed = 0;
+        let plays_old = |a: &Action| matches!(a, Action::Macro { name, .. } if name == old);
         for p in &mut self.profiles {
-            for layer in [&mut p.bindings, &mut p.shift_bindings] {
-                let before = layer.len();
-                match new {
-                    Some(new) => {
-                        for action in layer.values_mut() {
-                            if let Action::Macro { name, .. } = action {
+            for layer in p.maps_mut() {
+                if new.is_none() {
+                    // Bindings that only play it go away entirely.
+                    let before = layer.len();
+                    layer.retain(|_, a| !plays_old(a));
+                    changed += before - layer.len();
+                }
+                for action in layer.values_mut() {
+                    action.walk_mut(&mut |a| {
+                        if let Some(new) = new {
+                            if let Action::Macro { name, .. } = a {
                                 if name == old {
                                     *name = new.to_string();
                                     changed += 1;
                                 }
                             }
+                        } else if let Action::TapHold { tap, hold, double, .. } = a {
+                            for slot in [tap, hold, double] {
+                                if slot.as_deref().is_some_and(plays_old) {
+                                    *slot = None;
+                                    changed += 1;
+                                }
+                            }
                         }
-                    }
-                    None => {
-                        layer.retain(|_, a| !matches!(a, Action::Macro { name, .. } if name == old));
-                        changed += before - layer.len();
-                    }
+                    });
                 }
             }
         }
@@ -685,10 +1110,7 @@ impl Config {
     pub fn macro_users(&self, name: &str) -> Vec<String> {
         self.profiles
             .iter()
-            .filter(|p| {
-                p.all_actions()
-                    .any(|a| matches!(a, Action::Macro { name: n, .. } if n == name))
-            })
+            .filter(|p| p.uses_macro(name))
             .map(|p| p.name.clone())
             .collect()
     }
@@ -726,13 +1148,15 @@ impl Config {
         let mut macros: Vec<Macro> = Vec::new();
         for p in &profiles {
             for a in p.all_actions() {
-                if let Action::Macro { name, .. } = a {
-                    if !macros.iter().any(|m| &m.name == name) {
-                        if let Some(m) = self.find_macro(name) {
-                            macros.push(m.clone());
+                a.walk(&mut |a| {
+                    if let Action::Macro { name, .. } = a {
+                        if !macros.iter().any(|m| &m.name == name) {
+                            if let Some(m) = self.find_macro(name) {
+                                macros.push(m.clone());
+                            }
                         }
                     }
-                }
+                });
             }
         }
         ProfileExport {
@@ -766,10 +1190,7 @@ impl Config {
                 Some(_) => {
                     let new = self.unique_macro_name(&m.name);
                     renamed.push((m.name.clone(), new.clone()));
-                    self.macros.push(Macro {
-                        name: new,
-                        steps: m.steps,
-                    });
+                    self.macros.push(Macro { name: new, ..m });
                 }
                 None => self.macros.push(m),
             }
@@ -778,12 +1199,16 @@ impl Config {
         let count = profiles.len();
         for mut p in profiles {
             for a in p.all_actions_mut() {
-                if let Action::Macro { name, .. } = a {
-                    if let Some((_, new)) = renamed.iter().find(|(old, _)| old == name) {
-                        *name = new.clone();
+                migrate_action(a);
+                a.walk_mut(&mut |a| {
+                    if let Action::Macro { name, .. } = a {
+                        if let Some((_, new)) = renamed.iter().find(|(old, _)| old == name) {
+                            *name = new.clone();
+                        }
                     }
-                }
+                });
             }
+            p.layers.truncate(LAYER_COUNT - 2);
             p.name = self.unique_profile_name(p.name.trim());
             self.profiles.push(p);
         }
@@ -850,6 +1275,23 @@ mod tests {
             },
             Action::Shift,
             Action::Sensitivity { speed: 4 },
+            Action::Layer { layer: 2, toggle: true },
+            Action::TapHold {
+                tap: Some(Box::new(Action::Key {
+                    key: "Esc".into(),
+                    mods: vec![],
+                })),
+                hold: Some(Box::new(Action::Key {
+                    key: "LCtrl".into(),
+                    mods: vec![],
+                })),
+                double: None,
+                hold_ms: 180,
+                double_ms: 250,
+            },
+            Action::System {
+                command: SystemCommand::NextMonitor,
+            },
         ];
         for a in actions {
             let json = serde_json::to_string(&a).unwrap();
@@ -878,10 +1320,7 @@ mod tests {
     #[test]
     fn retarget_and_remove_macro_references() {
         let mut cfg = Config::default();
-        cfg.macros.push(Macro {
-            name: "A".into(),
-            steps: vec![],
-        });
+        cfg.macros.push(Macro::new("A", vec![]));
         let bind = Action::Macro {
             name: "A".into(),
             mode: MacroMode::Once,
@@ -889,21 +1328,135 @@ mod tests {
             gap_ms: 0,
         };
         cfg.profiles[0].bindings.insert("key:F1".into(), bind.clone());
-        cfg.profiles[1].shift_bindings.insert("key:F2".into(), bind);
+        cfg.profiles[1].shift_bindings.insert("key:F2".into(), bind.clone());
+        // Nested in a tap / hold on layer 2.
+        cfg.profiles[1].layer_mut(2).insert(
+            "key:F3".into(),
+            Action::TapHold {
+                tap: Some(Box::new(bind)),
+                hold: Some(Box::new(Action::Disabled)),
+                double: None,
+                hold_ms: 200,
+                double_ms: 250,
+            },
+        );
         assert_eq!(cfg.macro_users("A"), vec!["Default", "Genshin Impact"]);
-        assert_eq!(cfg.retarget_macro("A", Some("B")), 2);
+        assert_eq!(cfg.retarget_macro("A", Some("B")), 3);
         assert_eq!(cfg.macro_users("B").len(), 2);
-        assert_eq!(cfg.retarget_macro("B", None), 2);
+        assert_eq!(cfg.retarget_macro("B", None), 3);
         assert!(cfg.macro_users("B").is_empty());
+        // The tap / hold binding stays, without its tap.
+        assert!(matches!(
+            &cfg.profiles[1].layer(2)["key:F3"],
+            Action::TapHold {
+                tap: None,
+                hold: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn old_shift_bindings_become_layer_one() {
+        let text = r#"{ "profiles": [ { "name": "Default", "bindings": {
+            "mouse:back": { "type": "shift" },
+            "key:F1": { "type": "tap_hold", "hold": { "type": "shift" } }
+        } } ] }"#;
+        let cfg = Config::parse(text).unwrap();
+        let b = &cfg.profiles[0].bindings;
+        assert_eq!(
+            b["mouse:back"],
+            Action::Layer {
+                layer: 1,
+                toggle: false
+            }
+        );
+        assert_eq!(
+            b["key:F1"].slot(2),
+            Some(&Action::Layer {
+                layer: 1,
+                toggle: false
+            })
+        );
+        // Defaults for the tap / hold timing.
+        assert!(matches!(
+            b["key:F1"],
+            Action::TapHold {
+                hold_ms: 200,
+                double_ms: 250,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn layers_two_and_three_round_trip() {
+        let mut p = Profile::new("P");
+        p.layer_mut(3).insert("key:A".into(), Action::Disabled);
+        assert_eq!(p.layers.len(), 2);
+        assert!(p.layer(2).is_empty());
+        assert_eq!(p.binding_count(), 1);
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Profile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.layer(3)["key:A"], Action::Disabled);
+        p.layer_mut(3).clear();
+        p.tidy();
+        assert!(p.layers.is_empty());
+    }
+
+    #[test]
+    fn combo_ids_parse_and_normalise() {
+        let c = Combo::parse("shift+ctrl+mouse:back").unwrap();
+        assert_eq!(c.mods, vec![Modifier::Shift, Modifier::Ctrl]);
+        assert_eq!(c.trigger, "mouse:back");
+        assert_eq!(c.id(), "ctrl+shift+mouse:back");
+        let c = Combo::parse("mouse:right+mouse:left").unwrap();
+        assert_eq!(c.held, vec!["mouse:right"]);
+        assert!(Combo::parse("key:A").is_none());
+        assert!(Combo::parse("bogus+key:A").is_none());
+        assert!(Combo::parse("ctrl+shift").is_none());
+        // Nothing held: the plain input id.
+        let plain = Combo {
+            mods: vec![],
+            held: vec![],
+            trigger: "key:A".into(),
+        };
+        assert_eq!(plain.id(), "key:A");
+    }
+
+    #[test]
+    fn app_rules_match_names_paths_and_titles() {
+        let exe = "game.exe";
+        let path = r"c:\games\game\game.exe";
+        let title = "game – main menu";
+        assert_eq!(AppRule::parse("Game.EXE").matches(exe, path, title), Some(1));
+        assert_eq!(AppRule::parse("g*.exe").matches(exe, path, title), Some(1));
+        assert_eq!(AppRule::parse("other.exe").matches(exe, path, title), None);
+        assert_eq!(
+            AppRule::parse(r"C:\Games\*\game.exe").matches(exe, path, title),
+            Some(2)
+        );
+        assert_eq!(AppRule::parse(r"D:\game.exe").matches(exe, path, title), None);
+        assert_eq!(AppRule::parse("title:Main Menu").matches(exe, path, title), Some(3));
+        assert_eq!(AppRule::parse("title:game ? main*").matches(exe, path, title), Some(3));
+        assert_eq!(AppRule::parse("title:").matches(exe, path, title), None);
+    }
+
+    #[test]
+    fn glob_matching() {
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*c", "abbbc"));
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        assert!(glob_match("*.exe", "x.y.exe"));
+        assert!(!glob_match("*.exe", "x.exe.bak"));
+        assert!(glob_match("**a", "bba"));
     }
 
     #[test]
     fn export_then_import_renames_clashes() {
         let mut cfg = Config::default();
-        cfg.macros.push(Macro {
-            name: "Combo".into(),
-            steps: vec![MacroStep::Delay { ms: 5 }],
-        });
+        cfg.macros.push(Macro::new("Combo", vec![MacroStep::Delay { ms: 5 }]));
         cfg.profiles[1].bindings.insert(
             "key:F1".into(),
             Action::Macro {

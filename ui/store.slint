@@ -44,8 +44,10 @@ export global Store {
     in property <[string]> profile-apps;
     in property <[string]> recent-apps;
     in-out property <int> device-tab;      // 0 mouse, 1 keyboard
-    in property <int> layer;               // 0 base, 1 shift layer
-    in property <string> shift-hint;       // how to reach the shift layer
+    in property <int> layer;               // 0 base, 1 shift, 2-3
+    in property <[string]> layer-names: ["Base", "Shift", "Layer 2", "Layer 3"];
+    in property <string> layer-banner;     // "SHIFT LAYER · hold Back to use"
+    in property <bool> profile-fullscreen; // only while the app is fullscreen
     in property <bool> full-keyboard;
     in property <[KeyCap]> keys;
     in property <[MouseBtn]> mouse-buttons;
@@ -57,9 +59,35 @@ export global Store {
     in property <string> selected-label;
     in property <string> selected-detail;
     in property <bool> selected-supported: true;
-    in property <int> selected-kind;       // index into kind-names
+    // Action kind: 0 default, 1 key, 2 mouse, 3 macro, 4 turbo, 5 text,
+    // 6 launch, 7 media, 8 layer, 9 sensitivity, 10 tap / hold, 11 system, 12 off
+    in property <int> selected-kind;
     in property <string> inherited-value;
-    in property <[string]> kind-names: ["Default", "Key", "Mouse", "Macro", "Turbo", "Text", "Launch", "Media", "Shift layer", "Sensitivity", "Off"];
+    in property <[string]> kind-items;     // choices shown (fewer inside a tap / hold)
+    in property <int> kind-current: -1;    // index into kind-items
+
+    // Editing a part of a tap / hold binding: 0 the binding itself, 1 tap, 2 hold, 3 double tap.
+    in property <int> slot;
+    in property <string> slot-title;       // "On tap"
+    in property <string> taphold-tap;      // labels of the parts
+    in property <string> taphold-hold;
+    in property <string> taphold-double;
+    in property <string> taphold-hold-ms;
+    in property <string> taphold-double-ms;
+
+    in property <int> layer-target: 1;     // layer a Layer action uses (1-3)
+    in property <bool> layer-toggle;
+    in property <[string]> system-names;
+    in property <int> system-current: -1;
+
+    // Combos (hold modifiers / another input, then press this one).
+    in property <bool> selected-is-combo;
+    in property <int> combo-mods;          // modifier bits held
+    in property <[string]> combo-mouse-names: ["Nothing", "Left click", "Right click", "Wheel click", "Back", "Forward"];
+    in property <int> combo-held-mouse;    // index into combo-mouse-names
+    in property <string> combo-held-key;   // key held as well ("" none)
+    in property <string> combo-trigger;    // label of the input pressed last
+    in property <[BindingRow]> combos;     // combos ending in the selected input
 
     in property <string> key-value;        // "Ctrl + C"
     in property <int> key-mods;            // modifier bits: 1 ctrl, 2 shift, 4 alt, 8 win
@@ -101,12 +129,16 @@ export global Store {
     in property <int> selected-step: -1;
     in property <bool> recording;
     in property <string> macro-info;       // "Used by: …"
-    in property <[string]> step-kind-names: ["Key press", "Key down", "Key up", "Mouse click", "Mouse down", "Mouse up", "Delay", "Text"];
+    in property <string> macro-jitter;     // random ± ms on every delay
+    in property <[string]> step-kind-names: ["Key press", "Key down", "Key up", "Mouse click", "Mouse down", "Mouse up", "Delay", "Text", "Move by", "Move to"];
     in property <int> step-kind: -1;
     in property <string> step-key;
     in property <int> step-mouse: -1;
     in property <string> step-ms;
     in property <string> step-text;
+    in property <string> step-x;
+    in property <string> step-y;
+    in property <bool> picking-position;   // "use pointer position" countdown running
 
     // ---- settings ------------------------------------------------------------------
     in property <int> autostart;           // 0 off, 1 on, 2 on as admin
@@ -116,10 +148,22 @@ export global Store {
     in property <string> config-path;
     in property <string> notice;           // result of the last settings action
     in property <bool> notice-error;
+    in property <[string]> hotkey-names;
+    in property <[string]> hotkey-values;  // "" when not set
+    in property <bool> notifications;      // on-screen notifications
+    in property <bool> update-supported;   // can install updates itself
+    in property <bool> check-updates;      // check automatically
+    in property <string> update-status;    // result of the last check
+    in property <string> update-available; // newer version, "" if none
+    in property <bool> update-busy;
+    in property <string> cli-help;         // command-line flags
 
     // ---- status bar ----------------------------------------------------------------
     in property <string> focused-app;
     in property <string> live-profile;
+    in property <bool> live-forced;        // profile chosen by hand
+    in property <bool> can-undo;
+    in property <bool> can-redo;
     in property <bool> elevation-warning;
     in property <bool> self-elevated;
     in property <bool> engine-enabled: true;
@@ -136,15 +180,25 @@ export global Store {
     callback remove-app(string);
     callback select-layer(int);
     callback set-full-keyboard(bool);
+    callback set-profile-fullscreen(bool);
 
     callback select-input(string);
     callback select-binding(string, int);  // input id, layer
     callback clear-binding(string, int);
-    callback set-kind(int);
-    callback start-capture(string);        // "binding", "turbo", "step", "detect"
+    callback set-kind(int);                // index into kind-items
+    callback edit-slot(int);               // 0 back to the binding, 1 tap, 2 hold, 3 double
+    callback set-taphold-number(string, string); // field ("hold"/"double"), value
+    callback set-layer-target(int);
+    callback set-layer-toggle(bool);
+    callback set-system(int);
+    callback add-combo();
+    callback remove-combo();
+    callback back-to-trigger();
+    callback set-combo-mouse(int);
+    callback start-capture(string);        // "binding", "turbo", "step", "detect", "combo", "hotkey0"…
     callback cancel-capture();
     callback ui-key(string, bool, int);    // window capture: key text, released, modifier bits
-    callback toggle-mod(string, int);      // target ("binding"/"turbo"), bit
+    callback toggle-mod(string, int);      // target ("binding"/"turbo"/"combo"), bit
     callback set-shortcut(int);
     callback set-mouse-target(int);
     callback set-media(int);
@@ -177,9 +231,12 @@ export global Store {
     callback set-step-mouse(int);
     callback set-step-number(string);
     callback set-step-text(string);
+    callback set-step-xy(string, string);
+    callback pick-position();
     callback move-step(int);               // -1 up, +1 down
     callback duplicate-step();
     callback delete-step();
+    callback set-macro-jitter(string);
 
     callback set-autostart(int);
     callback claim-autostart();            // point startup at this copy
@@ -189,8 +246,18 @@ export global Store {
     callback export-all();
     callback open-config-folder();
     callback open-link(string);
+    callback clear-hotkey(int);
+    callback set-notifications(bool);
+    callback preview-notification();
+    callback set-check-updates(bool);
+    callback check-update();
+    callback install-update();
+    callback open-release-page();
 
     callback toggle-enabled();
+    callback auto-profile();
+    callback undo();
+    callback redo();
     callback set-theme(bool);
 
 }

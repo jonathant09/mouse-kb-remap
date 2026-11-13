@@ -6,15 +6,21 @@
 //! * `dispatch.rs`: what happens to one input event (shared by all backends).
 //! * `player.rs`: timed playback of macros, turbo and text on a worker thread.
 //! * `windows.rs` / `linux.rs`: OS hooks and input injection.
+//! * `win_actions.rs`: system actions (audio, windows, lock) on Windows.
 //! * `fallback.rs`: no-op engine so the UI runs elsewhere.
 
-use crate::config::{Action, Config, MacroMode, MacroStep, Modifier, MouseButton, Output};
+use crate::config::{
+    Action, AppRule, BindingMap, Combo, Config, MacroMode, MacroStep, Modifier, MouseButton, Output, SystemCommand,
+    LAYER_COUNT,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod dispatch;
 pub mod player;
 
+#[cfg(windows)]
+mod win_actions;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -32,7 +38,8 @@ use fallback as imp;
 
 pub use player::{LaunchSpec, Plan, Step};
 
-/// Sent to the UI whenever the foreground window changes.
+/// Sent to the UI whenever the foreground window (or the active profile)
+/// changes.
 #[derive(Clone, Debug, Default)]
 pub struct FocusInfo {
     /// Executable name of the focused window, e.g. `GenshinImpact.exe`.
@@ -42,9 +49,23 @@ pub struct FocusInfo {
     /// True when the focused process runs as admin but we don't, so Windows
     /// will block our hooks from seeing/sending input to it.
     pub elevation_blocked: bool,
+    /// Index of the profile in use (`None` while our own window is focused).
+    pub profile: Option<usize>,
+    /// The profile was chosen by hand (hotkey, command line), not by the
+    /// focused app.
+    pub forced: bool,
 }
 
-/// Events from the engine thread to the UI.
+/// Things the app itself does, asked for by a hotkey, a binding or the
+/// command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppCommand {
+    TogglePause,
+    NextProfile,
+    AutoProfile,
+}
+
+/// Events from the engine threads to the UI.
 #[derive(Clone, Debug)]
 pub enum EngineEvent {
     Focus(FocusInfo),
@@ -54,6 +75,9 @@ pub enum EngineEvent {
         vk: u16,
         mods: u8,
     },
+    Command(AppCommand),
+    /// Worth an on-screen notification ("Layer 2 on").
+    Notice(String),
 }
 
 /// A recorded physical input, for building macros.
@@ -81,48 +105,168 @@ pub enum Target {
     },
     Mouse(MouseButton),
     Disabled,
-    /// Hold to use the shift layer.
-    Shift,
-    /// Timed playback on the worker thread (macro, turbo, text, launch).
+    /// Use binding layer 1-3 while held, or toggle it.
+    Layer {
+        layer: u8,
+        toggle: bool,
+    },
+    /// Timed playback on the worker thread (macro, turbo, text, launch,
+    /// system actions).
     Play(Arc<Plan>),
     /// Hold to set the pointer speed (1-20).
     Sensitivity(u32),
+    /// Decided on release or after a while: tap, hold or double tap.
+    TapHold(Arc<TapHold>),
+}
+
+#[derive(Debug)]
+pub struct TapHold {
+    pub tap: Option<Target>,
+    pub hold: Option<Target>,
+    pub double: Option<Target>,
+    pub hold_ms: u32,
+    pub double_ms: u32,
+}
+
+/// A binding that needs other modifiers / inputs held when `trigger` is
+/// pressed.
+#[derive(Clone, Debug)]
+pub struct ComboBinding {
+    pub mods: u8,
+    pub held: Vec<Input>,
+    pub trigger: Input,
+    pub target: Target,
+}
+
+impl ComboBinding {
+    fn specificity(&self) -> u32 {
+        self.mods.count_ones() + self.held.len() as u32
+    }
+
+    fn same_keys(&self, other: &ComboBinding) -> bool {
+        self.mods == other.mods && self.trigger == other.trigger && self.held == other.held
+    }
 }
 
 pub type Bindings = HashMap<Input, Target>;
 
-/// The two binding layers of a profile, Default already merged underneath.
+/// The binding layers of a profile, Default already merged underneath.
 #[derive(Default, Debug)]
 pub struct Layers {
-    pub base: Bindings,
-    pub shift: Bindings,
+    pub maps: [Bindings; LAYER_COUNT],
+    /// Per layer, most specific first.
+    pub combos: [Vec<ComboBinding>; LAYER_COUNT],
 }
 
 impl Layers {
-    /// Whether any mouse button or wheel input is remapped.
+    /// Whether any mouse button or wheel input is remapped or part of a combo.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn uses_mouse(&self) -> bool {
-        self.base
-            .keys()
-            .chain(self.shift.keys())
-            .any(|i| matches!(i, Input::Mouse(_)))
+        let mouse = |i: &Input| matches!(i, Input::Mouse(_));
+        self.maps.iter().any(|m| m.keys().any(mouse))
+            || self
+                .combos
+                .iter()
+                .flatten()
+                .any(|c| mouse(&c.trigger) || c.held.iter().any(mouse))
     }
 
-    pub fn lookup(&self, input: &Input, shifted: bool) -> Option<&Target> {
-        if shifted {
-            if let Some(t) = self.shift.get(input) {
-                return Some(t);
+    /// Whether `input` does anything on any layer.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn binds(&self, input: &Input) -> bool {
+        self.maps.iter().any(|m| m.contains_key(input)) || self.combos.iter().flatten().any(|c| c.trigger == *input)
+    }
+
+    /// What `input` does: the highest active layer wins, and within a layer
+    /// a combo whose keys are held wins over the plain binding. `active` has
+    /// bit n set for each active layer n (the base layer always is); `mods`
+    /// are the modifier bits held. Returns the target and whether it came
+    /// from a combo.
+    pub fn lookup(
+        &self,
+        input: &Input,
+        active: u8,
+        mods: u8,
+        is_down: impl Fn(&Input) -> bool,
+    ) -> Option<(&Target, bool)> {
+        for layer in (0..LAYER_COUNT).rev() {
+            if layer > 0 && active & (1 << layer) == 0 {
+                continue;
+            }
+            for c in &self.combos[layer] {
+                if c.trigger == *input && c.mods & mods == c.mods && c.held.iter().all(&is_down) {
+                    return Some((&c.target, true));
+                }
+            }
+            if let Some(t) = self.maps[layer].get(input) {
+                return Some((t, false));
             }
         }
-        self.base.get(input)
+        None
     }
+}
+
+/// The focused window, as profile rules see it (lower-cased).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowInfo {
+    pub exe: String,
+    pub path: String,
+    pub title: String,
+    pub fullscreen: bool,
 }
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub struct CompiledProfile {
-    /// Lower-cased executable names.
-    pub apps: Vec<String>,
+    pub rules: Vec<AppRule>,
+    pub fullscreen_only: bool,
     pub layers: Arc<Layers>,
+}
+
+/// An app hotkey: key + exact modifier bits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotkeyBinding {
+    pub vk: u16,
+    pub mods: u8,
+    pub command: AppCommand,
+}
+
+/// Everything the engine needs from the config.
+pub struct Compiled {
+    pub profiles: Vec<CompiledProfile>,
+    pub hotkeys: Vec<HotkeyBinding>,
+}
+
+/// The profile for a window: the most specific matching rule wins (title,
+/// then path, then exe name), then the first in the list. Default (0) when
+/// nothing matches.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn pick_profile(profiles: &[CompiledProfile], w: &WindowInfo) -> usize {
+    let mut best: Option<(u8, usize)> = None;
+    for (i, p) in profiles.iter().enumerate().skip(1) {
+        if p.fullscreen_only && !w.fullscreen {
+            continue;
+        }
+        let score = p
+            .rules
+            .iter()
+            .filter_map(|r| r.matches(&w.exe, &w.path, &w.title))
+            .max();
+        if let Some(s) = score {
+            if best.is_none_or(|(b, _)| s > b) {
+                best = Some((s, i));
+            }
+        }
+    }
+    best.map(|(_, i)| i).unwrap_or(0)
+}
+
+/// Whether the focused window has to be re-checked now and then (window
+/// titles and fullscreen change without a focus change).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn needs_window_poll(profiles: &[CompiledProfile]) -> bool {
+    profiles
+        .iter()
+        .any(|p| p.fullscreen_only || p.rules.iter().any(|r| matches!(r, AppRule::Title(_))))
 }
 
 pub fn parse_input(id: &str) -> Option<Input> {
@@ -190,6 +334,11 @@ pub fn macro_steps(steps: &[MacroStep]) -> Vec<Step> {
             ]),
             MacroStep::Delay { ms } => out.push(Step::Delay(*ms)),
             MacroStep::Text { text } => out.extend(text_steps(text, 0)),
+            MacroStep::MouseMove { x, y, absolute } => out.push(Step::Move {
+                x: *x,
+                y: *y,
+                absolute: *absolute,
+            }),
         }
     }
     out
@@ -218,7 +367,14 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
         },
         Action::Mouse { button } => Target::Mouse(*button),
         Action::Disabled => Target::Disabled,
-        Action::Shift => Target::Shift,
+        Action::Shift => Target::Layer {
+            layer: 1,
+            toggle: false,
+        },
+        Action::Layer { layer, toggle } => Target::Layer {
+            layer: (*layer).clamp(1, LAYER_COUNT as u8 - 1),
+            toggle: *toggle,
+        },
         Action::Sensitivity { speed } => Target::Sensitivity((*speed).clamp(1, 20)),
         Action::Macro {
             name,
@@ -227,17 +383,21 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
             gap_ms,
         } => {
             let m = cfg.find_macro(name)?;
-            Target::Play(Arc::new(Plan::new(
-                macro_steps(&m.steps),
-                match mode {
-                    MacroMode::Once => player::Mode::Once,
-                    MacroMode::Repeat => player::Mode::Repeat((*count).max(1)),
-                    MacroMode::WhileHeld => player::Mode::WhileHeld,
-                    MacroMode::Toggle => player::Mode::Toggle,
-                },
-                *gap_ms,
-                *gap_ms,
-            )))
+            Target::Play(Arc::new(
+                Plan::new(
+                    macro_steps(&m.steps),
+                    match mode {
+                        MacroMode::Once => player::Mode::Once,
+                        MacroMode::Repeat => player::Mode::Repeat((*count).max(1)),
+                        MacroMode::WhileHeld => player::Mode::WhileHeld,
+                        MacroMode::Toggle => player::Mode::Toggle,
+                    },
+                    *gap_ms,
+                    *gap_ms,
+                )
+                .with_jitter(m.jitter_ms)
+                .with_label(&m.name),
+            ))
         }
         Action::Turbo {
             output,
@@ -252,16 +412,19 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
             let mut steps = press_steps(output, hold)?;
             let is_wheel = matches!(output, Output::Mouse { button } if button.is_wheel());
             steps.push(Step::Delay(if is_wheel { interval } else { interval - hold }));
-            Target::Play(Arc::new(Plan::new(
-                steps,
-                if *toggle {
-                    player::Mode::Toggle
-                } else {
-                    player::Mode::WhileHeld
-                },
-                0,
-                delay_ms.saturating_sub(interval),
-            )))
+            Target::Play(Arc::new(
+                Plan::new(
+                    steps,
+                    if *toggle {
+                        player::Mode::Toggle
+                    } else {
+                        player::Mode::WhileHeld
+                    },
+                    0,
+                    delay_ms.saturating_sub(interval),
+                )
+                .with_label(&format!("Turbo {}", output.label())),
+            ))
         }
         Action::Text { text, delay_ms } => Target::Play(Arc::new(Plan::new(
             text_steps(text, *delay_ms),
@@ -283,41 +446,138 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
                 0,
             )))
         }
+        Action::System { command } => system_target(*command),
+        Action::TapHold {
+            tap,
+            hold,
+            double,
+            hold_ms,
+            double_ms,
+        } => {
+            // One level only: a tap / hold inside a tap / hold does nothing.
+            let part = |a: &Option<Box<Action>>| {
+                a.as_deref()
+                    .filter(|a| !matches!(a, Action::TapHold { .. }))
+                    .and_then(|a| parse_action(a, cfg))
+            };
+            let spec = TapHold {
+                tap: part(tap),
+                hold: part(hold),
+                double: part(double),
+                hold_ms: (*hold_ms).clamp(10, 5000),
+                double_ms: (*double_ms).clamp(10, 5000),
+            };
+            if spec.tap.is_none() && spec.hold.is_none() && spec.double.is_none() {
+                Target::Disabled
+            } else {
+                Target::TapHold(Arc::new(spec))
+            }
+        }
     })
+}
+
+fn system_target(command: SystemCommand) -> Target {
+    Target::Play(Arc::new(Plan::new(
+        vec![Step::System(command)],
+        player::Mode::Once,
+        0,
+        0,
+    )))
+}
+
+/// One binding layer: plain inputs and combos.
+fn compile_layer(map: &BindingMap, cfg: &Config) -> (Bindings, Vec<ComboBinding>) {
+    let mut plain = Bindings::new();
+    let mut combos = Vec::new();
+    for (id, action) in map {
+        let Some(target) = parse_action(action, cfg) else {
+            continue;
+        };
+        if let Some(c) = Combo::parse(id) {
+            let (Some(trigger), Some(held)) = (
+                parse_input(&c.trigger),
+                c.held.iter().map(|h| parse_input(h)).collect::<Option<Vec<_>>>(),
+            ) else {
+                continue;
+            };
+            combos.push(ComboBinding {
+                mods: Modifier::to_bits(&c.mods),
+                held,
+                trigger,
+                target,
+            });
+        } else if let Some(input) = parse_input(id) {
+            plain.insert(input, target);
+        }
+    }
+    (plain, combos)
+}
+
+fn compile_hotkeys(cfg: &Config) -> Vec<HotkeyBinding> {
+    let commands = [
+        AppCommand::TogglePause,
+        AppCommand::NextProfile,
+        AppCommand::AutoProfile,
+    ];
+    commands
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &command)| {
+            let h = cfg.hotkeys.get(i)?;
+            Some(HotkeyBinding {
+                vk: key_vk(&h.key)?,
+                mods: Modifier::to_bits(&h.mods),
+                command,
+            })
+        })
+        .collect()
 }
 
 /// Turn the user-facing config into lookup tables the input hook can use
 /// without allocating.
-pub fn compile(cfg: &Config) -> Vec<CompiledProfile> {
-    let to_map = |bindings: &std::collections::BTreeMap<String, Action>| -> Bindings {
-        bindings
-            .iter()
-            .filter_map(|(input, action)| Some((parse_input(input)?, parse_action(action, cfg)?)))
-            .collect()
+pub fn compile(cfg: &Config) -> Compiled {
+    let default: Vec<(Bindings, Vec<ComboBinding>)> = (0..LAYER_COUNT)
+        .map(|l| {
+            cfg.profiles
+                .first()
+                .map(|p| compile_layer(p.layer(l), cfg))
+                .unwrap_or_default()
+        })
+        .collect();
+    let merged = |own: Option<&crate::config::Profile>| -> Layers {
+        let mut layers = Layers::default();
+        for (l, inherited) in default.iter().enumerate() {
+            let (mut plain, mut combos) = inherited.clone();
+            if let Some(p) = own {
+                let (p_plain, p_combos) = compile_layer(p.layer(l), cfg);
+                plain.extend(p_plain);
+                // The profile's own combo replaces Default's for the same keys.
+                combos.retain(|c| !p_combos.iter().any(|o| o.same_keys(c)));
+                combos.splice(0..0, p_combos);
+            }
+            // Most specific first; stable, so the profile's come before Default's.
+            combos.sort_by_key(|c| std::cmp::Reverse(c.specificity()));
+            layers.maps[l] = plain;
+            layers.combos[l] = combos;
+        }
+        layers
     };
-    let (def_base, def_shift) = cfg
-        .profiles
-        .first()
-        .map(|p| (to_map(&p.bindings), to_map(&p.shift_bindings)))
-        .unwrap_or_default();
-    let mut out = vec![CompiledProfile {
-        apps: vec![],
-        layers: Arc::new(Layers {
-            base: def_base.clone(),
-            shift: def_shift.clone(),
-        }),
+    let mut profiles = vec![CompiledProfile {
+        rules: vec![],
+        fullscreen_only: false,
+        layers: Arc::new(merged(None)),
     }];
     for p in cfg.profiles.iter().skip(1) {
-        let mut base = def_base.clone();
-        base.extend(to_map(&p.bindings));
-        let mut shift = def_shift.clone();
-        shift.extend(to_map(&p.shift_bindings));
-        out.push(CompiledProfile {
-            apps: p.apps.iter().map(|a| a.to_ascii_lowercase()).collect(),
-            layers: Arc::new(Layers { base, shift }),
+        profiles.push(CompiledProfile {
+            rules: p.apps.iter().map(|a| AppRule::parse(a)).collect(),
+            fullscreen_only: p.fullscreen_only,
+            layers: Arc::new(merged(Some(p))),
         });
     }
-    out
+    Compiled {
+        profiles,
+        hotkeys: compile_hotkeys(cfg),
+    }
 }
 
 /// Turn recorded input into macro steps, with the recorded pauses as delays.
@@ -362,7 +622,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Start the engine. `on_event` is called from the engine thread.
+    /// Start the engine. `on_event` is called from the engine threads.
     pub fn start(cfg: &Config, on_event: impl Fn(EngineEvent) + Send + Sync + 'static) -> Self {
         Engine {
             inner: imp::Engine::start(compile(cfg), cfg.enabled, Box::new(on_event)),
@@ -372,6 +632,12 @@ impl Engine {
     /// Push a new configuration to the running engine. Stops running macros.
     pub fn apply(&self, cfg: &Config) {
         self.inner.apply(compile(cfg), cfg.enabled);
+    }
+
+    /// Use this profile whatever app is focused, or `None` to go back to
+    /// choosing by the focused app.
+    pub fn force_profile(&self, index: Option<usize>) {
+        self.inner.force_profile(index);
     }
 
     /// Whether this platform has a real input backend.
@@ -413,7 +679,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Macro, Profile};
+    use crate::config::{Hotkey, Macro, Profile};
 
     fn key(k: &str) -> Action {
         Action::Key {
@@ -422,36 +688,34 @@ mod tests {
         }
     }
 
+    const NONE_DOWN: fn(&Input) -> bool = |_| false;
+
     #[test]
     fn profiles_inherit_default_per_layer() {
         let mut cfg = Config::default();
         cfg.profiles[0].bindings.insert("key:F1".into(), key("A"));
         cfg.profiles[0].shift_bindings.insert("key:F2".into(), key("B"));
+        cfg.profiles[0].layer_mut(3).insert("key:F3".into(), key("D"));
         let mut game = Profile::new("Game");
         game.apps.push("Game.EXE".into());
         game.bindings.insert("key:F1".into(), key("C"));
         cfg.profiles.push(game);
 
         let compiled = compile(&cfg);
-        let game = compiled.last().unwrap();
-        assert_eq!(game.apps, vec!["game.exe"]);
+        let game = compiled.profiles.last().unwrap();
+        assert_eq!(game.rules, vec![AppRule::Exe("game.exe".into())]);
         let f1 = Input::Key(0x70);
         let f2 = Input::Key(0x71);
-        assert!(matches!(
-            game.layers.lookup(&f1, false),
-            Some(Target::Key { vk: 0x43, .. })
-        ));
-        // Shifted lookups fall back to the base layer...
-        assert!(matches!(
-            game.layers.lookup(&f1, true),
-            Some(Target::Key { vk: 0x43, .. })
-        ));
-        // ...and see Default's shift layer.
-        assert!(matches!(
-            game.layers.lookup(&f2, true),
-            Some(Target::Key { vk: 0x42, .. })
-        ));
-        assert!(game.layers.lookup(&f2, false).is_none());
+        let f3 = Input::Key(0x72);
+        let get = |i: &Input, active: u8| game.layers.lookup(i, active, 0, NONE_DOWN).map(|(t, _)| t);
+        assert!(matches!(get(&f1, 0), Some(Target::Key { vk: 0x43, .. })));
+        // Layer lookups fall back to the base layer...
+        assert!(matches!(get(&f1, 0b10), Some(Target::Key { vk: 0x43, .. })));
+        // ...and see Default's layers.
+        assert!(matches!(get(&f2, 0b10), Some(Target::Key { vk: 0x42, .. })));
+        assert!(get(&f2, 0).is_none());
+        assert!(matches!(get(&f3, 0b1000), Some(Target::Key { vk: 0x44, .. })));
+        assert!(get(&f3, 0b10).is_none());
     }
 
     #[test]
@@ -459,6 +723,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.profiles[0].bindings.insert("key:Nope".into(), key("A"));
         cfg.profiles[0].bindings.insert("key:F1".into(), key("Nope"));
+        cfg.profiles[0].bindings.insert("ctrl+key:Nope".into(), key("A"));
         cfg.profiles[0].bindings.insert(
             "key:F2".into(),
             Action::Macro {
@@ -468,7 +733,126 @@ mod tests {
                 gap_ms: 0,
             },
         );
-        assert!(compile(&cfg)[0].layers.base.is_empty());
+        let c = compile(&cfg);
+        assert!(c.profiles[0].layers.maps[0].is_empty());
+        assert!(c.profiles[0].layers.combos[0].is_empty());
+    }
+
+    #[test]
+    fn combos_compile_most_specific_first_and_profiles_override_default() {
+        let mut cfg = Config::default();
+        cfg.profiles[0].bindings.insert("ctrl+key:F1".into(), key("A"));
+        cfg.profiles[0].bindings.insert("ctrl+shift+key:F1".into(), key("B"));
+        cfg.profiles[1].bindings.insert("ctrl+key:F1".into(), key("C"));
+        cfg.profiles[1]
+            .bindings
+            .insert("mouse:right+mouse:left".into(), key("D"));
+        let c = compile(&cfg);
+        let combos = &c.profiles[1].layers.combos[0];
+        assert_eq!(combos.len(), 3);
+        assert_eq!(combos[0].mods, 1 | 2);
+        let f1 = Input::Key(0x70);
+        let ctrl = Modifier::Ctrl.bit();
+        let t = |mods| {
+            c.profiles[1]
+                .layers
+                .lookup(&f1, 0, mods, NONE_DOWN)
+                .map(|(t, combo)| (t.clone(), combo))
+        };
+        assert!(matches!(t(ctrl), Some((Target::Key { vk: 0x43, .. }, true))));
+        assert!(matches!(t(ctrl | 2), Some((Target::Key { vk: 0x42, .. }, true))));
+        assert!(t(0).is_none());
+        // Held inputs.
+        let left = Input::Mouse(MouseButton::Left);
+        let right = Input::Mouse(MouseButton::Right);
+        let l = &c.profiles[1].layers;
+        assert!(l.lookup(&left, 0, 0, NONE_DOWN).is_none());
+        assert!(l.lookup(&left, 0, 0, |i| *i == right).is_some());
+        assert!(l.uses_mouse());
+        assert!(!c.profiles[0].layers.uses_mouse());
+    }
+
+    #[test]
+    fn tap_hold_compiles_parts_and_drops_nesting() {
+        let mut cfg = Config::default();
+        let nested = Action::TapHold {
+            tap: Some(Box::new(key("A"))),
+            hold: None,
+            double: None,
+            hold_ms: 200,
+            double_ms: 250,
+        };
+        cfg.profiles[0].bindings.insert(
+            "key:CapsLock".into(),
+            Action::TapHold {
+                tap: Some(Box::new(key("Esc"))),
+                hold: Some(Box::new(Action::Shift)),
+                double: Some(Box::new(nested)),
+                hold_ms: 1,
+                double_ms: 300,
+            },
+        );
+        let c = compile(&cfg);
+        let Some(Target::TapHold(t)) = c.profiles[0].layers.maps[0].get(&Input::Key(0x14)) else {
+            panic!("expected tap / hold");
+        };
+        assert!(matches!(t.tap, Some(Target::Key { vk: 0x1B, .. })));
+        assert!(matches!(
+            t.hold,
+            Some(Target::Layer {
+                layer: 1,
+                toggle: false
+            })
+        ));
+        assert!(t.double.is_none());
+        assert_eq!(t.hold_ms, 10);
+        assert_eq!(t.double_ms, 300);
+    }
+
+    #[test]
+    fn profiles_are_picked_by_the_most_specific_rule() {
+        let mut cfg = Config::default();
+        let mut browser = Profile::new("Browser");
+        browser.apps.push("chrome.exe".into());
+        let mut video = Profile::new("Video");
+        video.apps.push("title:YouTube".into());
+        let mut game = Profile::new("Game");
+        game.apps.push("game.exe".into());
+        game.fullscreen_only = true;
+        cfg.profiles.extend([browser, video, game]);
+        let c = compile(&cfg);
+        let w = |exe: &str, title: &str, fullscreen| WindowInfo {
+            exe: exe.into(),
+            path: format!(r"c:\x\{exe}"),
+            title: title.into(),
+            fullscreen,
+        };
+        assert_eq!(pick_profile(&c.profiles, &w("chrome.exe", "news", false)), 2);
+        assert_eq!(pick_profile(&c.profiles, &w("chrome.exe", "cats - youtube", false)), 3);
+        assert_eq!(pick_profile(&c.profiles, &w("game.exe", "", false)), 0);
+        assert_eq!(pick_profile(&c.profiles, &w("game.exe", "", true)), 4);
+        assert!(needs_window_poll(&c.profiles));
+    }
+
+    #[test]
+    fn hotkeys_compile() {
+        let mut cfg = Config::default();
+        cfg.hotkeys.next_profile = Some(Hotkey {
+            key: "F12".into(),
+            mods: vec![Modifier::Ctrl, Modifier::Alt],
+        });
+        cfg.hotkeys.pause = Some(Hotkey {
+            key: "Nope".into(),
+            mods: vec![],
+        });
+        assert_eq!(
+            compile(&cfg).hotkeys,
+            vec![HotkeyBinding {
+                vk: 0x7B,
+                mods: 1 | 4,
+                command: AppCommand::NextProfile
+            }]
+        );
     }
 
     #[test]
@@ -488,7 +872,7 @@ mod tests {
             },
         );
         let compiled = compile(&cfg);
-        let Some(Target::Play(plan)) = compiled[0].layers.base.get(&Input::Mouse(MouseButton::Back)) else {
+        let Some(Target::Play(plan)) = compiled.profiles[0].layers.maps[0].get(&Input::Mouse(MouseButton::Back)) else {
             panic!("expected a plan");
         };
         assert_eq!(
@@ -507,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn macro_steps_expand_taps_and_text() {
+    fn macro_steps_expand_taps_text_and_moves() {
         let steps = macro_steps(&[
             MacroStep::KeyTap {
                 key: "A".into(),
@@ -518,6 +902,11 @@ mod tests {
                 hold_ms: 10,
             },
             MacroStep::Text { text: "hi".into() },
+            MacroStep::MouseMove {
+                x: -5,
+                y: 7,
+                absolute: false,
+            },
         ]);
         assert_eq!(
             steps,
@@ -528,12 +917,14 @@ mod tests {
                 Step::Wheel(MouseButton::WheelUp),
                 Step::Char('h'),
                 Step::Char('i'),
+                Step::Move {
+                    x: -5,
+                    y: 7,
+                    absolute: false
+                },
             ]
         );
-        let _ = Macro {
-            name: String::new(),
-            steps: vec![],
-        };
+        let _ = Macro::new("", vec![]);
     }
 
     #[test]

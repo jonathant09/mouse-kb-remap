@@ -3,6 +3,28 @@
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
 import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch } from "widgets.slint";
+import { CaptureBox } from "controls.slint";
+
+component SwitchRow inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> hint;
+    in property <bool> checked;
+    callback toggled(bool);
+    spacing: 12px;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 2px;
+        Text { text: root.text; color: Theme.text; font-size: Theme.font; }
+        if root.hint != "": Hint { text: root.hint; }
+    }
+    VerticalLayout {
+        alignment: center;
+        Switch {
+            checked: root.checked;
+            toggled(on) => { root.toggled(on); }
+        }
+    }
+}
 
 component Card inherits Rectangle {
     in property <string> title;
@@ -81,6 +103,107 @@ export component SettingsView inherits Rectangle {
                     }
                 }
                 Hint { text: "Switching to this window pauses remapping and stops any running macro or turbo, so it doubles as a panic button."; }
+            }
+
+            Card {
+                title: "HOTKEYS";
+                max-width: 640px;
+                Hint { text: "Keys that control the app itself. They work everywhere, even while remapping is paused, and aren't passed on to the app in front."; }
+                for name[i] in Store.hotkey-names: HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: name;
+                        color: Theme.text;
+                        font-size: Theme.font;
+                        vertical-alignment: center;
+                    }
+                    CaptureBox {
+                        width: 220px;
+                        height: 32px;
+                        target: "hotkey" + i;
+                        value: Store.hotkey-values[i];
+                        placeholder: "None (click to set)";
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Clear";
+                            compact: true;
+                            enabled: Store.hotkey-values[i] != "";
+                            clicked => { Store.clear-hotkey(i); }
+                        }
+                    }
+                }
+            }
+
+            Card {
+                title: "NOTIFICATIONS";
+                max-width: 640px;
+                SwitchRow {
+                    text: "Show on-screen notifications";
+                    hint: "A short note near the bottom of the screen when the profile changes, remapping is paused, or a toggle (turbo, macro, layer, microphone) goes on or off. Games in exclusive fullscreen draw over it.";
+                    checked: Store.notifications;
+                    toggled(on) => { Store.set-notifications(on); }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    Button { text: "Show an example"; clicked => { Store.preview-notification(); } }
+                }
+            }
+
+            Card {
+                title: "UPDATES";
+                max-width: 640px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: Store.update-busy ? "Working…" : "Check for updates";
+                        enabled: !Store.update-busy;
+                        clicked => { Store.check-update(); }
+                    }
+                    if Store.update-available != "" && Store.update-supported: Button {
+                        text: "Update to " + Store.update-available + " and restart";
+                        primary: true;
+                        enabled: !Store.update-busy;
+                        clicked => { Store.install-update(); }
+                    }
+                    if Store.update-available != "": Button {
+                        text: "What's new";
+                        clicked => { Store.open-release-page(); }
+                    }
+                }
+                if Store.update-status != "": Text {
+                    text: Store.update-status;
+                    wrap: word-wrap;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                }
+                SwitchRow {
+                    text: "Check automatically";
+                    hint: "Looks for a new version when the app starts and once a day, and shows it here and in the sidebar. Nothing is installed without your click.";
+                    checked: Store.check-updates;
+                    toggled(on) => { Store.set-check-updates(on); }
+                }
+                Hint {
+                    text: Store.update-supported
+                        ? "Updating downloads the new version from GitHub, checks it, swaps it in and restarts the app (with the same admin rights). Your settings are kept."
+                        : "On this system, download new versions from the releases page.";
+                }
+            }
+
+            Card {
+                title: "COMMAND LINE";
+                max-width: 640px;
+                Hint { text: "Control the running app from scripts, Stream Deck or AutoHotkey:"; }
+                Text {
+                    text: Store.cli-help;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    font-family: "Consolas";
+                    wrap: word-wrap;
+                }
             }
 
             Card {

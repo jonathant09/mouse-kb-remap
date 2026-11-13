@@ -33,6 +33,19 @@ Debug builds show a console window so log output is visible. Release builds hide
 | --- | --- |
 | `MOUSE_KB_REMAP_CONFIG` | Use this config file instead of the default (portable installs, testing). A copy with its own config file runs as a separate instance. |
 | `MOUSE_KB_REMAP_ACCEPT_INJECTED=1` | Also remap synthetic input from other programs. For end-to-end tests that drive the app with `SendInput`; leave it off otherwise. |
+| `MOUSE_KB_REMAP_UPDATE_URL` | Where the update check reads the "latest release" JSON (GitHub's format) instead of the GitHub API, e.g. `http://127.0.0.1:8765/latest.json` from a local server, to test updating without publishing a release. |
+
+### Checking the Linux build from Windows
+
+CI builds Linux, but you can type-check and lint it locally after
+`rustup target add x86_64-unknown-linux-gnu`. Nothing is linked, so only `pkg-config` (asked
+about fontconfig by a build script) has to be satisfied; a stub that succeeds is enough:
+
+```powershell
+"@echo off`r`necho %* | findstr /C:`"--modversion`" >nul && echo 2.15.0`r`nexit /b 0" | Set-Content $env:TEMP\pkg-config.bat
+$env:PKG_CONFIG = "$env:TEMP\pkg-config.bat"; $env:PKG_CONFIG_ALLOW_CROSS = "1"
+cargo clippy --target x86_64-unknown-linux-gnu --all-targets -- -D warnings
+```
 
 ## Renderer
 

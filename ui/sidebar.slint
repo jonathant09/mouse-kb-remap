@@ -117,6 +117,22 @@ export component Sidebar inherits Rectangle {
             }
         }
 
+        if Store.update-available != "": Rectangle {
+            height: 26px;
+            border-radius: Theme.radius;
+            background: upd-ta.has-hover ? Theme.accent-hover : Theme.accent;
+            Text {
+                text: "Update available: v" + Store.update-available;
+                color: Theme.on-accent;
+                font-size: Theme.font-sm;
+                font-weight: 600;
+            }
+            upd-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Store.open-settings(); }
+            }
+        }
+
         list := Flickable {
             vertical-stretch: 1;
             VerticalLayout {

@@ -1,22 +1,20 @@
 //! No-op engine for platforms without an input backend (macOS for now).
 //! Lets the UI run everywhere during development.
 
-use super::{CompiledProfile, EngineEvent, RecEvent};
+use super::{Compiled, EngineEvent, RecEvent};
 
 pub const SUPPORTED: bool = false;
 
 pub struct Engine;
 
 impl Engine {
-    pub fn start(
-        _profiles: Vec<CompiledProfile>,
-        _enabled: bool,
-        _on_event: Box<dyn Fn(EngineEvent) + Send + Sync>,
-    ) -> Self {
+    pub fn start(_compiled: Compiled, _enabled: bool, _on_event: Box<dyn Fn(EngineEvent) + Send + Sync>) -> Self {
         Engine
     }
 
-    pub fn apply(&self, _profiles: Vec<CompiledProfile>, _enabled: bool) {}
+    pub fn apply(&self, _compiled: Compiled, _enabled: bool) {}
+
+    pub fn force_profile(&self, _index: Option<usize>) {}
 
     pub fn elevated(&self) -> bool {
         false

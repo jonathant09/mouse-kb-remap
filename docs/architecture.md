@@ -10,7 +10,7 @@ tables, and the engine sends the UI events.
 │   Store global ◀── refresh()        │ apply │  • WH_MOUSE_LL / WH_KEYBOARD_LL hooks       │
 │   callbacks ──▶ app.rs (State)      │──────▶│  • EVENT_SYSTEM_FOREGROUND hook             │
 │ config.rs: load/save config.json    │       │  active: RwLock<Option<Arc<Layers>>>        │
-│ AppTray (SystemTrayIcon)            │◀──────│  Dispatcher (dispatch.rs): held keys, shift │
+│ AppTray (SystemTrayIcon)            │◀──────│  Dispatcher (dispatch.rs): held keys, layers│
 │                                     │ events└──────────────┬──────────────────────────────┘
 └─────────────────────────────────────┘ (invoke_from_        │ Cmd (mpsc)
                                           event_loop)        ▼
@@ -24,16 +24,20 @@ tables, and the engine sends the UI events.
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.rs` | Single-instance check, `--tray` flag, starts the app |
-| `src/app.rs` | Owns `State`, wires every Slint callback, `refresh()` pushes state into `Store`; tray and close-to-tray |
-| `src/config.rs` | `Config` / `Profile` / `Action` / `Macro` types, JSON load + atomic save, import/export |
+| `src/main.rs` | Command-line flags, single-instance check, hand-over after an update, starts the app |
+| `src/app.rs` | Owns `State`, wires every Slint callback, `refresh()` pushes state into `Store`; tray and close-to-tray, undo, updates, command-line answers |
+| `src/config.rs` | `Config` / `Profile` / `Action` / `Macro` types, combo ids, app rules and wildcards, hotkeys, JSON load + atomic save, import/export |
 | `src/keys.rs` | Key table (positions, Windows virtual-key codes), media keys, shortcut presets |
-| `src/system.rs` | Single instance (named mutex + event), start with Windows (Run key / Task Scheduler), open files and URLs |
+| `src/system.rs` | Single instance (named mutex + event), start with Windows (Run key / Task Scheduler), open files and URLs, console for CLI output |
 | `src/log.rs` | `log!` macro: stderr and `mouse-kb-remap.log` |
-| `src/engine/mod.rs` | Platform-independent API (`Engine`), `Input` / `Target` / `Layers`, `compile()`, recording → macro steps |
-| `src/engine/dispatch.rs` | `Dispatcher`: what one input event does. Shared by all backends, unit-tested. |
+| `src/osd.rs` | On-screen notifications (Windows) |
+| `src/update.rs` | Release check and in-place update |
+| `src/ipc.rs` | Command-line control over a named pipe |
+| `src/engine/mod.rs` | Platform-independent API (`Engine`), `Input` / `Target` / `Layers` / `ComboBinding`, `compile()`, profile picking, recording → macro steps |
+| `src/engine/dispatch.rs` | `Dispatcher`: what one input event does (layers, combos, tap / hold, hotkeys). Shared by all backends, unit-tested. |
 | `src/engine/player.rs` | `Scheduler` (timed playback state machine, unit-tested) and the worker loop |
-| `src/engine/windows.rs` | Hooks, focus tracking, elevation checks, key capture, recording, `SendInput` |
+| `src/engine/windows.rs` | Hooks, timers, focus tracking (exe, path, title, fullscreen), elevation checks, key capture, recording, `SendInput` |
+| `src/engine/win_actions.rs` | System actions: lock, microphone, audio output, window actions |
 | `src/engine/linux.rs` | evdev grab per device, uinput output, X11 focus tracking |
 | `src/engine/fallback.rs` | No-op engine for other OSes (UI preview) |
 | `ui/store.slint` | The `Store` global: every property and callback shared with Rust |
@@ -49,14 +53,18 @@ tables, and the engine sends the UI events.
 1. A Slint callback on `Store` (for example `set-turbo-number`) runs a closure in `app.rs`.
 2. `App::edit` mutates `State.cfg`, calls `Config::save()` and `Engine::apply(&cfg)`.
    (`App::nav` is for UI-only changes: it just redraws.)
-3. `engine::compile()` turns the config into `Vec<CompiledProfile>`:
-   - input ids (`"key:A"`, `"mouse:back"`) become `Input::Key(vk)` / `Input::Mouse(..)`
-   - actions become `Target`s: `Key { vk, mods }`, `Mouse`, `Disabled`, `Shift`,
-     `Sensitivity`, or `Play(Arc<Plan>)` for anything timed (macro, turbo, text, launch)
-   - Default's base and shift layers are merged underneath every other profile, so
-     inheritance costs nothing at input time
-4. The engine stores the profiles, recomputes the active `Layers` for the focused window
-   and tells the player to stop everything (bindings may have changed under it).
+3. `engine::compile()` turns the config into `Compiled { profiles, hotkeys }`:
+   - input ids (`"key:A"`, `"mouse:back"`) become `Input::Key(vk)` / `Input::Mouse(..)`;
+     combo ids (`"ctrl+mouse:back"`) become `ComboBinding`s
+   - actions become `Target`s: `Key { vk, mods }`, `Mouse`, `Disabled`, `Layer`,
+     `Sensitivity`, `TapHold(Arc<TapHold>)`, or `Play(Arc<Plan>)` for anything timed
+     (macro, turbo, text, launch, system actions)
+   - Default's layers (base, shift, 2, 3, plain and combos) are merged underneath every
+     other profile, so inheritance costs nothing at input time
+   - `apps` entries become `AppRule`s (exe name, path or title, with wildcards)
+4. The engine stores the profiles, picks the active one for the focused window
+   (`pick_profile`: the most specific matching rule, or a profile forced by hand) and tells
+   the player to stop everything (bindings may have changed under it).
 5. `refresh()` rebuilds the Slint models. It's a few hundred small structs, cheap enough
    to rebuild wholesale instead of diffing.
 
@@ -66,9 +74,14 @@ The engine calls `on_event(EngineEvent)` from its thread; `app.rs` forwards it w
 `slint::invoke_from_event_loop` to the UI thread, where a thread-local handle to the `App`
 handles it:
 
-- `Focus(FocusInfo)` on every foreground change: updates *Recent* apps, the LIVE badge and
-  the status bar.
+- `Focus(FocusInfo)` on every foreground change and whenever the active profile changes:
+  updates *Recent* apps, the LIVE badge (from the engine's profile index) and the status
+  bar, and announces profile switches when notifications are on.
 - `Captured { vk, mods }` when a key was pressed while a capture box was waiting.
+- `Command(AppCommand)` for app hotkeys and *Next / Automatic profile* actions: pause,
+  or `Engine::force_profile`.
+- `Notice(String)` for things worth an on-screen notification (layer and playback toggles,
+  microphone, audio output).
 
 ## The hot path
 
@@ -98,9 +111,32 @@ Per event:
      so a profile switch mid-press can't leave a key stuck down. Keyboard auto-repeat
      re-sends the *held* target instead of looking it up again.
    - Keys, combos and mouse buttons are sent immediately with one `SendInput`.
-   - `Shift` adjusts a counter; while it's above zero, lookups try the shift layer first.
+   - Layer targets adjust a per-layer hold counter or toggle a lock bit; lookups try the
+     highest active layer first and fall back down to base.
    - Anything timed is handed to the player thread as a `Cmd` over a channel.
 5. Return `1` to swallow the original.
+
+The dispatcher also keeps the set of physical keys and buttons that are down, which drives:
+
+- **App hotkeys**, checked first on every new key press (even while paused) against the
+  exact modifier bits held. A matching press and its release are swallowed and reported to
+  the UI as `EngineEvent::Command`.
+- **Combos** (`ComboBinding`: modifier bits + held inputs + trigger), stored per layer, most
+  specific first, and checked before the layer's plain bindings. Modifier bits come from
+  physical modifier keys plus modifiers that remapped held keys are sending. When a combo
+  sends a key, the held modifiers are released around it (`lift_mods`), with an unassigned
+  "mask" key (`0xE8`) first when Alt or Win is involved so lifting them doesn't open a menu.
+- **Tap / hold** (`Target::TapHold`): a press stores a `Pending` decision instead of acting.
+  Its release before `hold_ms` is a tap (or starts the double-tap wait); `tick()` at
+  `deadline()` turns it into a hold or sends the delayed tap; any other press first resolves
+  it as a hold. That other input was already seen by Windows before our output, so when it
+  would pass through it's swallowed and re-sent after, keeping the order.
+- **`prune`** on focus changes forgets pass-through keys whose release went to a window the
+  hooks couldn't see (checked with `GetAsyncKeyState`), so they don't stay "held" for combos.
+
+The engine thread runs two thread timers (`SetTimer` with no window): one at the
+dispatcher's tap / hold deadline, one every 500 ms that re-reads the focused window's title
+and fullscreen state, only while some profile has a title or fullscreen rule.
 
 Keys are sent as **scan codes** (`KEYEVENTF_SCANCODE`, with `KEYEVENTF_EXTENDEDKEY` when
 `MapVirtualKeyW(.., MAPVK_VK_TO_VSC_EX)` reports an `E0`/`E1` prefix). Many games read
@@ -111,8 +147,9 @@ internally.
 ## Timed playback
 
 `player.rs` keeps a list of running players (one per trigger input). Each runs a `Plan`:
-a list of `Step`s (key down/up, button down/up, wheel, char, delay, launch) plus a mode
-(once, repeat N, while held, toggle) and gaps. The worker loop:
+a list of `Step`s (key down/up, button down/up, wheel, char, delay, launch, pointer move,
+system action) plus a mode (once, repeat N, while held, toggle), gaps, optional delay jitter
+(a small xorshift generator) and a label used for toggle notices. The worker loop:
 
 1. waits for the next due step, using an interruptible channel wait for the bulk and a
    precise `std::thread::sleep` (high-resolution timer on Windows 10+) for the last 20 ms;
@@ -124,6 +161,22 @@ bursts to catch up after a stall. Players track what they hold down and release 
 stopped. Loops without any delay get a 1 ms floor, so they can't spin.
 
 The `Scheduler` takes explicit timestamps, so its tests simulate time instead of sleeping.
+
+System actions (`win_actions.rs`) run from the playback thread: window actions on the
+foreground window directly, audio (Core Audio `IAudioEndpointVolume`, and the undocumented
+`IPolicyConfig` that Windows' own Sound settings use to change the default device) on a
+short-lived COM thread. *Next profile* / *Automatic profile* go to the UI as commands.
+
+## Around the engine
+
+| Module | |
+| --- | --- |
+| `osd.rs` | On-screen notifications: a layered, click-through, never-activated Win32 popup on its own thread, painted with GDI. Using a Slint window would activate it, which counts as "our window is focused" and pauses remapping. |
+| `update.rs` | GitHub release check and in-place update (WinHTTP, SHA-256 via `sha2`). Download next to the exe, verify size / checksum / `MZ` / `--version`, rename the running exe to `.old.exe`, move the new one in, start it with `--after-update <pid>`; it waits for the old process to exit before taking the single-instance slot and deletes `.old.exe` a minute later. `MOUSE_KB_REMAP_UPDATE_URL` points the check elsewhere (tests). |
+| `ipc.rs` | Command-line control: a named pipe (`\\.\pipe\mouse-kb-remap[.<config hash>]`) whose security allows only the current user, with a medium integrity label so a non-admin caller reaches an admin copy. One line in, one `ok …` / `error …` line out; answered on the UI thread. |
+
+Undo lives in `app.rs`: every `edit` snapshots profiles and macros; changes within 700 ms
+merge into one step (typing). Settings (theme, startup, hotkeys…) aren't part of undo.
 
 ## Linux backend
 
@@ -169,6 +222,7 @@ evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y
 2. Map it to a `Target` in `engine::parse_action` (often a `Plan` of existing `Step`s).
 3. If it needs new output, add an `Out` variant and handle it in `windows.rs::emit_outs`
    and `linux.rs::emit_outs`.
-4. Add it to `kind-names` in `ui/store.slint`, an editor in `ui/inspector.slint`, and the
-   kind index in `app.rs` (`kind_of`, `set_kind`, `refresh`).
+4. Add a kind constant and name in `app.rs` (`KIND_NAMES`, and `SLOT_NAMES` / `SLOT_KINDS`
+   if it can be a tap / hold part), handle it in `kind_of`, `set_kind` and `refresh`, and add
+   an editor in `ui/inspector.slint` keyed on `Store.selected-kind`.
 5. Document the JSON shape in [configuration.md](configuration.md) and add a test.

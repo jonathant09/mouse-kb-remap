@@ -93,17 +93,64 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK, SW_HIDE, SW_SHOWNORMAL};
 
-    /// Name for the single-instance objects. Copies using a different config
-    /// file (MOUSE_KB_REMAP_CONFIG) count as separate instances.
-    fn instance_name(kind: &str) -> HSTRING {
-        let mut name = format!("Local\\mouse-kb-remap.{kind}");
-        if let Some(cfg) = std::env::var_os(crate::config::CONFIG_ENV).filter(|v| !v.is_empty()) {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            cfg.to_string_lossy().to_lowercase().hash(&mut h);
-            name.push_str(&format!(".{:016x}", h.finish()));
+    /// Added to the names of the single-instance objects and the command
+    /// pipe: copies using a different config file (MOUSE_KB_REMAP_CONFIG)
+    /// count as separate instances.
+    pub fn instance_suffix() -> String {
+        match std::env::var_os(crate::config::CONFIG_ENV).filter(|v| !v.is_empty()) {
+            Some(cfg) => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                cfg.to_string_lossy().to_lowercase().hash(&mut h);
+                format!(".{:016x}", h.finish())
+            }
+            None => String::new(),
         }
-        HSTRING::from(name)
+    }
+
+    fn instance_name(kind: &str) -> HSTRING {
+        HSTRING::from(format!("Local\\mouse-kb-remap.{kind}{}", instance_suffix()))
+    }
+
+    /// Release builds have no console. When started from one (`--status`,
+    /// `--version`) without redirected output, write to that console.
+    pub fn attach_console() {
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        use windows::Win32::System::Console::{
+            AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        unsafe {
+            let has_output = GetStdHandle(STD_OUTPUT_HANDLE).is_ok_and(|h| !h.is_invalid() && !h.0.is_null());
+            if has_output || AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+                return;
+            }
+            if let Ok(out) = CreateFileW(
+                w!("CONOUT$"),
+                (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            ) {
+                let _ = SetStdHandle(STD_OUTPUT_HANDLE, out);
+                let _ = SetStdHandle(STD_ERROR_HANDLE, out);
+                // The shell has already printed its prompt: start on a new line.
+                println!();
+            }
+        }
+    }
+
+    /// Where the pointer is, in screen pixels.
+    pub fn cursor_pos() -> Option<(i32, i32)> {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut p = POINT::default();
+        unsafe { GetCursorPos(&mut p).ok()? };
+        Some((p.x, p.y))
     }
 
     const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
@@ -715,6 +762,12 @@ X-GNOME-Autostart-enabled=true
 
     pub fn is_elevated() -> bool {
         false
+    }
+
+    pub fn attach_console() {}
+
+    pub fn cursor_pos() -> Option<(i32, i32)> {
+        None
     }
 
     pub fn stop_raw_keyboard_input() {}

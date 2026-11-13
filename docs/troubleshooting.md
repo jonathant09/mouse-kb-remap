@@ -68,6 +68,50 @@ Windows silently removes low-level hooks that respond too slowly, for example wh
 system is under extreme load. Restart the app. If it happens repeatedly, open an issue with
 your Windows version, what was running, and `mouse-kb-remap.log` from the config folder.
 
+## A tap / hold key types its tap late, or holds when I meant to tap
+
+A tap is sent when you let go, so a tap / hold key sends its tap a moment later than a plain
+key, and with a double-tap part, after the double-tap time too. If you roll onto the next
+key before letting go, that counts as holding (that's what makes *Caps Lock: hold for Ctrl*
+work when typed quickly). Tap / hold suits keys you don't type fast through: Caps Lock,
+side buttons, F-keys. Lower *Held this long counts as a hold* if holds feel slow to start.
+
+## Notifications don't show in a game
+
+Games in exclusive fullscreen draw over every other window, notifications included.
+Switch the game to borderless or windowed fullscreen to see them. They're off unless turned
+on in *Settings → Notifications*.
+
+## A window rule (title or fullscreen) doesn't switch the profile
+
+Titles and fullscreen are checked twice a second, so a profile can take up to half a second
+to follow. The status bar shows which profile is in use; if it says *chosen by hand*, a
+hotkey or the command line picked it, and clicking that goes back to automatic. A window
+counts as fullscreen when it covers its whole monitor, including the taskbar.
+
+## "Next audio output" or window actions do nothing
+
+*Next audio output* needs at least two enabled playback devices (Sound settings). Window
+actions can't touch windows of programs running as administrator unless mouse-kb-remap runs
+as administrator too, and leave the desktop and taskbar alone.
+
+## Updating from the app fails
+
+The message says why. *Can't write to …*: the app's folder isn't writable (e.g. under
+Program Files); download the new version from the release page. *GitHub is limiting
+requests*: try again later. A download that doesn't match the release (size, checksum, or
+the version it reports) is thrown away and nothing changes. If a new version won't start
+after updating, `mouse-kb-remap.old.exe` next to it is the previous version for the first
+minute: rename it back to `mouse-kb-remap.exe`.
+
+## The command line does nothing in PowerShell
+
+The app is a windowed program, so PowerShell and cmd don't wait for it and its answer can
+arrive after the prompt. Pipe it (`mouse-kb-remap.exe --status | Write-Output`) or use
+`start /wait` in cmd to wait for the answer and the exit code. Exit code 2 means no copy is
+running; copies started with a different `MOUSE_KB_REMAP_CONFIG` are separate and need the
+same variable set.
+
 ## "mouse-kb-remap is already running as administrator"
 
 Only one copy runs at a time; starting it again opens the running one. Versions before 0.2.0

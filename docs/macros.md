@@ -32,7 +32,9 @@ Examples:
 - *Auto-clicker*: Forward → Turbo, Left click, every 100 ms, toggle.
 
 A toggled turbo stops when you switch to an app with a different profile, change any
-setting, or bring this app's window to the front.
+setting, or bring this app's window to the front. With
+[notifications](user-guide.md#notifications) on, toggled turbos and macros say when they
+start and stop.
 
 ## Macros
 
@@ -62,9 +64,13 @@ inserts after the selected step.
 | Mouse down / Mouse up | Press or release a mouse button |
 | Delay | Wait |
 | Text | Type text (Unicode on Windows; ASCII on Linux) |
+| Move by | Move the pointer right / down by a number of counts (negative: left / up), the way the mouse would, so games that read the mouse see it. On the desktop, the Windows pointer speed and *Enhance pointer precision* change how far it goes. |
+| Move to | Move the pointer to a screen position in pixels (all monitors together; the main one starts at 0, 0). *Use the pointer's position in 3 s* fills it in: click it, move the pointer where it should go and wait. Windows only. |
 
 **Delays:** *Remove all* deletes every delay step. *Set all to* changes every delay at once;
-on a macro without delays it adds one between every two steps.
+on a macro without delays it adds one between every two steps. *Randomize ±* makes every
+delay up to that many milliseconds shorter or longer each time it plays, so the timing
+isn't identical every time (0 turns it off).
 
 Any key or button still held when a macro finishes or is stopped is released, so nothing
 gets stuck down.

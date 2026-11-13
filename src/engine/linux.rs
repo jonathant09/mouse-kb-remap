@@ -13,10 +13,13 @@
 //! Needs read access to `/dev/input/event*` and write access to `/dev/uinput`
 //! (see docs/troubleshooting.md for the udev rule).
 
-use super::dispatch::{Dispatcher, Phase, Sink};
+use super::dispatch::{Ctx, Dispatcher, Phase, Sink};
 use super::player::{self, Cmd, Out};
-use super::{CompiledProfile, EngineEvent, FocusInfo, Input, Layers, RecEvent};
-use crate::config::MouseButton;
+use super::{
+    pick_profile, AppCommand, Compiled, CompiledProfile, EngineEvent, FocusInfo, HotkeyBinding, Input, Layers,
+    RecEvent, WindowInfo,
+};
+use crate::config::{MouseButton, SystemCommand};
 
 use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::HashSet;
@@ -218,13 +221,16 @@ struct CaptureState {
 
 struct Shared {
     profiles: RwLock<Vec<CompiledProfile>>,
+    hotkeys: RwLock<Arc<Vec<HotkeyBinding>>>,
     active: RwLock<Option<Arc<Layers>>>,
     active_index: AtomicUsize,
+    forced: Mutex<Option<usize>>,
     enabled: AtomicBool,
     self_pid: u32,
-    last_focus: Mutex<(String, bool)>,
+    /// (focused window, exe file name, is_self)
+    last_focus: Mutex<(WindowInfo, String, bool)>,
     focus_self: AtomicBool,
-    on_event: Box<dyn Fn(EngineEvent) + Send + Sync>,
+    on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>,
     worker: Sender<Cmd>,
     out: Mutex<Option<evdev::uinput::VirtualDevice>>,
     dispatch: Mutex<Dispatcher>,
@@ -260,11 +266,7 @@ fn emit_raw(events: &[InputEvent]) {
 pub struct Engine;
 
 impl Engine {
-    pub fn start(
-        profiles: Vec<CompiledProfile>,
-        enabled: bool,
-        on_event: Box<dyn Fn(EngineEvent) + Send + Sync>,
-    ) -> Self {
+    pub fn start(compiled: Compiled, enabled: bool, on_event: Box<dyn Fn(EngineEvent) + Send + Sync>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         let out = match build_virtual_device() {
             Ok(d) => Some(d),
@@ -275,14 +277,16 @@ impl Engine {
         };
         let have_output = out.is_some();
         let _ = SHARED.set(Shared {
-            profiles: RwLock::new(profiles),
+            profiles: RwLock::new(compiled.profiles),
+            hotkeys: RwLock::new(Arc::new(compiled.hotkeys)),
             active: RwLock::new(None),
             active_index: AtomicUsize::new(NO_PROFILE),
+            forced: Mutex::new(None),
             enabled: AtomicBool::new(enabled),
             self_pid: std::process::id(),
-            last_focus: Mutex::new((String::new(), false)),
+            last_focus: Mutex::new((WindowInfo::default(), String::new(), false)),
             focus_self: AtomicBool::new(false),
-            on_event,
+            on_event: Arc::from(on_event),
             worker: tx,
             out: Mutex::new(out),
             dispatch: Mutex::new(Dispatcher::default()),
@@ -293,12 +297,16 @@ impl Engine {
             rec_down: Mutex::new(Vec::new()),
             sensitivity: AtomicU32::new(0),
         });
-        recompute_active("", false);
+        recompute_active(&WindowInfo::default(), false);
 
         std::thread::Builder::new()
             .name("remap-player".into())
             .spawn(move || player::run_worker(rx, emit_outs))
             .expect("failed to spawn player thread");
+        std::thread::Builder::new()
+            .name("remap-ticker".into())
+            .spawn(ticker)
+            .expect("failed to spawn ticker thread");
         // Without an output device, grabbing would swallow all input.
         if have_output {
             std::thread::Builder::new()
@@ -313,15 +321,29 @@ impl Engine {
         Engine
     }
 
-    pub fn apply(&self, profiles: Vec<CompiledProfile>, enabled: bool) {
+    pub fn apply(&self, compiled: Compiled, enabled: bool) {
         let sh = shared();
         sh.enabled.store(enabled, Ordering::Relaxed);
         if let Ok(mut p) = sh.profiles.write() {
-            *p = profiles;
+            *p = compiled.profiles;
+            if let Ok(mut f) = sh.forced.lock() {
+                if f.is_some_and(|i| i >= p.len()) {
+                    *f = None;
+                }
+            }
         }
-        let (exe, is_self) = sh.last_focus.lock().map(|f| f.clone()).unwrap_or_default();
-        recompute_active(&exe, is_self);
-        let _ = sh.worker.send(Cmd::StopAll);
+        if let Ok(mut h) = sh.hotkeys.write() {
+            *h = Arc::new(compiled.hotkeys);
+        }
+        profile_changed_elsewhere();
+    }
+
+    pub fn force_profile(&self, index: Option<usize>) {
+        if let Ok(mut f) = shared().forced.lock() {
+            *f = index;
+        }
+        profile_changed_elsewhere();
+        emit_focus();
     }
 
     pub fn elevated(&self) -> bool {
@@ -517,9 +539,12 @@ fn process_event(ty: u16, code: u16, value: i32) -> bool {
                 return false;
             }
             let wheel = super::dispatch::wheel_for(value, horizontal);
-            let bound = sh.active.read().ok().and_then(|a| a.clone()).is_some_and(|l| {
-                l.base.contains_key(&Input::Mouse(wheel)) || l.shift.contains_key(&Input::Mouse(wheel))
-            });
+            let bound = sh
+                .active
+                .read()
+                .ok()
+                .and_then(|a| a.clone())
+                .is_some_and(|l| l.binds(&Input::Mouse(wheel)));
             if hi_res {
                 // The matching low-res event carries the step; drop the
                 // hi-res one only if the wheel is remapped.
@@ -563,14 +588,39 @@ fn process_event(ty: u16, code: u16, value: i32) -> bool {
         }
     }
 
-    let enabled = sh.enabled.load(Ordering::Relaxed);
     let active = sh.active.read().ok().and_then(|a| a.clone());
-    let mut sink = UinputSink {
-        events: Vec::new(),
-        worker: &sh.worker,
+    let hotkeys = sh.hotkeys.read().map(|h| h.clone()).unwrap_or_default();
+    let ctx = Ctx {
+        layers: active.as_deref(),
+        enabled: sh.enabled.load(Ordering::Relaxed),
+        hotkeys: &hotkeys,
+        now: Instant::now(),
     };
+    let mut sink = UinputSink { events: Vec::new(), sh };
     let mut d = sh.dispatch.lock().unwrap_or_else(|e| e.into_inner());
-    d.handle(input, phase, active.as_deref(), enabled, &mut sink)
+    let swallow = d.handle(input, phase, &ctx, &mut sink);
+    sink.flush();
+    swallow
+}
+
+/// Finishes tap / hold decisions when their time is up.
+fn ticker() {
+    let sh = shared();
+    loop {
+        let deadline = sh.dispatch.lock().ok().and_then(|d| d.deadline());
+        std::thread::sleep(match deadline {
+            Some(at) => at
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(5)),
+            None => Duration::from_millis(20),
+        });
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            let mut sink = UinputSink { events: Vec::new(), sh };
+            let mut d = sh.dispatch.lock().unwrap_or_else(|e| e.into_inner());
+            d.tick(Instant::now(), &mut sink);
+            sink.flush();
+        }
+    }
 }
 
 fn record(ev: RecEvent) {
@@ -632,7 +682,7 @@ fn capture_key(vk: u16, down: bool, repeat: bool) -> bool {
 
 struct UinputSink<'a> {
     events: Vec<InputEvent>,
-    worker: &'a Sender<Cmd>,
+    sh: &'a Shared,
 }
 
 impl Sink for UinputSink<'_> {
@@ -648,7 +698,15 @@ impl Sink for UinputSink<'_> {
     }
 
     fn worker(&mut self, cmd: Cmd) {
-        let _ = self.worker.send(cmd);
+        let _ = self.sh.worker.send(cmd);
+    }
+
+    fn command(&mut self, cmd: AppCommand) {
+        (self.sh.on_event)(EngineEvent::Command(cmd));
+    }
+
+    fn notice(&mut self, text: String) {
+        (self.sh.on_event)(EngineEvent::Notice(text));
     }
 }
 
@@ -679,7 +737,16 @@ fn out_to_events(out: &Out, events: &mut Vec<InputEvent>) {
                 }
             }
         }
-        Out::Launch(_) | Out::PointerSpeed(_) => {}
+        Out::Move { x, y, absolute: false } => {
+            if x != 0 {
+                events.push(InputEvent::new(EV_REL, REL_X, x));
+            }
+            if y != 0 {
+                events.push(InputEvent::new(EV_REL, REL_Y, y));
+            }
+        }
+        Out::Move { absolute: true, .. } => crate::log!("macro: \"move to\" isn't supported on Linux yet"),
+        Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
     }
 }
 
@@ -745,6 +812,20 @@ fn emit_outs(outs: &[Out]) {
         match out {
             Out::Launch(spec) => launch(spec),
             Out::PointerSpeed(speed) => shared().sensitivity.store(speed.unwrap_or(0), Ordering::Relaxed),
+            Out::Notice(text) => (shared().on_event)(EngineEvent::Notice(text.clone())),
+            Out::System(SystemCommand::NextProfile) => {
+                (shared().on_event)(EngineEvent::Command(AppCommand::NextProfile))
+            }
+            Out::System(SystemCommand::AutoProfile) => {
+                (shared().on_event)(EngineEvent::Command(AppCommand::AutoProfile))
+            }
+            Out::System(c) => crate::log!("system: \"{}\" isn't supported on Linux yet", c.name()),
+            Out::Move { .. } => {
+                // A move is one report.
+                out_to_events(out, &mut batch);
+                emit_raw(&batch);
+                batch.clear();
+            }
             other => {
                 out_to_events(other, &mut batch);
                 for ev in batch.drain(..) {
@@ -776,7 +857,7 @@ fn launch(spec: &player::LaunchSpec) {
 // Focus tracking (X11)
 // ---------------------------------------------------------------------------
 
-fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
+fn recompute_active(window: &WindowInfo, is_self: bool) -> usize {
     let sh = shared();
     let (index, layers) = if is_self {
         (NO_PROFILE, None)
@@ -785,13 +866,8 @@ fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
             Ok(p) => p,
             Err(_) => return NO_PROFILE,
         };
-        let index = profiles
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, p)| p.apps.iter().any(|a| a == exe_lower))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let forced = sh.forced.lock().ok().and_then(|f| *f).filter(|i| *i < profiles.len());
+        let index = forced.unwrap_or_else(|| pick_profile(&profiles, window));
         (index, profiles.get(index).map(|p| p.layers.clone()))
     };
     if let Ok(mut a) = sh.active.write() {
@@ -801,30 +877,58 @@ fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
     index
 }
 
+/// Profiles or the forced profile changed: pick again, stop playback, and
+/// turn toggled layers off.
+fn profile_changed_elsewhere() {
+    let sh = shared();
+    let (window, _, is_self) = sh.last_focus.lock().map(|f| f.clone()).unwrap_or_default();
+    recompute_active(&window, is_self);
+    sh.dispatch.lock().unwrap_or_else(|e| e.into_inner()).reset_layers();
+    let _ = sh.worker.send(Cmd::StopAll);
+}
+
+fn emit_focus() {
+    let sh = shared();
+    let (_, exe, is_self) = sh.last_focus.lock().map(|f| f.clone()).unwrap_or_default();
+    let index = sh.active_index.load(Ordering::Relaxed);
+    let forced = sh.forced.lock().map(|f| f.is_some()).unwrap_or(false);
+    (sh.on_event)(EngineEvent::Focus(FocusInfo {
+        exe,
+        is_self,
+        elevation_blocked: false,
+        profile: (index != NO_PROFILE).then_some(index),
+        forced: forced && !is_self,
+    }));
+}
+
 fn on_focus(pid: u32) {
     let sh = shared();
     let is_self = pid == sh.self_pid;
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
+    let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let exe = path
+        .as_ref()
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
         .unwrap_or_default();
-    let exe_lower = exe.to_ascii_lowercase();
+    // Window titles and fullscreen aren't tracked on Linux yet.
+    let window = WindowInfo {
+        exe: exe.to_lowercase(),
+        path: path.map(|p| p.display().to_string().to_lowercase()).unwrap_or_default(),
+        title: String::new(),
+        fullscreen: false,
+    };
     if let Ok(mut f) = sh.last_focus.lock() {
-        *f = (exe_lower.clone(), is_self);
+        *f = (window.clone(), exe, is_self);
     }
     sh.focus_self.store(is_self, Ordering::Relaxed);
     if !is_self {
         sh.capture.store(false, Ordering::SeqCst);
     }
     let before = sh.active_index.load(Ordering::Relaxed);
-    if recompute_active(&exe_lower, is_self) != before {
+    if recompute_active(&window, is_self) != before {
         let _ = sh.worker.send(Cmd::StopAll);
+        sh.dispatch.lock().unwrap_or_else(|e| e.into_inner()).reset_layers();
     }
-    (sh.on_event)(EngineEvent::Focus(FocusInfo {
-        exe,
-        is_self,
-        elevation_blocked: false,
-    }));
+    emit_focus();
 }
 
 fn focus_thread() {

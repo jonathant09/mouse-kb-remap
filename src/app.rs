@@ -2,16 +2,20 @@
 //! state back into the `Store` global (`refresh`).
 
 use crate::config::{
-    self, combo_label, per_second, Action, Config, Macro, MacroMode, MacroStep, Modifier, MouseButton, Output, Profile,
-    ThemeMode,
+    self, combo_label, per_second, Action, Combo, Config, Hotkey, Hotkeys, Macro, MacroMode, MacroStep, Modifier,
+    MouseButton, Output, Profile, SystemCommand, ThemeMode, LAYER_COUNT,
 };
-use crate::engine::{self, Engine, EngineEvent, RecEvent};
+use crate::engine::{self, AppCommand, Engine, EngineEvent, RecEvent};
 use crate::system::{self, Autostart};
-use crate::{keys, AppTray, AppWindow, BindingRow, KeyCap, MacroItem, MouseBtn, ProfileItem, StepRow, Store, Theme};
+use crate::{
+    ipc, keys, osd, update, AppTray, AppWindow, BindingRow, KeyCap, MacroItem, MouseBtn, ProfileItem, StepRow, Store,
+    Theme,
+};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Order of buttons expected by `MouseDiagram` in ui/mouse.slint.
 const MOUSE_ORDER: [&str; 10] = [
@@ -37,7 +41,7 @@ const IGNORED_APPS: &[&str] = &[
     "lockapp.exe",
 ];
 
-// Action kinds, in the order of `Store.kind-names`.
+// Action kinds (`Store.selected-kind`).
 const K_DEFAULT: i32 = 0;
 const K_KEY: i32 = 1;
 const K_MOUSE: i32 = 2;
@@ -46,22 +50,101 @@ const K_TURBO: i32 = 4;
 const K_TEXT: i32 = 5;
 const K_LAUNCH: i32 = 6;
 const K_MEDIA: i32 = 7;
-const K_SHIFT: i32 = 8;
+const K_LAYER: i32 = 8;
 const K_SENS: i32 = 9;
-const K_OFF: i32 = 10;
+const K_TAPHOLD: i32 = 10;
+const K_SYSTEM: i32 = 11;
+const K_OFF: i32 = 12;
+
+/// Choices for a binding, in kind order.
+const KIND_NAMES: [&str; 13] = [
+    "Default",
+    "Key",
+    "Mouse",
+    "Macro",
+    "Turbo",
+    "Text",
+    "Launch",
+    "Media",
+    "Layer",
+    "Sensitivity",
+    "Tap / hold",
+    "System",
+    "Off",
+];
+
+/// Choices for a part of a tap / hold binding, and their kinds.
+const SLOT_NAMES: [&str; 11] = [
+    "Nothing",
+    "Key",
+    "Mouse",
+    "Macro",
+    "Turbo",
+    "Text",
+    "Launch",
+    "Media",
+    "Layer",
+    "Sensitivity",
+    "System",
+];
+const SLOT_KINDS: [i32; 11] = [
+    K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM,
+];
+const SLOT_TITLES: [&str; 4] = ["", "On tap", "On hold", "On double tap"];
+
+/// Mouse buttons a combo can hold, after "Nothing" in `combo-mouse-names`.
+const COMBO_MOUSE: [MouseButton; 5] = [
+    MouseButton::Left,
+    MouseButton::Right,
+    MouseButton::Middle,
+    MouseButton::Back,
+    MouseButton::Forward,
+];
 
 /// Longest delay / hold accepted from a text field (1 hour).
 const MAX_MS: u32 = 3_600_000;
+
+/// Edits closer together than this undo as one step (typing, dragging).
+const UNDO_MERGE: Duration = Duration::from_millis(700);
+const UNDO_LIMIT: usize = 100;
+
+/// Automatic update checks: how often, and the first one after start.
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 3600);
+const UPDATE_FIRST: Duration = Duration::from_secs(15);
+
+/// What undo restores: bindings, profiles and macros (not settings).
+#[derive(Clone)]
+struct Snapshot {
+    profiles: Vec<Profile>,
+    macros: Vec<Macro>,
+}
+
+impl Snapshot {
+    fn of(cfg: &Config) -> Self {
+        Snapshot {
+            profiles: cfg.profiles.clone(),
+            macros: cfg.macros.clone(),
+        }
+    }
+
+    fn differs(&self, cfg: &Config) -> bool {
+        self.profiles != cfg.profiles || self.macros != cfg.macros
+    }
+}
 
 struct State {
     cfg: Config,
     view: i32,
     /// Profile shown in the editor.
     profile: usize,
-    /// 0 base layer, 1 shift layer.
+    /// Binding layer shown: 0 base, 1 shift, 2-3.
     layer: usize,
-    /// Selected input id (`key:A`, `mouse:back`) or empty.
+    /// Selected input id (`key:A`, `mouse:back`, a combo like
+    /// `ctrl+mouse:back`) or empty.
     input: String,
+    /// Part of a tap / hold binding being edited: 0 the binding itself,
+    /// 1 tap, 2 hold, 3 double tap.
+    slot: usize,
     /// Action kind chosen in the inspector before a value was picked.
     pending_kind: Option<i32>,
     macro_idx: Option<usize>,
@@ -74,14 +157,34 @@ struct State {
     /// Macro the current recording goes into (by name, so selecting or
     /// renaming other macros meanwhile doesn't matter).
     record_target: String,
+    /// Waiting to read the pointer position for a "Move to" step.
+    picking: bool,
     focus_exe: String,
     focus_self: bool,
     elevation_blocked: bool,
+    /// Profile the engine uses now (None while our window is focused), and
+    /// the last one it used.
+    live: Option<usize>,
+    last_live: Option<usize>,
+    /// The profile was chosen by hand.
+    forced: bool,
+    /// Profile last announced on screen.
+    osd_profile: Option<usize>,
+    /// Announce the profile at the next focus report even if unchanged.
+    osd_next_focus: bool,
     recent: Vec<String>,
     autostart: Autostart,
     /// Exe the startup entry opens when it isn't this one (another copy).
     autostart_other: String,
     notice: (String, bool),
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    undo_at: Option<Instant>,
+    update: Option<update::Release>,
+    update_status: String,
+    update_busy: bool,
+    update_checked: Option<Instant>,
+    window_visible: bool,
 }
 
 impl State {
@@ -92,19 +195,65 @@ impl State {
         let layer = self.layer;
         self.cfg.profiles[self.profile].layer_mut(layer)
     }
-    fn action(&self) -> Option<&Action> {
+    /// The selected input's binding (the whole tap / hold, if it is one).
+    fn binding(&self) -> Option<&Action> {
         self.bindings().get(&self.input)
     }
-    fn action_mut(&mut self) -> Option<&mut Action> {
+    fn binding_mut(&mut self) -> Option<&mut Action> {
         let input = self.input.clone();
         self.bindings_mut().get_mut(&input)
+    }
+    /// The action being edited: the binding, or the tap / hold part.
+    fn action(&self) -> Option<&Action> {
+        let a = self.binding()?;
+        if self.slot == 0 {
+            Some(a)
+        } else {
+            a.slot(self.slot)
+        }
+    }
+    fn action_mut(&mut self) -> Option<&mut Action> {
+        let slot = self.slot;
+        let a = self.binding_mut()?;
+        if slot == 0 {
+            Some(a)
+        } else {
+            a.slot_mut(slot)?.as_deref_mut()
+        }
     }
     fn set_action(&mut self, action: Action) {
         if self.input.is_empty() {
             return;
         }
-        let input = self.input.clone();
-        self.bindings_mut().insert(input, action);
+        let slot = self.slot;
+        if slot == 0 {
+            let input = self.input.clone();
+            self.bindings_mut().insert(input, action);
+        } else if let Some(s) = self.binding_mut().and_then(|a| a.slot_mut(slot)) {
+            *s = Some(Box::new(action));
+        }
+        self.pending_kind = None;
+    }
+    /// Back to the default: remove the binding, or empty the tap / hold part.
+    fn clear_action(&mut self) {
+        let slot = self.slot;
+        if slot == 0 {
+            let input = self.input.clone();
+            self.bindings_mut().remove(&input);
+        } else if let Some(s) = self.binding_mut().and_then(|a| a.slot_mut(slot)) {
+            *s = None;
+        }
+        self.pending_kind = None;
+    }
+    /// A tap / hold part can only be edited while the binding is one.
+    fn fix_slot(&mut self) {
+        if self.slot != 0 && !matches!(self.binding(), Some(Action::TapHold { .. })) {
+            self.slot = 0;
+        }
+    }
+    fn select_input(&mut self, id: &str) {
+        self.input = id.to_string();
+        self.slot = 0;
         self.pending_kind = None;
     }
     fn current_macro(&mut self) -> Option<&mut Macro> {
@@ -114,6 +263,40 @@ impl State {
     fn current_step(&mut self) -> Option<&mut MacroStep> {
         let s = self.step?;
         self.current_macro()?.steps.get_mut(s)
+    }
+    /// Change the selected combo's keys; its binding moves to the new id.
+    fn update_combo(&mut self, f: impl FnOnce(&mut Combo)) {
+        let Some(mut c) = Combo::parse(&self.input) else { return };
+        f(&mut c);
+        if c.mods.is_empty() && c.held.iter().all(|h| *h == c.trigger) {
+            return; // a combo has to hold something
+        }
+        let new_id = c.id();
+        if new_id == self.input {
+            return;
+        }
+        let old = std::mem::replace(&mut self.input, new_id.clone());
+        if let Some(a) = self.bindings_mut().remove(&old) {
+            self.bindings_mut().insert(new_id, a);
+        }
+    }
+    fn push_undo(&mut self, before: Snapshot) {
+        let merge = !self.undo.is_empty() && self.undo_at.is_some_and(|t| t.elapsed() < UNDO_MERGE);
+        if !merge {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+        }
+        self.undo_at = Some(Instant::now());
+        self.redo.clear();
+    }
+    /// The profile in use, or the last one.
+    fn shown_live(&self) -> usize {
+        self.live
+            .or(self.last_live)
+            .unwrap_or(0)
+            .min(self.cfg.profiles.len() - 1)
     }
 }
 
@@ -125,6 +308,7 @@ pub struct App {
     tray: RefCell<Option<AppTray>>,
     engine: Engine,
     st: RefCell<State>,
+    timers: RefCell<Vec<slint::Timer>>,
 }
 
 thread_local! {
@@ -149,14 +333,21 @@ pub fn quit_from_any_thread() {
     let _ = slint::invoke_from_event_loop(|| with_app(|app| app.quit()));
 }
 
-pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
+pub struct Options {
+    /// Start in the tray (`--tray`).
+    pub start_hidden: bool,
+    /// Started by the updater after installing this version.
+    pub updated: bool,
+}
+
+pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     system::stop_raw_keyboard_input();
     let cfg = Config::load();
     ui.global::<Theme>().set_dark(cfg.theme == ThemeMode::Dark);
 
-    // The engine thread reports focus changes and captured keys; hop onto
-    // the UI thread.
+    // The engine threads report focus changes, captured keys, hotkeys and
+    // notices; hop onto the UI thread.
     let engine = Engine::start(&cfg, |ev| {
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.on_engine_event(ev)));
     });
@@ -171,6 +362,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             profile: 0,
             layer: 0,
             input: String::new(),
+            slot: 0,
             pending_kind: None,
             macro_idx: None,
             step: None,
@@ -178,15 +370,38 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui_lone_mod: None,
             recording: false,
             record_target: String::new(),
+            picking: false,
             focus_exe: String::new(),
             focus_self: true,
             elevation_blocked: false,
+            live: None,
+            last_live: None,
+            forced: false,
+            osd_profile: None,
+            osd_next_focus: false,
             recent: Vec::new(),
             autostart: Autostart::Off,
             autostart_other: String::new(),
-            notice: (String::new(), false),
+            notice: if opts.updated {
+                (format!("Updated to version {}.", update::current_version()), false)
+            } else {
+                (String::new(), false)
+            },
+            undo: Vec::new(),
+            redo: Vec::new(),
+            undo_at: None,
+            update: None,
+            update_status: if opts.updated {
+                format!("Updated to version {}.", update::current_version())
+            } else {
+                String::new()
+            },
+            update_busy: false,
+            update_checked: None,
+            window_visible: false,
         }),
         engine,
+        timers: RefCell::new(Vec::new()),
     });
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -195,6 +410,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     store.set_engine_supported(app.engine.supported());
     store.set_self_elevated(app.engine.elevated());
     store.set_autostart_supported(system::autostart_supported());
+    store.set_update_supported(update::supported());
     store.set_config_path(
         Config::path()
             .map(|p| p.display().to_string())
@@ -213,6 +429,28 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             .map(|id| SharedString::from(keys::display_name(id)))
             .collect(),
     ));
+    store.set_system_names(model(
+        SystemCommand::ALL
+            .iter()
+            .map(|c| SharedString::from(c.name()))
+            .collect(),
+    ));
+    store.set_hotkey_names(model(Hotkeys::NAMES.iter().map(|n| SharedString::from(*n)).collect()));
+    store.set_cli_help(
+        ipc::FLAGS
+            .iter()
+            .map(|(flag, _, help)| {
+                let flag = if *flag == "--profile" {
+                    "--profile \"<name>\""
+                } else {
+                    flag
+                };
+                format!("mouse-kb-remap.exe {flag}\n    {help}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into(),
+    );
     wire_callbacks(&ui, &app);
 
     // Tray icon + close-to-tray.
@@ -223,21 +461,46 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     *app.tray.borrow_mut() = Some(tray);
 
     ui.window().on_close_requested(|| {
-        let mut response = slint::CloseRequestResponse::HideWindow;
         with_app(|app| {
             if !app.st.borrow().cfg.close_to_tray {
                 app.quit();
             } else {
                 app.cancel_capture();
+                app.st.borrow_mut().window_visible = false;
             }
-            response = slint::CloseRequestResponse::HideWindow;
         });
-        response
+        slint::CloseRequestResponse::HideWindow
     });
 
+    // Command line (`--pause`, `--profile <name>`, …): answered on the UI thread.
+    ipc::serve(|command| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| {
+                let _ = tx.send(app.ipc_command(&command));
+            })
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| "error: the app didn't answer".into())
+    });
+
+    // Automatic update checks (only when turned on in Settings).
+    let first = slint::Timer::default();
+    first.start(slint::TimerMode::SingleShot, UPDATE_FIRST, || {
+        with_app(|app| app.auto_check_update())
+    });
+    let hourly = slint::Timer::default();
+    hourly.start(slint::TimerMode::Repeated, Duration::from_secs(3600), || {
+        with_app(|app| app.auto_check_update())
+    });
+    app.timers.borrow_mut().extend([first, hourly]);
+
+    if opts.updated {
+        app.st.borrow_mut().view = 2;
+    }
     app.refresh();
     app.check_autostart();
-    if !start_hidden {
+    if !opts.start_hidden {
         app.show_window();
     }
     slint::run_event_loop_until_quit()?;
@@ -272,6 +535,15 @@ fn parse_ms(text: &str) -> Option<u32> {
     t.parse::<u64>().ok().map(|v| v.min(MAX_MS as u64) as u32)
 }
 
+fn parse_coord(text: &str) -> Option<i32> {
+    text.trim()
+        .replace('−', "-")
+        .trim_start_matches('+')
+        .parse::<i64>()
+        .ok()
+        .map(|v| v.clamp(-100_000, 100_000) as i32)
+}
+
 fn kind_of(action: &Action) -> i32 {
     match action {
         Action::Key { key, .. } if keys::MEDIA.contains(&key.as_str()) => K_MEDIA,
@@ -281,8 +553,10 @@ fn kind_of(action: &Action) -> i32 {
         Action::Turbo { .. } => K_TURBO,
         Action::Text { .. } => K_TEXT,
         Action::Launch { .. } => K_LAUNCH,
-        Action::Shift => K_SHIFT,
+        Action::Shift | Action::Layer { .. } => K_LAYER,
         Action::Sensitivity { .. } => K_SENS,
+        Action::TapHold { .. } => K_TAPHOLD,
+        Action::System { .. } => K_SYSTEM,
         Action::Disabled => K_OFF,
     }
 }
@@ -297,6 +571,8 @@ fn step_kind(step: &MacroStep) -> i32 {
         MacroStep::MouseUp { .. } => 5,
         MacroStep::Delay { .. } => 6,
         MacroStep::Text { .. } => 7,
+        MacroStep::MouseMove { absolute: false, .. } => 8,
+        MacroStep::MouseMove { absolute: true, .. } => 9,
     }
 }
 
@@ -324,7 +600,14 @@ fn step_ms(step: &MacroStep) -> Option<u32> {
     }
 }
 
-fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>) -> MacroStep {
+fn step_xy(step: &MacroStep) -> Option<(i32, i32)> {
+    match step {
+        MacroStep::MouseMove { x, y, .. } => Some((*x, *y)),
+        _ => None,
+    }
+}
+
+fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>, xy: Option<(i32, i32)>) -> MacroStep {
     match kind {
         0 => MacroStep::KeyTap {
             key,
@@ -339,12 +622,20 @@ fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>) -> Ma
         4 => MacroStep::MouseDown { button },
         5 => MacroStep::MouseUp { button },
         6 => MacroStep::Delay { ms: ms.unwrap_or(50) },
+        8 => {
+            let (x, y) = xy.unwrap_or((0, 0));
+            MacroStep::MouseMove { x, y, absolute: false }
+        }
+        9 => {
+            let (x, y) = xy.or_else(system::cursor_pos).unwrap_or((0, 0));
+            MacroStep::MouseMove { x, y, absolute: true }
+        }
         _ => MacroStep::Text { text: String::new() },
     }
 }
 
-/// Input ids look like `key:A`, `key:F1`, `mouse:back`.
-fn input_label(input: &str) -> String {
+/// Plain input ids look like `key:A`, `key:F1`, `mouse:back`.
+fn plain_label(input: &str) -> String {
     if let Some(k) = input.strip_prefix("key:") {
         keys::display_name(k)
     } else if let Some(m) = input.strip_prefix("mouse:") {
@@ -356,8 +647,25 @@ fn input_label(input: &str) -> String {
     }
 }
 
+/// "Back", or for a combo "Ctrl + Back".
+fn input_label(input: &str) -> String {
+    match Combo::parse(input) {
+        Some(c) => {
+            let mut mods = c.mods.clone();
+            mods.sort();
+            let mut parts: Vec<String> = mods.iter().map(|m| m.name().to_string()).collect();
+            parts.extend(c.held.iter().map(|h| plain_label(h)));
+            parts.push(plain_label(&c.trigger));
+            parts.join(" + ")
+        }
+        None => plain_label(input),
+    }
+}
+
 fn input_detail(input: &str) -> String {
-    if let Some(k) = input.strip_prefix("key:") {
+    if Combo::parse(input).is_some() {
+        "Combo: hold the first, then press the last".to_string()
+    } else if let Some(k) = input.strip_prefix("key:") {
         match keys::find(k).map(|k| k.group) {
             Some(keys::Group::Extra) => "Keyboard key (not on the drawing)".to_string(),
             Some(keys::Group::Numpad) => "Number pad key".to_string(),
@@ -372,26 +680,35 @@ fn input_detail(input: &str) -> String {
     }
 }
 
+/// "the shift layer", "layer 2".
+fn layer_phrase(layer: usize) -> String {
+    match layer {
+        1 => "the shift layer".to_string(),
+        n => format!("layer {n}"),
+    }
+}
+
 /// What an unbound input in this profile/layer does instead, as a sentence.
 fn inherited(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<String> {
     let def = &cfg.profiles[0];
     let p = &cfg.profiles[profile];
-    if layer == 1 {
+    if layer > 0 {
+        let name = layer_phrase(layer);
         if profile > 0 {
-            if let Some(a) = def.shift_bindings.get(input) {
-                return Some(format!("Uses the Default profile's shift layer: {}.", a.label()));
+            if let Some(a) = def.layer(layer).get(input) {
+                return Some(format!("Uses the Default profile's {name}: {}.", a.label()));
             }
         }
         if let Some(a) = p.bindings.get(input) {
             return Some(format!(
-                "Nothing on the shift layer, so the base binding applies: {}.",
+                "Nothing on {name}, so the base binding applies: {}.",
                 a.label()
             ));
         }
         if profile > 0 {
             if let Some(a) = def.bindings.get(input) {
                 return Some(format!(
-                    "Nothing on the shift layer, so Default's binding applies: {}.",
+                    "Nothing on {name}, so Default's binding applies: {}.",
                     a.label()
                 ));
             }
@@ -410,9 +727,9 @@ fn inherited(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<
 fn inherited_short(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<String> {
     let def = &cfg.profiles[0];
     let p = &cfg.profiles[profile];
-    if layer == 1 {
+    if layer > 0 {
         let a = (profile > 0)
-            .then(|| def.shift_bindings.get(input))
+            .then(|| def.layer(layer).get(input))
             .flatten()
             .or_else(|| p.bindings.get(input))
             .or_else(|| (profile > 0).then(|| def.bindings.get(input)).flatten())?;
@@ -424,16 +741,66 @@ fn inherited_short(cfg: &Config, profile: usize, layer: usize, input: &str) -> O
     }
 }
 
+/// "SHIFT LAYER · hold Back to use" for the layer banner.
+fn layer_banner(cfg: &Config, profile: usize, layer: usize) -> String {
+    let own = &cfg.profiles[profile].bindings;
+    let inherited = cfg.profiles[0]
+        .bindings
+        .iter()
+        .filter(|(i, _)| profile > 0 && !own.contains_key(*i));
+    let mut hold = Vec::new();
+    let mut toggle = Vec::new();
+    for (input, action) in own.iter().chain(inherited) {
+        let mut top = true;
+        action.walk(&mut |a| {
+            if let Action::Layer { layer: l, toggle: t } = a {
+                if *l as usize == layer {
+                    let label = input_label(input);
+                    // Inside a tap / hold: the hold part holds, the tap part toggles.
+                    if *t {
+                        toggle.push(label);
+                    } else {
+                        hold.push(if top { label } else { format!("{label} (hold)") });
+                    }
+                }
+            }
+            top = false;
+        });
+    }
+    let title = match layer {
+        1 => "SHIFT LAYER".to_string(),
+        n => format!("LAYER {n}"),
+    };
+    let how = match (hold.is_empty(), toggle.is_empty()) {
+        (true, true) => "no input switches to it yet (use the Layer action)".to_string(),
+        (false, true) => format!("hold {} to use", hold.join(" or ")),
+        (true, false) => format!("press {} to switch on / off", toggle.join(" or ")),
+        (false, false) => format!(
+            "hold {}, or press {} to switch on / off",
+            hold.join(" or "),
+            toggle.join(" or ")
+        ),
+    };
+    format!("{title} · {how}")
+}
+
 impl App {
     fn ui(&self) -> Option<AppWindow> {
         self.ui.upgrade()
     }
 
-    /// Change config: then save, push to the engine and redraw.
+    /// Change config: then save, push to the engine and redraw. Changes to
+    /// profiles and macros can be undone.
     fn edit(&self, f: impl FnOnce(&App, &mut State)) {
         {
             let mut st = self.st.borrow_mut();
+            let before = Snapshot::of(&st.cfg);
             f(self, &mut st);
+            st.cfg.profiles.iter_mut().for_each(Profile::tidy);
+            st.fix_slot();
+            if before.differs(&st.cfg) {
+                st.push_undo(before);
+            }
             st.cfg.save();
             self.engine.apply(&st.cfg);
         }
@@ -445,6 +812,7 @@ impl App {
         {
             let mut st = self.st.borrow_mut();
             f(self, &mut st);
+            st.fix_slot();
         }
         self.refresh();
     }
@@ -454,14 +822,22 @@ impl App {
         self.refresh();
     }
 
+    /// An on-screen notification, if they're turned on.
+    fn osd(&self, text: &str) {
+        if self.st.borrow().cfg.notifications {
+            osd::show(text);
+        }
+    }
+
     pub fn show_window(&self) {
         let Some(ui) = self.ui() else { return };
         let _ = ui.show();
         ui.window().set_minimized(false);
+        self.st.borrow_mut().window_visible = true;
         if !self.centred.replace(true) {
             // The real size is only known once the window exists.
             let weak = ui.as_weak();
-            slint::Timer::single_shot(std::time::Duration::from_millis(30), move || {
+            slint::Timer::single_shot(Duration::from_millis(30), move || {
                 if let Some(ui) = weak.upgrade() {
                     center_window(&ui);
                 }
@@ -493,7 +869,7 @@ impl App {
             return;
         }
         // Without a selected input there's nothing to bind ("detect" picks one).
-        if target == "binding" && self.st.borrow().input.is_empty() {
+        if (target == "binding" || target == "combo") && self.st.borrow().input.is_empty() {
             return;
         }
         // Engine capture where possible; the window's FocusScope otherwise.
@@ -503,23 +879,50 @@ impl App {
 
     fn on_engine_event(&self, ev: EngineEvent) {
         match ev {
-            EngineEvent::Focus(info) => self.nav(|_, st| {
-                st.focus_self = info.is_self;
-                if !info.is_self {
-                    // The engine cancels capture when focus leaves us.
-                    st.capturing.clear();
-                }
-                if !info.is_self && !info.exe.is_empty() {
-                    let exe = info.exe.clone();
-                    st.elevation_blocked = info.elevation_blocked;
-                    if !IGNORED_APPS.contains(&exe.to_ascii_lowercase().as_str()) {
-                        st.recent.retain(|a| !a.eq_ignore_ascii_case(&exe));
-                        st.recent.insert(0, exe.clone());
-                        st.recent.truncate(6);
+            EngineEvent::Focus(info) => {
+                self.nav(|_, st| {
+                    st.focus_self = info.is_self;
+                    if !info.is_self {
+                        // The engine cancels capture when focus leaves us.
+                        st.capturing.clear();
                     }
-                    st.focus_exe = exe;
+                    if !info.is_self && !info.exe.is_empty() {
+                        let exe = info.exe.clone();
+                        st.elevation_blocked = info.elevation_blocked;
+                        if !IGNORED_APPS.contains(&exe.to_ascii_lowercase().as_str()) {
+                            st.recent.retain(|a| !a.eq_ignore_ascii_case(&exe));
+                            st.recent.insert(0, exe.clone());
+                            st.recent.truncate(6);
+                        }
+                        st.focus_exe = exe;
+                    }
+                    st.live = info.profile;
+                    st.forced = info.forced;
+                    if info.profile.is_some() {
+                        st.last_live = info.profile;
+                    }
+                });
+                // Announce profile switches (not the first one at start).
+                if let Some(p) = info.profile {
+                    let text = {
+                        let mut st = self.st.borrow_mut();
+                        let announce =
+                            std::mem::take(&mut st.osd_next_focus) || st.osd_profile.is_some_and(|last| last != p);
+                        st.osd_profile = Some(p);
+                        let name = st.cfg.profiles.get(p).map(|p| p.name.clone()).unwrap_or_default();
+                        announce.then(|| {
+                            if info.forced {
+                                format!("Profile: {name} (chosen by hand)")
+                            } else {
+                                format!("Profile: {name}")
+                            }
+                        })
+                    };
+                    if let Some(text) = text {
+                        self.osd(&text);
+                    }
                 }
-            }),
+            }
             EngineEvent::Captured { vk, mods } => {
                 if let Some(k) = keys::find_by_vk(vk) {
                     self.captured(k.id, mods);
@@ -528,6 +931,110 @@ impl App {
                     let _ = self.engine.start_capture();
                 }
             }
+            EngineEvent::Command(cmd) => self.command(cmd),
+            EngineEvent::Notice(text) => self.osd(&text),
+        }
+    }
+
+    /// An app hotkey or a "Next profile" / "Automatic profile" binding.
+    fn command(&self, cmd: AppCommand) {
+        match cmd {
+            AppCommand::TogglePause => {
+                let on = !self.st.borrow().cfg.enabled;
+                self.set_enabled(on);
+            }
+            AppCommand::NextProfile => {
+                self.next_profile();
+            }
+            AppCommand::AutoProfile => self.force_profile(None),
+        }
+    }
+
+    fn set_enabled(&self, on: bool) {
+        if self.st.borrow().cfg.enabled != on {
+            self.edit(|_, st| st.cfg.enabled = on);
+            self.osd(if on { "Remapping on" } else { "Remapping paused" });
+        }
+    }
+
+    fn force_profile(&self, index: Option<usize>) {
+        self.st.borrow_mut().osd_next_focus = true;
+        self.engine.force_profile(index);
+    }
+
+    /// Use the profile after the one in use. Returns its name.
+    fn next_profile(&self) -> String {
+        let (next, name) = {
+            let st = self.st.borrow();
+            let next = (st.shown_live() + 1) % st.cfg.profiles.len();
+            (next, st.cfg.profiles[next].name.clone())
+        };
+        self.force_profile(Some(next));
+        name
+    }
+
+    /// A command from `mouse-kb-remap --pause` etc. Answers start with "ok"
+    /// or "error".
+    fn ipc_command(&self, command: &str) -> String {
+        let (verb, arg) = command.split_once(' ').unwrap_or((command, ""));
+        let arg = arg.trim().trim_matches('"');
+        let enabled = self.st.borrow().cfg.enabled;
+        let state = |on: bool| if on { "on" } else { "paused" };
+        match verb {
+            "pause" | "resume" | "toggle-pause" => {
+                let on = match verb {
+                    "pause" => false,
+                    "resume" => true,
+                    _ => !enabled,
+                };
+                self.set_enabled(on);
+                format!("ok: remapping {}", state(on))
+            }
+            "next-profile" => format!("ok: profile {}", self.next_profile()),
+            "auto-profile" => {
+                self.force_profile(None);
+                "ok: choosing the profile by the focused app".into()
+            }
+            "profile" => {
+                let found = {
+                    let st = self.st.borrow();
+                    st.cfg
+                        .profiles
+                        .iter()
+                        .position(|p| p.name.eq_ignore_ascii_case(arg))
+                        .map(|i| (i, st.cfg.profiles[i].name.clone()))
+                        .ok_or_else(|| {
+                            let names: Vec<&str> = st.cfg.profiles.iter().map(|p| p.name.as_str()).collect();
+                            format!("error: no profile named \"{arg}\" (there are: {})", names.join(", "))
+                        })
+                };
+                match found {
+                    Ok((i, name)) => {
+                        self.force_profile(Some(i));
+                        format!("ok: profile {name}")
+                    }
+                    Err(e) => e,
+                }
+            }
+            "status" => {
+                let st = self.st.borrow();
+                format!(
+                    "ok: remapping {}; profile {} ({}); focused app {}",
+                    state(enabled),
+                    st.cfg.profiles[st.shown_live()].name,
+                    if st.forced { "chosen by hand" } else { "automatic" },
+                    if st.focus_exe.is_empty() {
+                        "unknown"
+                    } else {
+                        &st.focus_exe
+                    }
+                )
+            }
+            "show" => {
+                self.show_window();
+                "ok".into()
+            }
+            _ => format!("error: unknown command \"{verb}\""),
         }
     }
 
@@ -558,6 +1065,18 @@ impl App {
                     *k = key
                 }
             }),
+            "combo" => self.edit(|_, st| {
+                let modifier = keys::find(&key).and_then(|k| keys::modifier_of(k.vk));
+                st.update_combo(|c| match modifier {
+                    // A modifier key counts as Ctrl / Shift / … (either side).
+                    Some(m) => {
+                        if !c.mods.contains(&m) {
+                            c.mods.push(m);
+                        }
+                    }
+                    None => c.held = vec![format!("key:{key}")],
+                });
+            }),
             "detect" => {
                 if let Some(ui) = self.ui() {
                     let store = ui.global::<Store>();
@@ -568,15 +1087,53 @@ impl App {
                 }
                 self.nav(|_, st| {
                     st.view = 0;
-                    st.input = format!("key:{key}");
-                    st.pending_kind = None;
+                    st.select_input(&format!("key:{key}"));
                     if keys::find(&key).is_some_and(|k| k.group == keys::Group::Numpad) {
                         st.cfg.full_keyboard = true;
                     }
                 });
             }
+            t if t.starts_with("hotkey") => {
+                let i: usize = t["hotkey".len()..].parse().unwrap_or(0);
+                self.edit(|_, st| {
+                    *st.cfg.hotkeys.slot_mut(i) = Some(Hotkey {
+                        key,
+                        mods: Modifier::from_bits(mods),
+                    })
+                });
+            }
             _ => self.refresh(),
         }
+    }
+
+    fn undo(&self, redo: bool) {
+        {
+            let mut st = self.st.borrow_mut();
+            let Some(snap) = (if redo { st.redo.pop() } else { st.undo.pop() }) else {
+                return;
+            };
+            let current = Snapshot::of(&st.cfg);
+            if redo {
+                st.undo.push(current);
+            } else {
+                st.redo.push(current);
+            }
+            st.cfg.profiles = snap.profiles;
+            st.cfg.macros = snap.macros;
+            st.undo_at = None;
+            // Keep the selection valid.
+            st.profile = st.profile.min(st.cfg.profiles.len() - 1);
+            st.macro_idx = st.macro_idx.filter(|i| *i < st.cfg.macros.len());
+            if st.view == 1 && st.macro_idx.is_none() {
+                st.view = 0;
+            }
+            st.step = None;
+            st.pending_kind = None;
+            st.fix_slot();
+            st.cfg.save();
+            self.engine.apply(&st.cfg);
+        }
+        self.refresh();
     }
 
     // ---- macros ----------------------------------------------------------------
@@ -641,10 +1198,7 @@ impl App {
     fn new_macro(&self, bind_selected: bool) {
         self.edit(|_, st| {
             let name = st.cfg.unique_macro_name("New macro");
-            st.cfg.macros.push(Macro {
-                name: name.clone(),
-                steps: vec![],
-            });
+            st.cfg.macros.push(Macro::new(name.clone(), vec![]));
             if bind_selected && !st.input.is_empty() {
                 st.set_action(Action::Macro {
                     name,
@@ -656,6 +1210,29 @@ impl App {
             st.macro_idx = Some(st.cfg.macros.len() - 1);
             st.step = None;
             st.view = 1;
+        });
+    }
+
+    /// Fill the selected "Move to" step with the pointer's position, 3 s
+    /// from now (time to move the pointer where it should go).
+    fn pick_position(&self) {
+        if self.st.borrow().picking {
+            return;
+        }
+        self.nav(|_, st| st.picking = true);
+        slint::Timer::single_shot(Duration::from_secs(3), || {
+            with_app(|app| {
+                let pos = system::cursor_pos();
+                app.edit(|_, st| {
+                    st.picking = false;
+                    if let (Some((px, py)), Some(MacroStep::MouseMove { x, y, absolute: true })) =
+                        (pos, st.current_step())
+                    {
+                        *x = px;
+                        *y = py;
+                    }
+                });
+            })
         });
     }
 
@@ -730,6 +1307,110 @@ impl App {
         }
     }
 
+    // ---- updates ---------------------------------------------------------------
+
+    fn auto_check_update(&self) {
+        let due = {
+            let st = self.st.borrow();
+            st.cfg.check_updates && st.update_checked.is_none_or(|t| t.elapsed() >= UPDATE_EVERY)
+        };
+        if due {
+            self.check_update(false);
+        }
+    }
+
+    /// Look for a new version in the background. `manual`: the user asked,
+    /// so say what happened either way.
+    fn check_update(&self, manual: bool) {
+        if self.st.borrow().update_busy {
+            return;
+        }
+        if manual {
+            self.nav(|_, st| {
+                st.update_busy = true;
+                st.update_status = "Checking…".into();
+            });
+        }
+        std::thread::spawn(move || {
+            let result = update::check();
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| {
+                    app.nav(|_, st| {
+                        st.update_busy = false;
+                        st.update_checked = Some(Instant::now());
+                        match result {
+                            Ok(Some(r)) => {
+                                st.update_status = format!(
+                                    "Version {} is available (you have {}).",
+                                    r.version,
+                                    update::current_version()
+                                );
+                                st.update = Some(r);
+                            }
+                            Ok(None) => {
+                                st.update = None;
+                                if manual {
+                                    st.update_status =
+                                        format!("You have the latest version ({}).", update::current_version());
+                                }
+                            }
+                            Err(e) => {
+                                crate::log!("update: check failed: {e}");
+                                if manual {
+                                    st.update_status = format!("Couldn't check for updates: {e}");
+                                }
+                            }
+                        }
+                    })
+                })
+            });
+        });
+    }
+
+    fn install_update(&self) {
+        let (release, hidden) = {
+            let st = self.st.borrow();
+            match (&st.update, st.update_busy) {
+                (Some(r), false) => (r.clone(), !st.window_visible),
+                _ => return,
+            }
+        };
+        self.nav(|_, st| {
+            st.update_busy = true;
+            st.update_status = format!("Downloading version {}…", release.version);
+        });
+        std::thread::spawn(move || {
+            let shown = std::sync::atomic::AtomicU64::new(0);
+            let version = release.version.clone();
+            let progress = |done: u64, total: u64| {
+                if total == 0 {
+                    return;
+                }
+                let percent = done * 100 / total;
+                // Every 10 %, not every packet.
+                if percent / 10 > shown.load(std::sync::atomic::Ordering::Relaxed) / 10 {
+                    shown.store(percent, std::sync::atomic::Ordering::Relaxed);
+                    let version = version.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        with_app(|app| {
+                            app.nav(|_, st| st.update_status = format!("Downloading version {version}… {percent} %"))
+                        })
+                    });
+                }
+            };
+            let result = update::install(&release, hidden, &progress);
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| match result {
+                    Ok(()) => app.quit(),
+                    Err(e) => app.nav(|_, st| {
+                        st.update_busy = false;
+                        st.update_status = format!("Couldn't update: {e}");
+                    }),
+                })
+            });
+        });
+    }
+
     /// Read the startup entry in the background (schtasks is slow) and note
     /// whether it opens this copy.
     fn check_autostart(&self) {
@@ -801,7 +1482,6 @@ impl App {
         let st = self.st.borrow();
         let s = ui.global::<Store>();
         let cfg = &st.cfg;
-        let live = cfg.profile_for_exe(&st.focus_exe);
         let profile = &cfg.profiles[st.profile];
         let bindings = st.bindings();
 
@@ -821,7 +1501,7 @@ impl App {
                     } else {
                         p.apps.join(", ").into()
                     },
-                    live: i == live && !st.focus_exe.is_empty(),
+                    live: st.live == Some(i),
                     count: p.binding_count() as i32,
                 })
                 .collect(),
@@ -851,10 +1531,12 @@ impl App {
         ));
         s.set_macro_names(model(cfg.macros.iter().map(|m| SharedString::from(&m.name)).collect()));
         s.set_selected_macro(st.macro_idx.map(|i| i as i32).unwrap_or(-1));
+        s.set_update_available(st.update.as_ref().map(|r| r.version.clone()).unwrap_or_default().into());
 
         // Header
         s.set_profile_name(profile.name.clone().into());
         s.set_profile_apps(model(profile.apps.iter().map(SharedString::from).collect()));
+        s.set_profile_fullscreen(profile.fullscreen_only);
         s.set_recent_apps(model(
             st.recent
                 .iter()
@@ -864,27 +1546,7 @@ impl App {
                 .collect(),
         ));
         s.set_layer(st.layer as i32);
-        // Inputs that hold the shift layer in this profile: its own, plus
-        // Default's that it doesn't override.
-        let inherited_shift = cfg.profiles[0]
-            .bindings
-            .iter()
-            .filter(|(i, _)| st.profile > 0 && !profile.bindings.contains_key(*i));
-        let shift_keys: Vec<String> = profile
-            .bindings
-            .iter()
-            .chain(inherited_shift)
-            .filter(|(_, a)| matches!(a, Action::Shift))
-            .map(|(i, _)| input_label(i))
-            .collect();
-        s.set_shift_hint(
-            if shift_keys.is_empty() {
-                "no input is set to Shift layer yet".to_string()
-            } else {
-                format!("hold {} to use", shift_keys.join(" or "))
-            }
-            .into(),
-        );
+        s.set_layer_banner(layer_banner(cfg, st.profile, st.layer).into());
         s.set_full_keyboard(cfg.full_keyboard);
 
         // Keyboard
@@ -940,10 +1602,9 @@ impl App {
                 .collect(),
         ));
 
-        // All bindings of this profile (base first, mouse before keys)
-        let mut rows: Vec<BindingRow> = [0usize, 1]
-            .iter()
-            .flat_map(|&layer| {
+        // All bindings of this profile (by layer, mouse before keys, combos last)
+        let mut rows: Vec<BindingRow> = (0..LAYER_COUNT)
+            .flat_map(|layer| {
                 profile.layer(layer).iter().map(move |(input, action)| BindingRow {
                     input_id: input.clone().into(),
                     input: input_label(input).into(),
@@ -952,11 +1613,15 @@ impl App {
                 })
             })
             .collect();
-        rows.sort_by_key(|r| (r.layer, !r.input_id.starts_with("mouse:")));
+        rows.sort_by_key(|r| {
+            let combo = r.input_id.contains('+');
+            (r.layer, combo, !r.input_id.starts_with("mouse:"))
+        });
         s.set_bindings(model(rows));
 
         // Inspector
         let input = st.input.as_str();
+        let combo = Combo::parse(input);
         s.set_selected_input(input.into());
         s.set_selected_label(input_label(input).into());
         s.set_selected_detail(
@@ -968,12 +1633,84 @@ impl App {
             .into(),
         );
         s.set_selected_supported(input != "mouse:dpi");
+        s.set_selected_is_combo(combo.is_some());
+        if let Some(c) = &combo {
+            s.set_combo_mods(Modifier::to_bits(&c.mods) as i32);
+            let held_mouse = c
+                .held
+                .iter()
+                .find_map(|h| h.strip_prefix("mouse:").and_then(MouseButton::from_id))
+                .and_then(|b| COMBO_MOUSE.iter().position(|m| *m == b))
+                .map(|i| i as i32 + 1)
+                .unwrap_or(0);
+            s.set_combo_held_mouse(held_mouse);
+            s.set_combo_held_key(
+                c.held
+                    .iter()
+                    .find(|h| h.starts_with("key:"))
+                    .map(|h| plain_label(h))
+                    .unwrap_or_default()
+                    .into(),
+            );
+            s.set_combo_trigger(plain_label(&c.trigger).into());
+            s.set_combos(model(vec![]));
+        } else {
+            s.set_combos(model(
+                bindings
+                    .iter()
+                    .filter(|(id, _)| Combo::parse(id).is_some_and(|c| c.trigger == input))
+                    .map(|(id, a)| BindingRow {
+                        input_id: id.clone().into(),
+                        input: input_label(id).into(),
+                        action: a.label().into(),
+                        layer: st.layer as i32,
+                    })
+                    .collect(),
+            ));
+        }
+
         let action = st.action();
-        s.set_selected_kind(
-            st.pending_kind
-                .unwrap_or_else(|| action.map(kind_of).unwrap_or(K_DEFAULT)),
-        );
-        s.set_inherited_value(inherited(cfg, st.profile, st.layer, input).unwrap_or_default().into());
+        let kind = st
+            .pending_kind
+            .unwrap_or_else(|| action.map(kind_of).unwrap_or(K_DEFAULT));
+        s.set_selected_kind(kind);
+        s.set_slot(st.slot as i32);
+        s.set_slot_title(SLOT_TITLES[st.slot.min(3)].into());
+        if st.slot == 0 {
+            s.set_kind_items(model(KIND_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
+            s.set_kind_current(kind);
+            s.set_inherited_value(inherited(cfg, st.profile, st.layer, input).unwrap_or_default().into());
+        } else {
+            s.set_kind_items(model(SLOT_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
+            s.set_kind_current(
+                SLOT_KINDS
+                    .iter()
+                    .position(|k| *k == kind)
+                    .map(|i| i as i32)
+                    .unwrap_or(-1),
+            );
+            s.set_inherited_value(
+                match st.slot {
+                    1 => "Nothing happens on a tap.",
+                    2 => "Nothing happens on a hold.",
+                    _ => "No double tap: a second tap is just another tap.",
+                }
+                .into(),
+            );
+        }
+        if let Some(Action::TapHold { hold_ms, double_ms, .. }) = st.binding() {
+            let part = |n: usize| {
+                st.binding()
+                    .and_then(|a| a.slot(n))
+                    .map(|a| a.label())
+                    .unwrap_or_else(|| "Nothing".into())
+            };
+            s.set_taphold_tap(part(1).into());
+            s.set_taphold_hold(part(2).into());
+            s.set_taphold_double(part(3).into());
+            s.set_taphold_hold_ms(hold_ms.to_string().into());
+            s.set_taphold_double_ms(double_ms.to_string().into());
+        }
 
         let (key_value, key_mods) = match action {
             Some(Action::Key { key, mods }) if !keys::MEDIA.contains(&key.as_str()) => {
@@ -1005,6 +1742,18 @@ impl App {
                 .unwrap_or(-1),
             _ => -1,
         });
+        s.set_system_current(match action {
+            Some(Action::System { command }) => SystemCommand::ALL
+                .iter()
+                .position(|c| c == command)
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+            _ => -1,
+        });
+        if let Some(Action::Layer { layer, toggle }) = action {
+            s.set_layer_target(*layer as i32);
+            s.set_layer_toggle(*toggle);
+        }
 
         if let Some(Action::Macro {
             name,
@@ -1080,6 +1829,7 @@ impl App {
         // Macro editor
         let m = st.macro_idx.and_then(|i| cfg.macros.get(i));
         s.set_macro_name(m.map(|m| m.name.clone()).unwrap_or_default().into());
+        s.set_macro_jitter(m.map(|m| m.jitter_ms.to_string()).unwrap_or_default().into());
         s.set_steps(model(
             m.map(|m| {
                 m.steps
@@ -1097,6 +1847,7 @@ impl App {
             .unwrap_or_default(),
         ));
         s.set_recording(st.recording);
+        s.set_picking_position(st.picking);
         if let Some(m) = m {
             let total: u64 = m
                 .steps
@@ -1142,6 +1893,9 @@ impl App {
                 }
                 .into(),
             );
+            let (x, y) = step_xy(step).unwrap_or((0, 0));
+            s.set_step_x(x.to_string().into());
+            s.set_step_y(y.to_string().into());
         } else {
             s.set_step_kind(-1);
         }
@@ -1152,10 +1906,24 @@ impl App {
         s.set_close_to_tray(cfg.close_to_tray);
         s.set_notice(st.notice.0.clone().into());
         s.set_notice_error(st.notice.1);
+        s.set_hotkey_values(model(
+            (0..Hotkeys::NAMES.len())
+                .map(|i| {
+                    cfg.hotkeys
+                        .get(i)
+                        .map(|h| SharedString::from(combo_label(&h.key, &h.mods)))
+                        .unwrap_or_default()
+                })
+                .collect(),
+        ));
+        s.set_notifications(cfg.notifications);
+        s.set_check_updates(cfg.check_updates);
+        s.set_update_status(st.update_status.clone().into());
+        s.set_update_busy(st.update_busy);
 
         // Status bar
         s.set_focused_app(st.focus_exe.clone().into());
-        let live_name = cfg.profiles[live].name.clone();
+        let live_name = cfg.profiles[st.shown_live()].name.clone();
         s.set_live_profile(
             if st.focus_self && !st.focus_exe.is_empty() {
                 format!("{live_name} (paused while this window is focused)")
@@ -1164,8 +1932,11 @@ impl App {
             }
             .into(),
         );
+        s.set_live_forced(st.forced);
         s.set_elevation_warning(st.elevation_blocked && !st.focus_self);
         s.set_engine_enabled(cfg.enabled);
+        s.set_can_undo(!st.undo.is_empty());
+        s.set_can_redo(!st.redo.is_empty());
 
         if let Some(tray) = self.tray.borrow().as_ref() {
             tray.set_remap_enabled(cfg.enabled);
@@ -1212,6 +1983,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         st.view = 0;
         st.profile = (i.max(0) as usize).min(st.cfg.profiles.len() - 1);
         st.pending_kind = None;
+        st.slot = 0;
     });
     on!(on_add_profile, | | edit |st: &mut State| {
         let name = st.cfg.unique_profile_name("New profile");
@@ -1230,23 +2002,35 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         st.profile = st.cfg.profiles.len() - 1;
         st.pending_kind = None;
     });
-    on!(on_delete_profile, | | edit |st: &mut State| {
-        if st.profile > 0 {
-            st.cfg.profiles.remove(st.profile);
-            st.profile -= 1;
-            st.pending_kind = None;
-        }
-    });
+    {
+        let a = app.clone();
+        s.on_delete_profile(move || {
+            if a.st.borrow().profile == 0 {
+                return;
+            }
+            // Profile numbers shift: a profile chosen by hand goes back to automatic.
+            if a.st.borrow().forced {
+                a.engine.force_profile(None);
+            }
+            a.edit(|_, st| {
+                st.cfg.profiles.remove(st.profile);
+                st.profile -= 1;
+                st.pending_kind = None;
+            });
+        });
+    }
     {
         let a = app.clone();
         s.on_rename_profile(move |name| {
             let mut st = a.st.borrow_mut();
             let name = name.trim();
-            if st.profile == 0 || name.is_empty() {
+            if st.profile == 0 || name.is_empty() || st.cfg.profiles[st.profile].name == name {
                 return;
             }
+            let before = Snapshot::of(&st.cfg);
             let p = st.profile;
             st.cfg.profiles[p].name = name.to_string();
+            st.push_undo(before);
             st.cfg.save();
             drop(st);
             a.refresh();
@@ -1257,7 +2041,8 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         if name.is_empty() || st.profile == 0 {
             return;
         }
-        if !name.contains('.') {
+        let plain = !name.starts_with("title:") && !name.contains(['\\', '/', '*', '?', '.']);
+        if plain {
             name.push_str(".exe");
         }
         let p = st.profile;
@@ -1270,23 +2055,34 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         let p = st.profile;
         st.cfg.profiles[p].apps.retain(|a| a.as_str() != app_name.as_str());
     });
+    on!(on_set_profile_fullscreen, |on| edit |st: &mut State| {
+        let p = st.profile;
+        if p > 0 {
+            st.cfg.profiles[p].fullscreen_only = on;
+        }
+    });
     on!(on_select_layer, |layer| nav |st: &mut State| {
-        st.layer = layer.clamp(0, 1) as usize;
+        st.layer = layer.clamp(0, LAYER_COUNT as i32 - 1) as usize;
         st.pending_kind = None;
+        st.slot = 0;
     });
     on!(on_set_full_keyboard, |on| edit |st: &mut State| st.cfg.full_keyboard = on);
 
     // ---- bindings ----------------------------------------------------------------------
-    on!(on_select_input, |id| nav |st: &mut State| {
-        st.input = id.to_string();
-        st.pending_kind = None;
-    });
+    {
+        let a = app.clone();
+        s.on_select_input(move |id| {
+            a.cancel_capture();
+            a.nav(|_, st| st.select_input(&id));
+        });
+    }
     {
         let a = app.clone();
         s.on_select_binding(move |id, layer| {
             if let Some(ui) = a.ui() {
                 ui.global::<Store>().set_inspector_tab(0);
-                if let Some(key) = id.strip_prefix("key:") {
+                let shown = Combo::parse(&id).map(|c| c.trigger).unwrap_or_else(|| id.to_string());
+                if let Some(key) = shown.strip_prefix("key:") {
                     let on_drawing = keys::find(key).is_some_and(|k| k.group != keys::Group::Extra);
                     if on_drawing {
                         ui.global::<Store>().set_device_tab(1);
@@ -1296,24 +2092,97 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
                 }
             }
             a.nav(|_, st| {
-                st.input = id.to_string();
-                st.layer = layer.clamp(0, 1) as usize;
-                st.pending_kind = None;
+                st.select_input(&id);
+                st.layer = layer.clamp(0, LAYER_COUNT as i32 - 1) as usize;
             });
         });
     }
     on!(on_clear_binding, |id, layer| edit |st: &mut State| {
         let p = st.profile;
-        st.cfg.profiles[p].layer_mut(layer.clamp(0, 1) as usize).remove(id.as_str());
+        st.cfg.profiles[p].layer_mut(layer.clamp(0, LAYER_COUNT as i32 - 1) as usize).remove(id.as_str());
         st.pending_kind = None;
     });
     {
         let a = app.clone();
-        s.on_set_kind(move |kind| {
+        s.on_set_kind(move |i| {
             a.cancel_capture();
-            a.edit(|_, st| set_kind(st, kind));
+            a.edit(|_, st| {
+                let kind = if st.slot == 0 {
+                    i
+                } else {
+                    SLOT_KINDS.get(i.max(0) as usize).copied().unwrap_or(K_DEFAULT)
+                };
+                set_kind(st, kind)
+            });
         });
     }
+    {
+        let a = app.clone();
+        s.on_edit_slot(move |slot| {
+            a.cancel_capture();
+            a.nav(|_, st| {
+                st.slot = slot.clamp(0, 3) as usize;
+                st.pending_kind = None;
+            });
+        });
+    }
+    on!(on_set_taphold_number, |field, value| edit |st: &mut State| {
+        let Some(v) = parse_ms(&value) else { return };
+        if let Some(Action::TapHold { hold_ms, double_ms, .. }) = st.binding_mut() {
+            match field.as_str() {
+                "hold" => *hold_ms = v.clamp(10, 5000),
+                _ => *double_ms = v.clamp(10, 5000),
+            }
+        }
+    });
+    on!(on_set_layer_target, |layer| edit |st: &mut State| {
+        if let Some(Action::Layer { layer: l, .. }) = st.action_mut() {
+            *l = layer.clamp(1, LAYER_COUNT as i32 - 1) as u8;
+        }
+    });
+    on!(on_set_layer_toggle, |on| edit |st: &mut State| {
+        if let Some(Action::Layer { toggle, .. }) = st.action_mut() {
+            *toggle = on;
+        }
+    });
+    on!(on_set_system, |i| edit |st: &mut State| {
+        if let Some(command) = SystemCommand::ALL.get(i.max(0) as usize) {
+            st.set_action(Action::System { command: *command });
+        }
+    });
+    on!(on_add_combo, | | nav |st: &mut State| {
+        let trigger = st.input.clone();
+        if trigger.is_empty() || Combo::parse(&trigger).is_some() {
+            return;
+        }
+        // The first modifier combo with this input that isn't taken yet.
+        for m in Modifier::ALL {
+            let id = Combo { mods: vec![m], held: vec![], trigger: trigger.clone() }.id();
+            if !st.bindings().contains_key(&id) {
+                st.select_input(&id);
+                break;
+            }
+        }
+    });
+    on!(on_remove_combo, | | edit |st: &mut State| {
+        if let Some(c) = Combo::parse(&st.input) {
+            let id = st.input.clone();
+            st.bindings_mut().remove(&id);
+            st.select_input(&c.trigger);
+        }
+    });
+    on!(on_back_to_trigger, | | nav |st: &mut State| {
+        if let Some(c) = Combo::parse(&st.input) {
+            st.select_input(&c.trigger);
+        }
+    });
+    on!(on_set_combo_mouse, |i| edit |st: &mut State| {
+        let held = (i > 0)
+            .then(|| COMBO_MOUSE.get(i as usize - 1))
+            .flatten()
+            .map(|b| format!("mouse:{}", b.id()));
+        st.update_combo(|c| c.held = held.into_iter().collect());
+    });
     on!(on_start_capture, |target| app |a: &Rc<App>| a.start_capture(&target));
     on!(on_cancel_capture, | | app |a: &Rc<App>| a.cancel_capture());
     {
@@ -1352,6 +2221,10 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             let bits = Modifier::to_bits(mods) ^ bit;
             *mods = Modifier::from_bits(bits);
         };
+        if target.as_str() == "combo" {
+            st.update_combo(|c| toggle(&mut c.mods));
+            return;
+        }
         match (target.as_str(), st.action_mut()) {
             ("binding", Some(Action::Key { mods, .. })) => toggle(mods),
             ("turbo", Some(Action::Turbo { output: Output::Key { mods, .. }, .. })) => toggle(mods),
@@ -1477,7 +2350,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     on!(on_duplicate_macro, | | edit |st: &mut State| {
         let Some(m) = st.current_macro().cloned() else { return };
         let name = st.cfg.unique_macro_name(&format!("{} copy", m.name));
-        st.cfg.macros.push(Macro { name, steps: m.steps });
+        st.cfg.macros.push(Macro { name, ..m });
         st.macro_idx = Some(st.cfg.macros.len() - 1);
         st.step = None;
     });
@@ -1503,6 +2376,12 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         let new = config::unique_name(&name, |n| st.cfg.macros.iter().enumerate().any(|(j, m)| j != i && m.name == n));
         st.cfg.macros[i].name = new.clone();
         st.cfg.retarget_macro(&old, Some(&new));
+    });
+    on!(on_set_macro_jitter, |v| edit |st: &mut State| {
+        let Some(v) = parse_ms(&v) else { return };
+        if let Some(m) = st.current_macro() {
+            m.jitter_ms = v.min(10_000);
+        }
     });
     on!(on_toggle_record, | | app |a: &Rc<App>| a.toggle_record());
     on!(on_clear_steps, | | edit |st: &mut State| {
@@ -1546,7 +2425,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             a.edit(|_, st| {
                 let at = st.step.map(|s| s + 1);
                 let Some(m) = st.current_macro() else { return };
-                let step = make_step(kind, "A".into(), MouseButton::Left, None);
+                let step = make_step(kind, "A".into(), MouseButton::Left, None, None);
                 is_key = step_key(&step).is_some();
                 let at = at.unwrap_or(m.steps.len()).min(m.steps.len());
                 m.steps.insert(at, step);
@@ -1564,11 +2443,12 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         let key = step_key(step).unwrap_or("A").to_string();
         let button = step_button(step).unwrap_or(MouseButton::Left);
         let ms = step_ms(step);
+        let xy = step_xy(step);
         let text = match step {
             MacroStep::Text { text } => Some(text.clone()),
             _ => None,
         };
-        let mut new = make_step(kind, key, button, ms);
+        let mut new = make_step(kind, key, button, ms, xy);
         if let (MacroStep::Text { text: t }, Some(old)) = (&mut new, text) {
             *t = old;
         }
@@ -1593,6 +2473,17 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             *text = t.to_string();
         }
     });
+    on!(on_set_step_xy, |vx, vy| edit |st: &mut State| {
+        if let Some(MacroStep::MouseMove { x, y, .. }) = st.current_step() {
+            if let Some(v) = parse_coord(&vx) {
+                *x = v;
+            }
+            if let Some(v) = parse_coord(&vy) {
+                *y = v;
+            }
+        }
+    });
+    on!(on_pick_position, | | app |a: &Rc<App>| a.pick_position());
     on!(on_move_step, |delta| edit |st: &mut State| {
         let Some(i) = st.step else { return };
         let Some(m) = st.current_macro() else { return };
@@ -1642,8 +2533,34 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             system::open(&url);
         }
     });
+    on!(on_clear_hotkey, |i| edit |st: &mut State| *st.cfg.hotkeys.slot_mut(i.max(0) as usize) = None);
+    on!(on_set_notifications, |on| edit |st: &mut State| st.cfg.notifications = on);
+    on!(on_preview_notification, | | app |_a: &Rc<App>| osd::show("Profile: Default"));
+    on!(on_set_check_updates, |on| app |a: &Rc<App>| {
+        a.edit(|_, st| st.cfg.check_updates = on);
+        if on {
+            a.auto_check_update();
+        }
+    });
+    on!(on_check_update, | | app |a: &Rc<App>| a.check_update(true));
+    on!(on_install_update, | | app |a: &Rc<App>| a.install_update());
+    on!(on_open_release_page, | | app |a: &Rc<App>| {
+        let page = a.st.borrow().update.as_ref().map(|r| r.page.clone());
+        if let Some(page) = page.filter(|p| p.starts_with("https://")) {
+            system::open(&page);
+        }
+    });
 
-    on!(on_toggle_enabled, | | edit |st: &mut State| st.cfg.enabled = !st.cfg.enabled);
+    {
+        let a = app.clone();
+        s.on_toggle_enabled(move || {
+            let on = !a.st.borrow().cfg.enabled;
+            a.set_enabled(on);
+        });
+    }
+    on!(on_auto_profile, | | app |a: &Rc<App>| a.force_profile(None));
+    on!(on_undo, | | app |a: &Rc<App>| a.undo(false));
+    on!(on_redo, | | app |a: &Rc<App>| a.undo(true));
     {
         let a = app.clone();
         s.on_set_theme(move |dark| {
@@ -1657,7 +2574,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     }
 }
 
-/// Inspector "Action" choice.
+/// Inspector "Action" choice (`kind` is a kind constant).
 fn set_kind(st: &mut State, kind: i32) {
     if st.input.is_empty() {
         return;
@@ -1667,28 +2584,44 @@ fn set_kind(st: &mut State, kind: i32) {
         st.pending_kind = None;
         return;
     }
-    let input = st.input.clone();
+    // What a new turbo presses: the input's own key or button.
+    let base = Combo::parse(&st.input)
+        .map(|c| c.trigger)
+        .unwrap_or_else(|| st.input.clone());
     match kind {
-        K_DEFAULT => {
-            st.bindings_mut().remove(&input);
-            st.pending_kind = None;
-        }
+        K_DEFAULT => st.clear_action(),
         K_OFF => st.set_action(Action::Disabled),
-        K_SHIFT => {
-            if st.layer == 0 {
-                st.set_action(Action::Shift);
+        K_LAYER => st.set_action(Action::Layer {
+            layer: 1,
+            toggle: false,
+        }),
+        K_SENS => st.set_action(Action::Sensitivity { speed: 4 }),
+        K_TAPHOLD => {
+            if st.slot == 0 {
+                // Keep what the input did as its tap action.
+                let tap = st
+                    .binding()
+                    .filter(|a| !matches!(a, Action::TapHold { .. }))
+                    .cloned()
+                    .map(Box::new);
+                st.set_action(Action::TapHold {
+                    tap,
+                    hold: None,
+                    double: None,
+                    hold_ms: 200,
+                    double_ms: 250,
+                });
             }
         }
-        K_SENS => st.set_action(Action::Sensitivity { speed: 4 }),
         K_TURBO => {
             // Turbo the input's own key or button by default ("rapid-fire this").
-            let output = if let Some(k) = input.strip_prefix("key:") {
+            let output = if let Some(k) = base.strip_prefix("key:") {
                 Output::Key {
                     key: k.to_string(),
                     mods: vec![],
                 }
             } else {
-                match input.strip_prefix("mouse:").and_then(MouseButton::from_id) {
+                match base.strip_prefix("mouse:").and_then(MouseButton::from_id) {
                     Some(b) if !b.is_wheel() => Output::Mouse { button: b },
                     _ => Output::Mouse {
                         button: MouseButton::Left,
@@ -1724,7 +2657,7 @@ fn set_kind(st: &mut State, kind: i32) {
                 st.pending_kind = Some(kind);
             }
         }
-        // Key, mouse, media: wait for the user to pick a value.
+        // Key, mouse, media, system: wait for the user to pick a value.
         _ => st.pending_kind = Some(kind),
     }
 }

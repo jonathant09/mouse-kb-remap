@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.0
+
+- **Tap / hold.** One button or key can do one thing on a quick press, another when held, and
+  a third on a double tap: Caps Lock as Esc on a tap and Ctrl when held, Back as Back on a
+  tap and a layer when held. Pressing another key while it's held counts as holding it, so
+  it works as a modifier however fast you type.
+- **More layers.** Besides the shift layer, every profile has layers 2 and 3. A *Layer*
+  button can hold a layer or toggle it on and off.
+- **Combos as triggers.** Bind *Ctrl + Back*, *Right click + Left click* or *Shift + Wheel up*
+  to something other than the button alone. When a combo sends a key, the held modifiers are
+  let go while it's sent.
+- **Hotkeys.** Keys to pause / resume remapping, switch to the next profile and go back to
+  the automatic profile. They work in any app, even while paused.
+- **Command line.** `--pause`, `--resume`, `--toggle-pause`, `--profile "<name>"`,
+  `--next-profile`, `--auto-profile` and `--status` control the running app from scripts,
+  Stream Deck or AutoHotkey, also when it runs as administrator.
+- **System actions.** Lock the PC, mute the microphone, switch to the next audio output,
+  minimize / maximize / close the focused window, keep it on top, move it to the next monitor,
+  or switch profile, from any button or key.
+- **Better profile matching.** Besides exe names: wildcards (`*launcher*.exe`), full paths and
+  window titles (`title:YouTube`), the most specific match winning, and *Only when
+  fullscreen* for a profile that shouldn't apply to a game's launcher.
+- **Mouse moves in macros.** *Move by* moves the pointer like the mouse would; *Move to* goes to
+  a screen position (and can read it from the pointer). *Randomize ±* varies every delay a
+  little each time a macro plays.
+- **Undo and redo** for bindings, profiles and macros: buttons in the status bar, Ctrl + Z and
+  Ctrl + Y.
+- **On-screen notifications** (off unless turned on in Settings): a short note when the profile
+  changes, remapping pauses, or a toggle (turbo, macro, layer, microphone) goes on or off.
+- **Updates from the app.** *Settings → Updates* checks for a new version (automatically once a
+  day if you like), then downloads it, checks its size, checksum and that it runs, swaps it in
+  and restarts, keeping admin rights and settings.
+- `--help` lists the command-line options; `--version` now prints in a console too.
+
 ## 0.2.0
 
 - **Download and run.** Releases are a single `mouse-kb-remap.exe` (or a zip of a folder

@@ -1,6 +1,6 @@
 [package]
 name = "mouse-kb-remap"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Lightweight, brand-agnostic mouse & keyboard remapper with per-app profiles, macros and turbo"
 license = "MIT"
@@ -26,22 +26,40 @@ serde_json = "1"
 directories = "6"
 # Native open/save dialogs for importing and exporting profiles.
 rfd = "0.18"
+# Checks the SHA-256 of a downloaded update against the release.
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
     "Win32_System_Registry",
+    "Win32_System_Shutdown",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The `interface` macro (an undocumented audio COM interface) needs it by name.
+windows-core = "0.62"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"

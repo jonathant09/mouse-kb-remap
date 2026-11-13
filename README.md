@@ -12,7 +12,9 @@ app that works with **any** mouse or keyboard.
 
 - **Per-app profiles.** A profile activates automatically while its app's window is focused
   (e.g. `GenshinImpact.exe`) and switches back when you alt-tab away. The **Default**
-  profile applies everywhere else, and other profiles inherit its bindings.
+  profile applies everywhere else, and other profiles inherit its bindings. Match by exe
+  name, full path or window title (with wildcards), optionally only while fullscreen, or
+  pick a profile by hand with a hotkey.
 - **Remap any button or key** to:
   - a **key or combo** (Ctrl + C, Alt + Tab, Win + Shift + S…), with one-click presets
   - a **mouse button** or scroll step, including horizontal scroll (wheel tilt)
@@ -21,16 +23,28 @@ app that works with **any** mouse or keyboard.
   - **turbo** / **repeat on hold** with your own timing: press interval, hold time and an
     optional "start repeating after" delay, while held or toggled
   - **text** to type (any language), **launch** a program, file or URL, **media keys**
-  - a **shift layer** button (like G-Shift / Hypershift): hold it for a second set of
-    bindings on every other button and key
+  - **layers** (like G-Shift / Hypershift): a shift layer plus layers 2 and 3, held or
+    toggled, each a whole extra set of bindings
+  - **tap / hold**: one action on a tap, another when held, a third on a double tap
+    (Caps Lock: tap for Esc, hold for Ctrl)
+  - **system actions**: lock the PC, mute the microphone, switch audio output, minimize,
+    maximize, always on top, move the window to the next monitor, switch profile
   - a **sensitivity clutch** ("sniper" button): lower pointer speed while held
   - **off**
+- **Combos as triggers**: Ctrl + Back, Right click + Left click, Shift + Wheel… do
+  something other than the button alone.
+- **Macros** can move the pointer and randomize their delays.
 - **Games-friendly output.** Keys are sent as scan codes, which most games read, and timed
   output (turbo, macros) runs on a precise timer thread (typically within 1 ms).
 - **Safe by design.** Remaps never apply while this app's window is focused, and focusing it
   stops any running macro or turbo, so a bad binding can't lock you out.
 - **Tray icon, start with Windows** (optionally as administrator, for games that run
-  elevated), **import / export** of profiles with their macros.
+  elevated), **import / export** of profiles with their macros, **undo / redo**.
+- **Hotkeys and command line**: pause, resume or switch profile from anywhere, or from
+  scripts and Stream Deck (`mouse-kb-remap.exe --profile "Genshin Impact"`).
+- **On-screen notifications** (optional) when the profile changes or a toggle flips.
+- **Updates from inside the app**: check, then one click downloads, verifies and installs
+  the new version and restarts.
 - **Light and dark themes.** The dark theme is Discord-style charcoal, not pitch black.
 
 ![Macro editor](docs/screenshot-light.png)
@@ -55,7 +69,7 @@ replacing the exe with a newer version keeps them. To have it start when you sig
 
 | Area | State |
 | --- | --- |
-| Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, shift layer and sensitivity tested end-to-end on Windows 11 |
+| Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, layers, tap / hold, hotkeys, system actions, notifications, the command line and updating tested end-to-end on Windows 11 |
 | UI (profiles, mouse and keyboard diagrams, macro editor, settings) | Working |
 | Linux engine (evdev + uinput, X11 focus tracking) | Experimental: builds and passes unit tests, not yet tried on real hardware |
 | macOS engine | Not yet (the UI runs in preview mode) |
@@ -96,7 +110,7 @@ See [Building & releasing](docs/building.md).
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
-- [User guide](docs/user-guide.md): profiles, actions, shift layer, tray, settings
+- [User guide](docs/user-guide.md): profiles, actions, layers, tap / hold, combos, hotkeys, command line, updates
 - [Macros & turbo](docs/macros.md): recording, editing, playback modes, timing tips
 - [Configuration](docs/configuration.md): `config.json` format and all key ids
 - [Troubleshooting](docs/troubleshooting.md): games, admin rights, anti-cheat, other remappers, Linux permissions
@@ -115,17 +129,21 @@ tools/               render-icon.mjs: regenerates the icon files
 docs/                Documentation
 .github/workflows/   Windows + Linux build, test and release CI
 src/
-  main.rs            Entry point: single instance, --tray flag
-  app.rs             UI wiring: state, Slint callbacks, refresh()
-  config.rs          Profiles, bindings, macros, JSON load/save, import/export
+  main.rs            Entry point: command-line flags, single instance, --tray
+  app.rs             UI wiring: state, Slint callbacks, refresh(), undo, updates
+  config.rs          Profiles, bindings, combos, app rules, macros, JSON load/save
   keys.rs            Key table (TKL + number pad + extra keys), presets
   system.rs          Single instance, start with Windows, open files/URLs
+  osd.rs             On-screen notifications
+  update.rs          Release check and in-place update
+  ipc.rs             Command-line control (named pipe)
   log.rs             Log file next to config.json
   engine/
-    mod.rs           Engine API, profile compilation, recording → macro steps
-    dispatch.rs      What one input event does (shared by all backends)
-    player.rs        Timed playback: macros, turbo, text, launch
-    windows.rs       Low-level hooks, focus tracking, SendInput (Windows)
+    mod.rs           Engine API, profile compilation and picking, recording → macro steps
+    dispatch.rs      What one input event does: layers, combos, tap / hold, hotkeys
+    player.rs        Timed playback: macros, turbo, text, launch, system actions
+    windows.rs       Low-level hooks, timers, focus tracking, SendInput (Windows)
+    win_actions.rs   System actions: audio, microphone, windows, lock (Windows)
     linux.rs         evdev grab + uinput output, X11 focus (Linux, experimental)
     fallback.rs      No-op engine so the UI runs on other OSes
 ui/
@@ -153,9 +171,19 @@ ui/
 - [x] Import / export profiles
 - [x] Shift layer, sensitivity clutch, text, launch, media keys, wheel tilt
 - [x] Linux backend (evdev + uinput), experimental
+- [x] Tap / hold and double tap, layers 2–3 (held or toggled), combos as triggers
+- [x] Hotkeys and command line, on-screen notifications, undo / redo
+- [x] Window-title, path and fullscreen profile rules; system and window actions
+- [x] Mouse moves and random delays in macros; updates from inside the app
+- [ ] Gamepad input (XInput): map controller buttons to keys and mouse actions, through the
+      same dispatcher
+- [ ] Mouse gestures: hold a button and swipe in a direction. Needs mouse movement in the
+      hook, so only installed while a gesture button is held, to keep movement untouched
+      otherwise
 - [ ] Per-device bindings (tell two mice apart). Windows doesn't tell low-level hooks which
       device an event came from, so this needs a filter driver (e.g. Interception), which
-      anti-cheats often block. Linux could do it with evdev; planned there first.
+      anti-cheats often block. On Linux each device is already read on its own thread, so
+      it's planned there first.
 - [ ] Linux: try on real hardware, Wayland focus tracking (per compositor)
 - [ ] macOS backend
 

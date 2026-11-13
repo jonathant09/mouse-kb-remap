@@ -18,18 +18,29 @@ typo never loses your profiles.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "theme": "dark",
   "enabled": true,
   "close_to_tray": true,
   "full_keyboard": false,
+  "notifications": false,
+  "check_updates": false,
+  "hotkeys": {
+    "pause": { "key": "F12", "mods": ["ctrl", "alt"] }
+  },
   "profiles": [
     {
       "name": "Default",
       "apps": [],
       "bindings": {
         "mouse:forward": { "type": "key", "key": "C", "mods": ["ctrl"] },
-        "mouse:back": { "type": "shift" }
+        "mouse:back": { "type": "layer", "layer": 1 },
+        "key:CapsLock": {
+          "type": "tap_hold",
+          "tap": { "type": "key", "key": "Esc" },
+          "hold": { "type": "key", "key": "LCtrl" }
+        },
+        "ctrl+mouse:forward": { "type": "system", "command": "next_monitor" }
       },
       "shift_bindings": {
         "mouse:wheel_up": { "type": "key", "key": "VolumeUp" },
@@ -39,6 +50,7 @@ typo never loses your profiles.
     {
       "name": "Genshin Impact",
       "apps": ["GenshinImpact.exe"],
+      "fullscreen_only": true,
       "bindings": {
         "mouse:back": { "type": "key", "key": "F" },
         "mouse:middle": {
@@ -68,11 +80,14 @@ typo never loses your profiles.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `version` | number | `2` | Format version. Version 1 files load unchanged. |
+| `version` | number | `3` | Format version. Version 1 and 2 files load unchanged. |
 | `theme` | `"dark"` / `"light"` | `"dark"` | UI theme |
 | `enabled` | bool | `true` | Master switch (the status-bar toggle) |
 | `close_to_tray` | bool | `true` | Closing the window keeps the app in the tray |
 | `full_keyboard` | bool | `false` | Show the number pad on the keyboard drawing |
+| `notifications` | bool | `false` | On-screen notifications |
+| `check_updates` | bool | `false` | Look for a new version at start and once a day |
+| `hotkeys` | object | `{}` | App hotkeys: `pause`, `next_profile`, `auto_profile`, each `{ "key": …, "mods": [ … ] }` (optional) |
 | `profiles` | array | | **The first profile is always Default** |
 | `macros` | array | `[]` | Macro library, referenced by name |
 
@@ -81,9 +96,22 @@ typo never loses your profiles.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `name` | string | Shown in the sidebar |
-| `apps` | string[] | Exe file names that activate this profile while focused. Case-insensitive; ignored on Default. |
-| `bindings` | object | Map of **input id → action** |
-| `shift_bindings` | object | Same, used while an input bound to `shift` is held (optional) |
+| `apps` | string[] | What activates this profile (below). Ignored on Default. |
+| `fullscreen_only` | bool | Only while the matching window covers its whole screen (optional) |
+| `bindings` | object | Map of **input id → action** (the base layer) |
+| `shift_bindings` | object | Layer 1 (the shift layer), used while an input bound to it is held or toggled (optional) |
+| `layers` | object[] | Layers 2 and 3, the same kind of map (optional) |
+
+Entries in `apps`, all case-insensitive, `*` and `?` as wildcards:
+
+| Entry | Matches |
+| --- | --- |
+| `game.exe`, `*launcher*.exe` | The program's file name |
+| `C:\\Games\\*\\game.exe` | The program's full path (anything containing `\` or `/`) |
+| `title:YouTube` | The window title: contains the text, or matches it when it has wildcards |
+
+The most specific match wins (title, then path, then file name), then the profile higher
+in the list.
 
 ## Input ids
 
@@ -96,6 +124,10 @@ XButton1), `mouse:forward` (button 5 / XButton2), `mouse:wheel_up`, `mouse:wheel
 **Keyboard:** `key:<key id>`, using the key ids below, e.g. `key:A`, `key:F5`,
 `key:LShift`, `key:Numpad7`.
 
+**Combos:** parts joined by `+`; the last is the input pressed, the others must be held:
+modifiers (`ctrl`, `shift`, `alt`, `win`, either side) and other input ids. For example
+`ctrl+mouse:back`, `ctrl+shift+key:F1`, `mouse:right+mouse:left`, `key:Q+key:E`.
+
 ## Actions
 
 | JSON | Effect |
@@ -106,15 +138,20 @@ XButton1), `mouse:forward` (button 5 / XButton2), `mouse:wheel_up`, `mouse:wheel
 | `{ "type": "turbo", "output": {…}, "interval_ms": 50, "hold_ms": 20, "delay_ms": 0, "toggle": false }` | Repeat `output` (`{ "type": "key", "key": …, "mods": […] }` or `{ "type": "mouse", "button": … }`). `interval_ms` ≥ 5: press to press. `hold_ms`: press length. `delay_ms`: wait after the first press before repeating. `toggle`: press to start / stop instead of while held. |
 | `{ "type": "text", "text": "gg wp", "delay_ms": 5 }` | Type text, `delay_ms` between characters |
 | `{ "type": "launch", "path": "C:\\Tools\\app.exe", "args": "" }` | Start a program, or open a file, folder or URL |
-| `{ "type": "shift" }` | Hold to use the profile's `shift_bindings` |
+| `{ "type": "layer", "layer": 2, "toggle": false }` | Use layer 1 (shift), 2 or 3 while held, or (`toggle`) switch it on and off |
+| `{ "type": "shift" }` | Older files: the same as `{ "type": "layer", "layer": 1 }` (converted when loaded) |
 | `{ "type": "sensitivity", "speed": 4 }` | Hold to set the pointer speed (1–20, Windows default 10) |
+| `{ "type": "tap_hold", "tap": {…}, "hold": {…}, "double": {…}, "hold_ms": 200, "double_ms": 250 }` | An action on a tap, one when held for `hold_ms`, one on a double tap within `double_ms`. Each part is optional and is any action except another `tap_hold`. |
+| `{ "type": "system", "command": "mute_mic" }` | `lock_pc`, `mute_mic`, `next_audio_output`, `minimize_window`, `maximize_window` (toggles), `always_on_top` (toggles), `next_monitor`, `close_window`, `next_profile`, `auto_profile` |
 | `{ "type": "disabled" }` | Swallow the input |
 
 ## Macros
 
 ```json
-{ "name": "Burst", "steps": [ … ] }
+{ "name": "Burst", "steps": [ … ], "jitter_ms": 0 }
 ```
+
+`jitter_ms` (optional) makes every delay up to that much shorter or longer, at random.
 
 | Step | Fields |
 | --- | --- |
@@ -126,6 +163,8 @@ XButton1), `mouse:forward` (button 5 / XButton2), `mouse:wheel_up`, `mouse:wheel
 | `{ "type": "mouse_up", "button": "right" }` | Release |
 | `{ "type": "delay", "ms": 100 }` | Wait |
 | `{ "type": "text", "text": "hello" }` | Type text |
+| `{ "type": "mouse_move", "x": 40, "y": -10 }` | Move the pointer by (x, y), like the mouse would |
+| `{ "type": "mouse_move", "x": 960, "y": 540, "absolute": true }` | Move the pointer to a screen position in pixels (Windows only) |
 
 ## Key ids
 

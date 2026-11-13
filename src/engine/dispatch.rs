@@ -1,13 +1,17 @@
 //! What happens to one physical input event. Shared by every backend, so the
-//! rules (held inputs, key repeat, shift layer, what goes to the worker) are
-//! the same everywhere and covered by tests.
+//! rules (held inputs, key repeat, layers, combos, tap / hold, app hotkeys,
+//! what goes to the worker) are the same everywhere and covered by tests.
 //!
-//! This runs inside the OS input hook: no blocking, no waiting.
+//! This runs inside the OS input hook: no blocking, no waiting. Tap / hold
+//! decisions that need time are finished by `tick`, which the backend calls
+//! at `deadline`.
 
 use super::player::{Cmd, Out};
-use super::{Input, Layers, Target};
-use crate::config::{Modifier, MouseButton};
+use super::{AppCommand, HotkeyBinding, Input, Layers, TapHold, Target};
+use crate::config::{layer_name, Modifier, MouseButton, LAYER_COUNT};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -24,6 +28,37 @@ pub trait Sink {
     fn flush(&mut self);
     /// Hand work to the playback thread.
     fn worker(&mut self, cmd: Cmd);
+    /// An app hotkey was pressed.
+    fn command(&mut self, cmd: AppCommand);
+    /// Something worth an on-screen notification ("Layer 2 on").
+    fn notice(&mut self, text: String);
+}
+
+/// What the dispatcher needs to know about the world for one event.
+pub struct Ctx<'a> {
+    pub layers: Option<&'a Layers>,
+    pub enabled: bool,
+    pub hotkeys: &'a [HotkeyBinding],
+    pub now: Instant,
+}
+
+/// Unassigned virtual key sent while Alt or Win is held on its own, so
+/// releasing it doesn't open a menu (the trick AutoHotkey uses).
+const MASK_KEY: u16 = 0xE8;
+
+#[derive(Debug, PartialEq)]
+enum Wait {
+    /// Pressed: a release before `hold_ms` is a tap.
+    Hold,
+    /// Tapped once: a second press before `double_ms` is a double tap.
+    Double,
+}
+
+struct Pending {
+    input: Input,
+    spec: Arc<TapHold>,
+    since: Instant,
+    wait: Wait,
 }
 
 #[derive(Default)]
@@ -31,8 +66,19 @@ pub struct Dispatcher {
     /// Inputs that were remapped on press, so the release goes to the same
     /// target even if the profile changed while the button was held.
     held: HashMap<Input, Target>,
-    /// Number of held inputs bound to the shift layer.
-    shift: u32,
+    /// Held inputs per layer that hold that layer on.
+    layer_hold: [u32; LAYER_COUNT],
+    /// Layers toggled on (bit n = layer n).
+    layer_lock: u8,
+    /// Physical keys and buttons currently down.
+    down: Vec<Input>,
+    /// A tap / hold input still being decided.
+    pending: Option<Pending>,
+    /// Inputs whose repeats and release are swallowed (hotkeys, taps that
+    /// were sent early).
+    swallow: Vec<Input>,
+    /// Modifiers released while a combo sends its key, to press again after.
+    lifted: Vec<(Input, Vec<u16>)>,
 }
 
 fn mod_vks(mods: u8) -> impl DoubleEndedIterator<Item = u16> {
@@ -44,14 +90,49 @@ fn mod_vks(mods: u8) -> impl DoubleEndedIterator<Item = u16> {
 
 impl Dispatcher {
     /// Returns true if the original input should be swallowed.
-    pub fn handle(
-        &mut self,
-        input: Input,
-        phase: Phase,
-        layers: Option<&Layers>,
-        enabled: bool,
-        sink: &mut impl Sink,
-    ) -> bool {
+    pub fn handle(&mut self, input: Input, phase: Phase, ctx: &Ctx, sink: &mut impl Sink) -> bool {
+        let repeat = phase == Phase::Down && self.down.contains(&input);
+        match phase {
+            Phase::Down if !repeat => self.down.push(input),
+            Phase::Up => self.down.retain(|i| *i != input),
+            _ => {}
+        }
+
+        if let Some(i) = self.swallow.iter().position(|i| *i == input) {
+            if phase == Phase::Up {
+                self.swallow.remove(i);
+            }
+            if phase != Phase::Tap {
+                return true;
+            }
+        }
+
+        // App hotkeys work even while remapping is paused.
+        if phase == Phase::Down && !repeat {
+            if let Input::Key(vk) = input {
+                let mods = self.mods_held(Some(input));
+                if let Some(h) = ctx.hotkeys.iter().find(|h| h.vk == vk && h.mods == mods) {
+                    self.interrupt_pending(sink);
+                    sink.command(h.command);
+                    self.swallow.push(input);
+                    return true;
+                }
+            }
+        }
+
+        // A tap / hold input waiting to be decided.
+        let mut reinject = false;
+        if let Some(p) = &self.pending {
+            if p.input == input {
+                return self.pending_event(input, phase, ctx.now, sink);
+            }
+            if phase == Phase::Tap || (phase == Phase::Down && !repeat) {
+                // Another input while it's held: that makes it a hold.
+                self.interrupt_pending(sink);
+                reinject = true;
+            }
+        }
+
         if phase == Phase::Up {
             // Always honour a remapped press, even if remapping was disabled
             // or the profile changed since.
@@ -83,22 +164,248 @@ impl Dispatcher {
             }
         }
 
-        if !enabled {
+        if self.dispatch_new(input, phase, ctx, sink) {
+            return true;
+        }
+        if reinject {
+            // What the tap / hold input produced was sent from here, after
+            // this event had already been seen; send this one again so the
+            // app gets them in the right order.
+            sink.out(match (input, phase) {
+                (Input::Key(vk), _) => Out::Key { vk, down: true },
+                (Input::Mouse(b), Phase::Tap) => Out::Wheel(b),
+                (Input::Mouse(b), _) => Out::Button { button: b, down: true },
+            });
+            sink.flush();
+            return true;
+        }
+        false
+    }
+
+    /// A press (or wheel step) that isn't held yet: look it up and act.
+    fn dispatch_new(&mut self, input: Input, phase: Phase, ctx: &Ctx, sink: &mut impl Sink) -> bool {
+        if !ctx.enabled {
             return false;
         }
-        let Some(target) = layers.and_then(|l| l.lookup(&input, self.shift > 0)).cloned() else {
+        let Some(layers) = ctx.layers else { return false };
+        let mods = self.mods_held(Some(input));
+        let down = &self.down;
+        let Some((target, combo)) = layers.lookup(&input, self.active_layers(), mods, |i| down.contains(i)) else {
             return false;
         };
-
+        let target = target.clone();
         match phase {
             Phase::Down => {
+                if let Target::TapHold(spec) = target {
+                    self.pending = Some(Pending {
+                        input,
+                        spec,
+                        since: ctx.now,
+                        wait: Wait::Hold,
+                    });
+                    return true;
+                }
+                if combo {
+                    self.lift_mods(input, &target, sink);
+                }
                 self.press(input, &target, sink);
                 self.held.insert(input, target);
             }
-            Phase::Tap => self.tap(input, &target, sink),
+            Phase::Tap => {
+                let target = match &target {
+                    Target::TapHold(spec) => spec.tap.clone(),
+                    t => Some(t.clone()),
+                };
+                if let Some(t) = target {
+                    let lifted = combo && self.lift_mods(input, &t, sink);
+                    self.tap(input, &t, sink, lifted);
+                    if lifted {
+                        self.restore_mods(input, sink);
+                    }
+                }
+            }
             Phase::Up => unreachable!(),
         }
         true
+    }
+
+    /// The next event of the pending tap / hold input itself.
+    fn pending_event(&mut self, input: Input, phase: Phase, now: Instant, sink: &mut impl Sink) -> bool {
+        let Some(p) = self.pending.take() else { return false };
+        match (phase, &p.wait) {
+            (Phase::Up, Wait::Hold) => {
+                if p.spec.double.is_some() {
+                    self.pending = Some(Pending {
+                        since: now,
+                        wait: Wait::Double,
+                        ..p
+                    });
+                } else if let Some(t) = &p.spec.tap {
+                    self.tap(input, t, sink, false);
+                }
+            }
+            (Phase::Down, Wait::Double) => {
+                if let Some(t) = p.spec.double.clone() {
+                    self.press(input, &t, sink);
+                    self.held.insert(input, t);
+                }
+            }
+            // Auto-repeat while deciding, or a stray event.
+            _ => self.pending = Some(p),
+        }
+        true
+    }
+
+    /// Decide a pending tap / hold now, because something else happened.
+    fn interrupt_pending(&mut self, sink: &mut impl Sink) {
+        let Some(p) = self.pending.take() else { return };
+        match p.wait {
+            Wait::Hold => match &p.spec.hold {
+                Some(h) => {
+                    self.press(p.input, h, sink);
+                    self.held.insert(p.input, h.clone());
+                }
+                None => {
+                    // Nothing to hold: it's a tap, and the release that is
+                    // still to come does nothing.
+                    if let Some(t) = &p.spec.tap {
+                        self.tap(p.input, t, sink, true);
+                    }
+                    self.swallow.push(p.input);
+                }
+            },
+            Wait::Double => {
+                if let Some(t) = &p.spec.tap {
+                    self.tap(p.input, t, sink, true);
+                }
+            }
+        }
+    }
+
+    /// When the pending tap / hold must be decided if nothing happens.
+    pub fn deadline(&self) -> Option<Instant> {
+        let p = self.pending.as_ref()?;
+        match p.wait {
+            Wait::Hold => p.spec.hold.as_ref()?,
+            Wait::Double => p.spec.double.as_ref()?,
+        };
+        let ms = match p.wait {
+            Wait::Hold => p.spec.hold_ms,
+            Wait::Double => p.spec.double_ms,
+        };
+        Some(p.since + Duration::from_millis(ms as u64))
+    }
+
+    /// Finish a tap / hold whose time is up (call at `deadline`).
+    pub fn tick(&mut self, now: Instant, sink: &mut impl Sink) {
+        if self.deadline().is_none_or(|d| now < d) {
+            return;
+        }
+        let Some(p) = self.pending.take() else { return };
+        match p.wait {
+            Wait::Hold => {
+                if let Some(h) = &p.spec.hold {
+                    self.press(p.input, h, sink);
+                    self.held.insert(p.input, h.clone());
+                }
+            }
+            Wait::Double => {
+                if let Some(t) = &p.spec.tap {
+                    self.tap(p.input, t, sink, false);
+                }
+            }
+        }
+    }
+
+    /// Bit n set for each layer n in use.
+    fn active_layers(&self) -> u8 {
+        (1..LAYER_COUNT).fold(0, |bits, l| {
+            if self.layer_hold[l] > 0 || self.layer_lock & (1 << l) != 0 {
+                bits | (1 << l)
+            } else {
+                bits
+            }
+        })
+    }
+
+    /// Modifier bits held: physical modifier keys, plus modifiers that
+    /// remapped held inputs are sending.
+    fn mods_held(&self, except: Option<Input>) -> u8 {
+        let mut bits = 0;
+        for i in self.down.iter().filter(|i| Some(**i) != except) {
+            match self.held.get(i) {
+                Some(Target::Key { vk, mods }) => {
+                    bits |= mods | crate::keys::modifier_of(*vk).map_or(0, |m| m.bit());
+                }
+                Some(_) => {}
+                None => {
+                    if let Input::Key(vk) = i {
+                        bits |= crate::keys::modifier_of(*vk).map_or(0, |m| m.bit());
+                    }
+                }
+            }
+        }
+        bits
+    }
+
+    /// A combo that sends a key: let go of the modifiers held for it, so
+    /// `Ctrl + Back → F` arrives as F, not Ctrl + F. Returns whether any were.
+    fn lift_mods(&mut self, input: Input, target: &Target, sink: &mut impl Sink) -> bool {
+        let Target::Key { mods: keep, .. } = *target else {
+            return false;
+        };
+        let vks: Vec<u16> = self
+            .down
+            .iter()
+            .filter(|i| **i != input && !self.held.contains_key(i))
+            .filter_map(|i| match i {
+                Input::Key(vk) => crate::keys::modifier_of(*vk)
+                    .filter(|m| keep & m.bit() == 0)
+                    .map(|_| *vk),
+                Input::Mouse(_) => None,
+            })
+            .collect();
+        if vks.is_empty() {
+            return false;
+        }
+        if vks.iter().any(|vk| matches!(vk, 0xA4 | 0xA5 | 0x12 | 0x5B | 0x5C)) {
+            sink.out(Out::Key {
+                vk: MASK_KEY,
+                down: true,
+            });
+            sink.out(Out::Key {
+                vk: MASK_KEY,
+                down: false,
+            });
+        }
+        for &vk in &vks {
+            sink.out(Out::Key { vk, down: false });
+        }
+        self.lifted.push((input, vks));
+        true
+    }
+
+    /// Press again the modifiers `lift_mods` let go of, if still held.
+    fn restore_mods(&mut self, input: Input, sink: &mut impl Sink) {
+        if let Some(i) = self.lifted.iter().position(|(t, _)| *t == input) {
+            let (_, vks) = self.lifted.remove(i);
+            for vk in vks {
+                if self.down.contains(&Input::Key(vk)) {
+                    sink.out(Out::Key { vk, down: true });
+                }
+            }
+            sink.flush();
+        }
+    }
+
+    fn toggle_layer(&mut self, layer: u8, sink: &mut impl Sink) {
+        self.layer_lock ^= 1 << layer;
+        let on = self.layer_lock & (1 << layer) != 0;
+        let name = match layer {
+            1 => "Shift layer".to_string(),
+            l => layer_name(l as usize).to_string(),
+        };
+        sink.notice(format!("{name} {}", if on { "on" } else { "off" }));
     }
 
     fn press(&mut self, input: Input, target: &Target, sink: &mut impl Sink) {
@@ -118,8 +425,9 @@ impl Dispatcher {
                 sink.out(Out::Button { button: b, down: true });
                 sink.flush();
             }
-            Target::Disabled => {}
-            Target::Shift => self.shift += 1,
+            Target::Disabled | Target::TapHold(_) => {}
+            Target::Layer { layer, toggle: false } => self.layer_hold[layer as usize] += 1,
+            Target::Layer { layer, toggle: true } => self.toggle_layer(layer, sink),
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Press {
                 trigger: input,
                 target: target.clone(),
@@ -136,20 +444,38 @@ impl Dispatcher {
                     sink.out(Out::Key { vk: m, down: false });
                 }
                 sink.flush();
+                self.restore_mods(input, sink);
             }
             Target::Mouse(b) if b.is_wheel() => {}
             Target::Mouse(b) => {
                 sink.out(Out::Button { button: b, down: false });
                 sink.flush();
             }
-            Target::Disabled => {}
-            Target::Shift => self.shift = self.shift.saturating_sub(1),
+            Target::Disabled | Target::TapHold(_) | Target::Layer { toggle: true, .. } => {}
+            Target::Layer { layer, toggle: false } => {
+                let n = &mut self.layer_hold[layer as usize];
+                *n = n.saturating_sub(1);
+            }
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Release(input)),
         }
     }
 
-    fn tap(&mut self, input: Input, target: &Target, sink: &mut impl Sink) {
+    /// A press with no release to come: wheel steps, tap / hold taps.
+    /// `immediate` sends a key down and up right away instead of holding it
+    /// briefly on the worker, to keep the order with what follows.
+    fn tap(&mut self, input: Input, target: &Target, sink: &mut impl Sink, immediate: bool) {
         match *target {
+            Target::Key { vk, mods } if immediate => {
+                for m in mod_vks(mods) {
+                    sink.out(Out::Key { vk: m, down: true });
+                }
+                sink.out(Out::Key { vk, down: true });
+                sink.out(Out::Key { vk, down: false });
+                for m in mod_vks(mods).rev() {
+                    sink.out(Out::Key { vk: m, down: false });
+                }
+                sink.flush();
+            }
             // Through the worker so the key is held briefly: games that poll
             // key state miss an instant down+up.
             Target::Key { vk, mods } => sink.worker(Cmd::Tap { vk, mods }),
@@ -167,8 +493,41 @@ impl Dispatcher {
                 target: target.clone(),
                 tap: true,
             }),
-            Target::Disabled | Target::Shift | Target::Sensitivity(_) => {}
+            Target::Layer { layer, toggle: true } => self.toggle_layer(layer, sink),
+            Target::Disabled | Target::Layer { .. } | Target::Sensitivity(_) | Target::TapHold(_) => {}
         }
+    }
+
+    /// Turn toggled layers off (the profile changed).
+    pub fn reset_layers(&mut self) {
+        self.layer_lock = 0;
+    }
+
+    /// Forget pass-through keys that are no longer down although their
+    /// release was never seen (it went to a window our hooks can't see), so
+    /// they don't count as held for combos and hotkeys. Remapped keys are
+    /// kept: the OS never saw them go down, so it can't say.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn prune(&mut self, still_down: impl Fn(&Input) -> bool) {
+        let ours = |i: &Input| {
+            self.held.contains_key(i)
+                || self.swallow.contains(i)
+                || self.pending.as_ref().is_some_and(|p| p.input == *i)
+        };
+        let keep: Vec<Input> = self
+            .down
+            .iter()
+            .filter(|i| matches!(i, Input::Mouse(_)) || ours(i) || still_down(i))
+            .copied()
+            .collect();
+        self.down = keep;
+    }
+
+    /// The mouse hook was removed: its releases won't be seen.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn forget_mouse(&mut self) {
+        self.down
+            .retain(|i| matches!(i, Input::Key(_)) || self.held.contains_key(i));
     }
 
     /// Whether a remapped mouse button is being held (its release must still
@@ -176,11 +535,15 @@ impl Dispatcher {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn holds_mouse(&self) -> bool {
         self.held.keys().any(|i| matches!(i, Input::Mouse(_)))
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|p| matches!(p.input, Input::Mouse(_)))
     }
 
     #[cfg(test)]
-    pub fn shifted(&self) -> bool {
-        self.shift > 0
+    pub fn layers_on(&self) -> u8 {
+        self.active_layers()
     }
 }
 
@@ -198,12 +561,13 @@ pub fn wheel_for(delta: i32, horizontal: bool) -> MouseButton {
 mod tests {
     use super::*;
     use crate::engine::player::{Mode, Plan};
-    use std::sync::Arc;
+    use crate::engine::ComboBinding;
 
     #[derive(Default)]
     struct Rec {
         out: Vec<Out>,
         cmds: Vec<String>,
+        events: Vec<String>,
     }
     impl Sink for Rec {
         fn out(&mut self, out: Out) {
@@ -218,27 +582,88 @@ mod tests {
                 Cmd::StopAll => "stop".into(),
             });
         }
+        fn command(&mut self, cmd: AppCommand) {
+            self.events.push(format!("{cmd:?}"));
+        }
+        fn notice(&mut self, text: String) {
+            self.events.push(text);
+        }
     }
 
     const IN: Input = Input::Key(0x41);
+    const CTRL: Input = Input::Key(0xA2);
+
+    fn k(vk: u16, down: bool) -> Out {
+        Out::Key { vk, down }
+    }
+
+    fn key(vk: u16) -> Target {
+        Target::Key { vk, mods: 0 }
+    }
 
     fn layers(base: Vec<(Input, Target)>, shift: Vec<(Input, Target)>) -> Layers {
-        Layers {
-            base: base.into_iter().collect(),
-            shift: shift.into_iter().collect(),
+        let mut l = Layers::default();
+        l.maps[0] = base.into_iter().collect();
+        l.maps[1] = shift.into_iter().collect();
+        l
+    }
+
+    /// Drives a dispatcher with one fixed layer set and a clock.
+    struct T {
+        d: Dispatcher,
+        s: Rec,
+        l: Layers,
+        hotkeys: Vec<HotkeyBinding>,
+        start: Instant,
+        ms: u64,
+        enabled: bool,
+    }
+
+    impl T {
+        fn new(l: Layers) -> Self {
+            T {
+                d: Dispatcher::default(),
+                s: Rec::default(),
+                l,
+                hotkeys: vec![],
+                start: Instant::now(),
+                ms: 0,
+                enabled: true,
+            }
+        }
+        fn now(&self) -> Instant {
+            self.start + Duration::from_millis(self.ms)
+        }
+        fn ev(&mut self, input: Input, phase: Phase) -> bool {
+            let ctx = Ctx {
+                layers: Some(&self.l),
+                enabled: self.enabled,
+                hotkeys: &self.hotkeys,
+                now: self.now(),
+            };
+            self.d.handle(input, phase, &ctx, &mut self.s)
+        }
+        fn down(&mut self, input: Input) -> bool {
+            self.ev(input, Phase::Down)
+        }
+        fn up(&mut self, input: Input) -> bool {
+            self.ev(input, Phase::Up)
+        }
+        /// Let time pass, running the tick like a backend would.
+        fn wait(&mut self, ms: u64) {
+            self.ms += ms;
+            let now = self.now();
+            self.d.tick(now, &mut self.s);
         }
     }
 
     #[test]
     fn combo_presses_mods_first_and_releases_them_last() {
-        let l = layers(vec![(IN, Target::Key { vk: 0x43, mods: 1 | 2 })], vec![]);
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        assert!(d.handle(IN, Phase::Down, Some(&l), true, &mut s));
-        assert!(d.handle(IN, Phase::Up, Some(&l), true, &mut s));
-        let k = |vk, down| Out::Key { vk, down };
+        let mut t = T::new(layers(vec![(IN, Target::Key { vk: 0x43, mods: 1 | 2 })], vec![]));
+        assert!(t.down(IN));
+        assert!(t.up(IN));
         assert_eq!(
-            s.out,
+            t.s.out,
             vec![
                 k(0xA2, true),
                 k(0xA0, true),
@@ -252,103 +677,362 @@ mod tests {
 
     #[test]
     fn auto_repeat_keeps_the_original_target_after_a_profile_switch() {
-        let a = layers(vec![(IN, Target::Key { vk: 0x42, mods: 0 })], vec![]);
-        let b = layers(vec![(IN, Target::Key { vk: 0x43, mods: 0 })], vec![]);
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        d.handle(IN, Phase::Down, Some(&a), true, &mut s);
-        d.handle(IN, Phase::Down, Some(&b), true, &mut s); // repeat after switch
-        d.handle(IN, Phase::Up, Some(&b), true, &mut s);
-        assert_eq!(
-            s.out,
-            vec![
-                Out::Key { vk: 0x42, down: true },
-                Out::Key { vk: 0x42, down: true },
-                Out::Key { vk: 0x42, down: false },
-            ]
-        );
+        let mut t = T::new(layers(vec![(IN, key(0x42))], vec![]));
+        t.down(IN);
+        t.l = layers(vec![(IN, key(0x43))], vec![]);
+        t.down(IN); // repeat after switch
+        t.up(IN);
+        assert_eq!(t.s.out, vec![k(0x42, true), k(0x42, true), k(0x42, false)]);
     }
 
     #[test]
     fn release_is_honoured_after_disabling() {
-        let l = layers(vec![(IN, Target::Key { vk: 0x42, mods: 0 })], vec![]);
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
-        assert!(d.handle(IN, Phase::Up, None, false, &mut s));
-        assert_eq!(s.out.last(), Some(&Out::Key { vk: 0x42, down: false }));
-        // Unmapped inputs pass through.
-        assert!(!d.handle(Input::Key(1), Phase::Down, Some(&l), true, &mut s));
-        assert!(!d.handle(IN, Phase::Down, Some(&l), false, &mut s));
+        let mut t = T::new(layers(vec![(IN, key(0x42))], vec![]));
+        t.down(IN);
+        t.enabled = false;
+        assert!(t.up(IN));
+        assert_eq!(t.s.out.last(), Some(&k(0x42, false)));
+        // Unmapped inputs pass through, and so does everything while paused.
+        t.enabled = true;
+        assert!(!t.down(Input::Key(1)));
+        t.enabled = false;
+        assert!(!t.down(IN));
     }
 
     #[test]
     fn shift_layer_applies_while_held() {
         let shift_key = Input::Mouse(MouseButton::Back);
-        let l = layers(
-            vec![(shift_key, Target::Shift), (IN, Target::Key { vk: 0x42, mods: 0 })],
-            vec![(IN, Target::Key { vk: 0x43, mods: 0 })],
-        );
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        assert!(d.handle(shift_key, Phase::Down, Some(&l), true, &mut s));
-        assert!(d.shifted());
-        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
-        d.handle(shift_key, Phase::Up, Some(&l), true, &mut s);
-        assert!(!d.shifted());
-        // Released after the shift key: still releases the shifted target.
-        d.handle(IN, Phase::Up, Some(&l), true, &mut s);
-        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
-        assert_eq!(
-            s.out,
+        let mut t = T::new(layers(
             vec![
-                Out::Key { vk: 0x43, down: true },
-                Out::Key { vk: 0x43, down: false },
-                Out::Key { vk: 0x42, down: true },
+                (
+                    shift_key,
+                    Target::Layer {
+                        layer: 1,
+                        toggle: false,
+                    },
+                ),
+                (IN, key(0x42)),
+            ],
+            vec![(IN, key(0x43))],
+        ));
+        assert!(t.down(shift_key));
+        assert_eq!(t.d.layers_on(), 0b10);
+        t.down(IN);
+        t.up(shift_key);
+        assert_eq!(t.d.layers_on(), 0);
+        // Released after the shift key: still releases the shifted target.
+        t.up(IN);
+        t.down(IN);
+        assert_eq!(t.s.out, vec![k(0x43, true), k(0x43, false), k(0x42, true)]);
+    }
+
+    #[test]
+    fn toggled_layers_stay_on_and_higher_layers_win() {
+        let l2 = Input::Key(0x71);
+        let l3 = Input::Key(0x72);
+        let mut l = layers(
+            vec![
+                (l2, Target::Layer { layer: 2, toggle: true }),
+                (
+                    l3,
+                    Target::Layer {
+                        layer: 3,
+                        toggle: false,
+                    },
+                ),
+                (IN, key(0x42)),
+            ],
+            vec![],
+        );
+        l.maps[2].insert(IN, key(0x43));
+        l.maps[3].insert(IN, key(0x44));
+        let mut t = T::new(l);
+        t.down(l2);
+        t.up(l2);
+        assert_eq!(t.d.layers_on(), 0b100);
+        t.down(IN);
+        t.up(IN);
+        t.down(l3);
+        t.down(IN);
+        t.up(IN);
+        t.up(l3);
+        t.down(l2); // toggle off
+        t.up(l2);
+        t.down(IN);
+        assert_eq!(
+            t.s.out,
+            vec![
+                k(0x43, true),
+                k(0x43, false),
+                k(0x44, true),
+                k(0x44, false),
+                k(0x42, true)
             ]
         );
+        assert_eq!(t.s.events, vec!["Layer 2 on", "Layer 2 off"]);
+        t.d.layer_lock = 0b100;
+        t.d.reset_layers();
+        assert_eq!(t.d.layers_on(), 0);
     }
 
     #[test]
     fn plans_go_to_the_worker_and_repeats_are_swallowed() {
         let plan = Target::Play(Arc::new(Plan::new(vec![], Mode::WhileHeld, 0, 0)));
         let wheel = Input::Mouse(MouseButton::WheelUp);
-        let l = layers(
-            vec![
-                (IN, plan.clone()),
-                (wheel, Target::Key { vk: 0x20, mods: 0 }),
-                (Input::Key(2), plan),
-            ],
+        let mut t = T::new(layers(
+            vec![(IN, plan.clone()), (wheel, key(0x20)), (Input::Key(2), plan)],
             vec![],
-        );
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
-        assert!(d.handle(IN, Phase::Down, Some(&l), true, &mut s)); // auto-repeat
-        d.handle(IN, Phase::Up, Some(&l), true, &mut s);
-        d.handle(wheel, Phase::Tap, Some(&l), true, &mut s);
-        d.handle(Input::Key(2), Phase::Tap, Some(&l), true, &mut s);
-        assert_eq!(s.cmds, vec!["press tap=false", "release", "tap 32", "press tap=true"]);
-        assert!(s.out.is_empty());
+        ));
+        t.down(IN);
+        assert!(t.down(IN)); // auto-repeat
+        t.up(IN);
+        t.ev(wheel, Phase::Tap);
+        t.ev(Input::Key(2), Phase::Tap);
+        assert_eq!(t.s.cmds, vec!["press tap=false", "release", "tap 32", "press tap=true"]);
+        assert!(t.s.out.is_empty());
     }
 
     #[test]
     fn knows_when_a_remapped_mouse_button_is_held() {
         let back = Input::Mouse(MouseButton::Back);
-        let l = layers(
-            vec![(back, Target::Key { vk: 0x42, mods: 0 }), (IN, Target::Disabled)],
-            vec![],
-        );
+        let l = layers(vec![(back, key(0x42)), (IN, Target::Disabled)], vec![]);
         assert!(l.uses_mouse());
         assert!(!layers(vec![(IN, Target::Disabled)], vec![]).uses_mouse());
-        let mut d = Dispatcher::default();
-        let mut s = Rec::default();
-        d.handle(IN, Phase::Down, Some(&l), true, &mut s);
-        assert!(!d.holds_mouse());
-        d.handle(back, Phase::Down, Some(&l), true, &mut s);
-        assert!(d.holds_mouse());
-        d.handle(back, Phase::Up, None, true, &mut s);
-        assert!(!d.holds_mouse());
+        let mut t = T::new(l);
+        t.down(IN);
+        assert!(!t.d.holds_mouse());
+        t.down(back);
+        assert!(t.d.holds_mouse());
+        t.l = Layers::default();
+        t.up(back);
+        assert!(!t.d.holds_mouse());
+    }
+
+    fn tap_hold(tap: Option<Target>, hold: Option<Target>, double: Option<Target>) -> Target {
+        Target::TapHold(Arc::new(TapHold {
+            tap,
+            hold,
+            double,
+            hold_ms: 200,
+            double_ms: 250,
+        }))
+    }
+
+    const CAPS: Input = Input::Key(0x14);
+
+    #[test]
+    fn tap_hold_taps_on_a_quick_release() {
+        let mut t = T::new(layers(
+            vec![(CAPS, tap_hold(Some(key(0x1B)), Some(key(0xA2)), None))],
+            vec![],
+        ));
+        assert!(t.down(CAPS));
+        assert_eq!(t.d.deadline(), Some(t.now() + Duration::from_millis(200)));
+        t.wait(50);
+        assert!(t.down(CAPS)); // auto-repeat while deciding
+        assert!(t.up(CAPS));
+        assert_eq!(t.s.cmds, vec!["tap 27"]);
+        assert!(t.s.out.is_empty());
+        assert!(t.d.deadline().is_none());
+    }
+
+    #[test]
+    fn tap_hold_holds_after_the_threshold() {
+        let mut t = T::new(layers(
+            vec![(CAPS, tap_hold(Some(key(0x1B)), Some(key(0xA2)), None))],
+            vec![],
+        ));
+        t.down(CAPS);
+        t.wait(199);
+        assert!(t.s.out.is_empty());
+        t.wait(1);
+        assert_eq!(t.s.out, vec![k(0xA2, true)]);
+        t.down(CAPS); // auto-repeat repeats the hold key
+        t.up(CAPS);
+        assert_eq!(t.s.out, vec![k(0xA2, true), k(0xA2, true), k(0xA2, false)]);
+        assert!(t.s.cmds.is_empty());
+    }
+
+    #[test]
+    fn another_key_while_deciding_makes_it_a_hold_in_order() {
+        let c = Input::Key(0x43);
+        let mut t = T::new(layers(
+            vec![(CAPS, tap_hold(Some(key(0x1B)), Some(key(0xA2)), None))],
+            vec![],
+        ));
+        t.down(CAPS);
+        t.wait(30);
+        // C isn't remapped, but is sent again after Ctrl so the order holds.
+        assert!(t.down(c));
+        assert!(!t.up(c));
+        t.up(CAPS);
+        assert_eq!(t.s.out, vec![k(0xA2, true), k(0x43, true), k(0xA2, false)]);
+    }
+
+    #[test]
+    fn tap_hold_with_a_layer_hold_switches_layers_for_the_next_key() {
+        let mut t = T::new(layers(
+            vec![
+                (
+                    CAPS,
+                    tap_hold(
+                        Some(key(0x1B)),
+                        Some(Target::Layer {
+                            layer: 1,
+                            toggle: false,
+                        }),
+                        None,
+                    ),
+                ),
+                (IN, key(0x42)),
+            ],
+            vec![(IN, key(0x43))],
+        ));
+        t.down(CAPS);
+        t.down(IN);
+        t.up(IN);
+        t.up(CAPS);
+        t.down(IN);
+        assert_eq!(t.s.out, vec![k(0x43, true), k(0x43, false), k(0x42, true)]);
+    }
+
+    #[test]
+    fn double_tap_and_single_tap_after_the_window() {
+        let mut t = T::new(layers(
+            vec![(CAPS, tap_hold(Some(key(0x1B)), None, Some(key(0x70))))],
+            vec![],
+        ));
+        // Double tap.
+        t.down(CAPS);
+        t.wait(40);
+        t.up(CAPS);
+        t.wait(100);
+        t.down(CAPS);
+        t.up(CAPS);
+        assert_eq!(t.s.out, vec![k(0x70, true), k(0x70, false)]);
+        assert!(t.s.cmds.is_empty());
+        // Single tap: sent once the double-tap window has passed.
+        t.down(CAPS);
+        t.up(CAPS);
+        t.wait(249);
+        assert!(t.s.cmds.is_empty());
+        t.wait(1);
+        assert_eq!(t.s.cmds, vec!["tap 27"]);
+        // No hold action: holding long is still a tap.
+        t.down(CAPS);
+        t.wait(1000);
+        t.up(CAPS);
+        t.wait(300);
+        assert_eq!(t.s.cmds, vec!["tap 27", "tap 27"]);
+    }
+
+    #[test]
+    fn tap_without_hold_is_sent_early_when_interrupted() {
+        let mut t = T::new(layers(vec![(CAPS, tap_hold(Some(key(0x1B)), None, None))], vec![]));
+        t.down(CAPS);
+        t.down(IN);
+        assert!(t.up(CAPS)); // its release does nothing more
+        assert_eq!(t.s.out, vec![k(0x1B, true), k(0x1B, false), k(0x41, true)]);
+    }
+
+    #[test]
+    fn hotkeys_fire_even_when_paused_and_are_swallowed() {
+        let f12 = Input::Key(0x7B);
+        let mut t = T::new(layers(vec![(f12, key(0x42))], vec![]));
+        t.hotkeys = vec![HotkeyBinding {
+            vk: 0x7B,
+            mods: Modifier::Ctrl.bit(),
+            command: AppCommand::TogglePause,
+        }];
+        t.enabled = false;
+        assert!(!t.down(CTRL));
+        assert!(t.down(f12));
+        assert!(t.down(f12)); // repeat swallowed
+        assert!(t.up(f12));
+        assert!(!t.up(CTRL));
+        assert_eq!(t.s.events, vec!["TogglePause"]);
+        // Without Ctrl it's the normal binding.
+        t.enabled = true;
+        t.down(f12);
+        assert_eq!(t.s.out, vec![k(0x42, true)]);
+    }
+
+    fn combo(mods: u8, held: Vec<Input>, trigger: Input, target: Target) -> ComboBinding {
+        ComboBinding {
+            mods,
+            held,
+            trigger,
+            target,
+        }
+    }
+
+    #[test]
+    fn combos_need_their_keys_held_and_lift_modifiers_for_keys() {
+        let back = Input::Mouse(MouseButton::Back);
+        let mut l = layers(vec![(back, key(0x42))], vec![]);
+        l.combos[0].push(combo(Modifier::Ctrl.bit(), vec![], back, key(0x46)));
+        let mut t = T::new(l);
+        t.down(back);
+        t.up(back);
+        assert!(!t.down(CTRL));
+        t.down(back);
+        t.up(back);
+        assert_eq!(
+            t.s.out,
+            vec![
+                k(0x42, true),
+                k(0x42, false),
+                // Ctrl let go, F, Ctrl pressed again.
+                k(0xA2, false),
+                k(0x46, true),
+                k(0x46, false),
+                k(0xA2, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn combos_with_held_buttons_and_alt_use_the_mask_key() {
+        let left = Input::Mouse(MouseButton::Left);
+        let right = Input::Mouse(MouseButton::Right);
+        let alt = Input::Key(0xA4);
+        let mut l = Layers::default();
+        l.combos[0].push(combo(0, vec![right], left, key(0x47)));
+        l.combos[0].push(combo(Modifier::Alt.bit(), vec![], IN, key(0x48)));
+        let mut t = T::new(l);
+        assert!(!t.down(left));
+        t.up(left);
+        t.down(right);
+        assert!(t.down(left));
+        t.up(left);
+        t.up(right);
+        t.down(alt);
+        t.down(IN);
+        t.up(IN);
+        assert_eq!(
+            t.s.out,
+            vec![
+                k(0x47, true),
+                k(0x47, false),
+                k(MASK_KEY, true),
+                k(MASK_KEY, false),
+                k(0xA4, false),
+                k(0x48, true),
+                k(0x48, false),
+                k(0xA4, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_forgets_pass_through_keys_whose_release_was_missed() {
+        let mut t = T::new(layers(vec![(IN, key(0x42))], vec![]));
+        t.down(IN);
+        t.down(CTRL);
+        t.d.prune(|_| false);
+        // Ctrl no longer counts as held; the remapped key stays.
+        assert_eq!(t.d.down, vec![IN]);
+        assert_eq!(t.d.mods_held(None), 0);
     }
 
     #[test]

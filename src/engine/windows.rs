@@ -3,19 +3,25 @@
 //! One dedicated thread owns:
 //! * a low-level mouse hook and keyboard hook (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`)
 //! * a foreground-window event hook (`EVENT_SYSTEM_FOREGROUND`)
-//! * the message loop those hooks need.
+//! * two thread timers: one finishes tap / hold decisions, the other
+//!   re-checks the focused window's title and fullscreen state (only while a
+//!   profile has rules that need it)
+//! * the message loop those need.
 //!
 //! The hook callbacks must return quickly: Windows silently removes
 //! low-level hooks that time out. So they only do a non-blocking lookup in a
 //! pre-built table, a `SendInput` and maybe a channel send; anything timed
 //! (macros, turbo, text) runs on a separate worker thread (`player.rs`).
 
-use super::dispatch::{wheel_for, Dispatcher, Phase, Sink};
+use super::dispatch::{wheel_for, Ctx, Dispatcher, Phase, Sink};
 use super::player::{self, Cmd, Out};
-use super::{CompiledProfile, EngineEvent, FocusInfo, Input, Layers, RecEvent};
+use super::{
+    pick_profile, AppCommand, Compiled, CompiledProfile, EngineEvent, FocusInfo, HotkeyBinding, Input, Layers,
+    RecEvent, WindowInfo,
+};
 use crate::config::MouseButton;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -23,7 +29,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -34,21 +41,24 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC_EX,
-    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE,
+    MAPVK_VK_TO_VSC_EX, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+    VIRTUAL_KEY,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, PostThreadMessageW,
-    SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND,
-    HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-    SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
+    SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION, HHOOK,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+    XBUTTON2,
 };
 
 pub const SUPPORTED: bool = true;
@@ -65,8 +75,15 @@ const ACCEPT_INJECTED_ENV: &str = "MOUSE_KB_REMAP_ACCEPT_INJECTED";
 const NO_PROFILE: usize = usize::MAX;
 
 /// Thread message asking the engine thread to re-check whether the mouse
-/// hook is needed.
+/// hook and the window poll are needed.
 const WM_UPDATE_HOOKS: u32 = WM_APP + 1;
+/// Thread message: the profile changed from another thread (config change,
+/// forced profile); toggled layers go off.
+const WM_RESET_LAYERS: u32 = WM_APP + 2;
+
+/// How often the focused window's title / fullscreen state is re-checked
+/// while a profile has a title or fullscreen rule.
+const WINDOW_POLL_MS: u32 = 500;
 
 /// Engine thread id, for posting it messages.
 static ENGINE_TID: AtomicU32 = AtomicU32::new(0);
@@ -76,19 +93,33 @@ struct Recording {
     events: Vec<(Duration, RecEvent)>,
 }
 
+/// The focused window as last seen.
+#[derive(Default, Clone)]
+struct Focus {
+    hwnd: usize,
+    /// Executable file name as Windows reports it (for the UI).
+    exe: String,
+    window: WindowInfo,
+    is_self: bool,
+    elevated: bool,
+}
+
 struct Shared {
     profiles: RwLock<Vec<CompiledProfile>>,
+    hotkeys: RwLock<Arc<Vec<HotkeyBinding>>>,
     /// Bindings for the currently focused window (`None` while our own
     /// window is focused). Swapped on focus change.
     active: RwLock<Option<Arc<Layers>>>,
     active_index: AtomicUsize,
+    /// Profile chosen by hand, whatever app is focused.
+    forced: Mutex<Option<usize>>,
     enabled: AtomicBool,
     self_pid: u32,
     self_elevated: bool,
     accept_injected: bool,
-    last_focus: Mutex<(String, bool)>, // (lower-cased exe, is_self)
+    focus: Mutex<Focus>,
     focus_self: AtomicBool,
-    on_event: Box<dyn Fn(EngineEvent) + Send + Sync>,
+    on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>,
     worker: Sender<Cmd>,
     capture: AtomicBool,
     recording: AtomicBool,
@@ -117,33 +148,37 @@ thread_local! {
     static CAPTURE: RefCell<CaptureState> = RefCell::new(CaptureState::default());
     static REC_DOWN: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
     /// The mouse hook, when installed (only while it is needed).
-    static MOUSE_HOOK: std::cell::Cell<Option<HHOOK>> = const { std::cell::Cell::new(None) };
+    static MOUSE_HOOK: Cell<Option<HHOOK>> = const { Cell::new(None) };
     /// Remove the mouse hook once no remapped button is held any more.
-    static PENDING_UNHOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PENDING_UNHOOK: Cell<bool> = const { Cell::new(false) };
+    /// Thread timer ids (0 = not running).
+    static TAP_TIMER: Cell<usize> = const { Cell::new(0) };
+    static POLL_TIMER: Cell<usize> = const { Cell::new(0) };
 }
 
 pub struct Engine;
 
 impl Engine {
-    pub fn start(
-        profiles: Vec<CompiledProfile>,
-        enabled: bool,
-        on_event: Box<dyn Fn(EngineEvent) + Send + Sync>,
-    ) -> Self {
+    pub fn start(compiled: Compiled, enabled: bool, on_event: Box<dyn Fn(EngineEvent) + Send + Sync>) -> Self {
         let self_pid = unsafe { GetCurrentProcessId() };
         let self_elevated = process_elevated(unsafe { GetCurrentProcess() }).unwrap_or(false);
         let (tx, rx) = std::sync::mpsc::channel();
         let _ = SHARED.set(Shared {
-            profiles: RwLock::new(profiles),
+            profiles: RwLock::new(compiled.profiles),
+            hotkeys: RwLock::new(Arc::new(compiled.hotkeys)),
             active: RwLock::new(None),
             active_index: AtomicUsize::new(NO_PROFILE),
+            forced: Mutex::new(None),
             enabled: AtomicBool::new(enabled),
             self_pid,
             self_elevated,
             accept_injected: std::env::var(ACCEPT_INJECTED_ENV).is_ok_and(|v| v == "1"),
-            last_focus: Mutex::new((String::new(), true)),
+            focus: Mutex::new(Focus {
+                is_self: true,
+                ..Default::default()
+            }),
             focus_self: AtomicBool::new(true),
-            on_event,
+            on_event: Arc::from(on_event),
             worker: tx,
             capture: AtomicBool::new(false),
             recording: AtomicBool::new(false),
@@ -167,17 +202,31 @@ impl Engine {
         Engine
     }
 
-    pub fn apply(&self, profiles: Vec<CompiledProfile>, enabled: bool) {
+    pub fn apply(&self, compiled: Compiled, enabled: bool) {
         let sh = shared();
         sh.enabled.store(enabled, Ordering::Relaxed);
         if let Ok(mut p) = sh.profiles.write() {
-            *p = profiles;
+            *p = compiled.profiles;
+            // A deleted profile can't stay forced.
+            if let Ok(mut f) = sh.forced.lock() {
+                if f.is_some_and(|i| i >= p.len()) {
+                    *f = None;
+                }
+            }
         }
-        let (exe, is_self) = sh.last_focus.lock().map(|f| f.clone()).unwrap_or_default();
-        recompute_active(&exe, is_self);
-        request_hook_update();
-        // Bindings may have changed under a running macro or turbo.
-        let _ = sh.worker.send(Cmd::StopAll);
+        if let Ok(mut h) = sh.hotkeys.write() {
+            *h = Arc::new(compiled.hotkeys);
+        }
+        profile_changed_elsewhere();
+    }
+
+    pub fn force_profile(&self, index: Option<usize>) {
+        let sh = shared();
+        if let Ok(mut f) = sh.forced.lock() {
+            *f = index;
+        }
+        profile_changed_elsewhere();
+        emit_focus();
     }
 
     pub fn elevated(&self) -> bool {
@@ -202,14 +251,14 @@ impl Engine {
             });
         }
         sh.recording.store(true, Ordering::SeqCst);
-        request_hook_update();
+        post_engine(WM_UPDATE_HOOKS);
         true
     }
 
     pub fn stop_recording(&self) -> Vec<(Duration, RecEvent)> {
         let sh = shared();
         sh.recording.store(false, Ordering::SeqCst);
-        request_hook_update();
+        post_engine(WM_UPDATE_HOOKS);
         sh.record
             .lock()
             .ok()
@@ -227,6 +276,18 @@ impl Engine {
     }
 }
 
+/// Profiles or the forced profile changed on another thread: pick the
+/// active profile again and tell the engine thread.
+fn profile_changed_elsewhere() {
+    let sh = shared();
+    let focus = sh.focus.lock().map(|f| f.clone()).unwrap_or_default();
+    recompute_active(&focus);
+    post_engine(WM_UPDATE_HOOKS);
+    post_engine(WM_RESET_LAYERS);
+    // Bindings may have changed under a running macro or turbo.
+    let _ = sh.worker.send(Cmd::StopAll);
+}
+
 fn engine_thread() {
     unsafe {
         // Every hooked event waits for this thread: never let it queue
@@ -237,7 +298,7 @@ fn engine_thread() {
         let hmod = GetModuleHandleW(PCWSTR::null()).ok();
         // The mouse hook comes and goes with the active profile (see
         // update_mouse_hook); the keyboard hook is always needed for key
-        // capture and recording.
+        // capture, recording and app hotkeys.
         let keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod.map(Into::into), 0);
         if let Err(e) = &keyboard {
             crate::log!("engine: keyboard hook failed: {e}");
@@ -252,13 +313,32 @@ fn engine_thread() {
             WINEVENT_OUTOFCONTEXT,
         );
 
-        on_foreground(GetForegroundWindow());
+        on_foreground(GetForegroundWindow(), false);
+        update_window_poll();
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            if msg.hwnd.is_invalid() && msg.message == WM_UPDATE_HOOKS {
-                update_mouse_hook();
-                continue;
+            if msg.hwnd.is_invalid() {
+                match msg.message {
+                    WM_UPDATE_HOOKS => {
+                        update_mouse_hook();
+                        update_window_poll();
+                        continue;
+                    }
+                    WM_RESET_LAYERS => {
+                        DISPATCH.with(|d| d.borrow_mut().reset_layers());
+                        continue;
+                    }
+                    WM_TIMER if msg.wParam.0 == TAP_TIMER.get() && msg.wParam.0 != 0 => {
+                        on_tap_timer();
+                        continue;
+                    }
+                    WM_TIMER if msg.wParam.0 == POLL_TIMER.get() && msg.wParam.0 != 0 => {
+                        on_foreground(GetForegroundWindow(), true);
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -266,12 +346,12 @@ fn engine_thread() {
     }
 }
 
-/// Ask the engine thread to re-check the mouse hook (from any thread).
-fn request_hook_update() {
+/// Post a message to the engine thread (from any thread).
+fn post_engine(message: u32) {
     let tid = ENGINE_TID.load(Ordering::SeqCst);
     if tid != 0 {
         unsafe {
-            let _ = PostThreadMessageW(tid, WM_UPDATE_HOOKS, WPARAM(0), LPARAM(0));
+            let _ = PostThreadMessageW(tid, message, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -313,11 +393,61 @@ fn update_mouse_hook() {
                     let _ = UnhookWindowsHookEx(h);
                 }
                 hook.set(None);
+                DISPATCH.with(|d| d.borrow_mut().forget_mouse());
                 crate::log!("engine: mouse hook off");
             }
         }
         (false, None) => {}
     });
+}
+
+/// Run the window poll timer only while a profile has a title or
+/// fullscreen rule. Engine thread only.
+fn update_window_poll() {
+    let wanted = shared()
+        .profiles
+        .read()
+        .map(|p| super::needs_window_poll(&p))
+        .unwrap_or(false);
+    let id = POLL_TIMER.get();
+    unsafe {
+        if wanted && id == 0 {
+            POLL_TIMER.set(SetTimer(None, 0, WINDOW_POLL_MS, None));
+        } else if !wanted && id != 0 {
+            let _ = KillTimer(None, id);
+            POLL_TIMER.set(0);
+        }
+    }
+}
+
+/// Keep the tap / hold timer in step with the dispatcher. Engine thread only.
+fn arm_tap_timer() {
+    let deadline = DISPATCH.with(|d| d.borrow().deadline());
+    let id = TAP_TIMER.get();
+    unsafe {
+        match deadline {
+            Some(at) => {
+                let ms = at
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .clamp(1, 60_000) as u32;
+                TAP_TIMER.set(SetTimer(None, id, ms, None));
+            }
+            None if id != 0 => {
+                let _ = KillTimer(None, id);
+                TAP_TIMER.set(0);
+            }
+            None => {}
+        }
+    }
+}
+
+fn on_tap_timer() {
+    let sh = shared();
+    let mut sink = HookSink::new(sh);
+    DISPATCH.with(|d| d.borrow_mut().tick(Instant::now(), &mut sink));
+    sink.flush();
+    arm_tap_timer();
 }
 
 // ---------------------------------------------------------------------------
@@ -333,11 +463,49 @@ unsafe extern "system" fn win_event_proc(
     _thread: u32,
     _time: u32,
 ) {
-    on_foreground(hwnd);
+    on_foreground(hwnd, false);
 }
 
-fn on_foreground(hwnd: HWND) {
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) }.max(0) as usize;
+    String::from_utf16_lossy(&buf[..n])
+}
+
+/// Whether the window covers its whole monitor (fullscreen or borderless).
+fn is_fullscreen(hwnd: HWND) -> bool {
+    unsafe {
+        let mut class = [0u16; 32];
+        let n = GetClassNameW(hwnd, &mut class) as usize;
+        if matches!(String::from_utf16_lossy(&class[..n]).as_str(), "Progman" | "WorkerW") {
+            return false;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_err() {
+            return false;
+        }
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+            return false;
+        }
+        let m = mi.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// The foreground window changed, or (`poll`) its title / fullscreen state
+/// may have.
+fn on_foreground(hwnd: HWND, poll: bool) {
     if hwnd.is_invalid() {
+        return;
+    }
+    let sh = shared();
+    let same_window = sh.focus.lock().is_ok_and(|f| f.hwnd == hwnd.0 as usize);
+    if poll && !same_window {
+        // A focus change the event hook hasn't reported yet; it will.
         return;
     }
     let mut pid = 0u32;
@@ -345,39 +513,89 @@ fn on_foreground(hwnd: HWND) {
     if pid == 0 {
         return;
     }
-    let sh = shared();
     let is_self = pid == sh.self_pid;
-    let (exe, elevated) = process_info(pid);
-    let exe_lower = exe.to_ascii_lowercase();
-
-    if let Ok(mut f) = sh.last_focus.lock() {
-        *f = (exe_lower.clone(), is_self);
+    let focus = if poll {
+        let Ok(mut f) = sh.focus.lock().map(|f| f.clone()) else {
+            return;
+        };
+        let title = window_title(hwnd).to_lowercase();
+        let fullscreen = is_fullscreen(hwnd);
+        if f.window.title == title && f.window.fullscreen == fullscreen {
+            return;
+        }
+        f.window.title = title;
+        f.window.fullscreen = fullscreen;
+        f
+    } else {
+        let (path, elevated) = process_info(pid);
+        let exe = path.rsplit(['\\', '/']).next().unwrap_or_default().to_string();
+        Focus {
+            hwnd: hwnd.0 as usize,
+            window: WindowInfo {
+                exe: exe.to_lowercase(),
+                path: path.to_lowercase(),
+                title: window_title(hwnd).to_lowercase(),
+                fullscreen: is_fullscreen(hwnd),
+            },
+            exe,
+            is_self,
+            elevated,
+        }
+    };
+    if let Ok(mut f) = sh.focus.lock() {
+        *f = focus.clone();
     }
-    sh.focus_self.store(is_self, Ordering::Relaxed);
-    if !is_self {
-        // Never keep swallowing keys for a capture the user walked away from.
-        sh.capture.store(false, Ordering::SeqCst);
+
+    if !poll {
+        sh.focus_self.store(is_self, Ordering::Relaxed);
+        if !is_self {
+            // Never keep swallowing keys for a capture the user walked away from.
+            sh.capture.store(false, Ordering::SeqCst);
+        }
+        // Keys released while a window our hooks can't see was in front.
+        DISPATCH.with(|d| {
+            d.borrow_mut().prune(|i| match *i {
+                Input::Key(vk) => {
+                    let vk = if vk == crate::keys::VK_NUMPAD_ENTER { 0x0D } else { vk };
+                    (unsafe { GetAsyncKeyState(vk as i32) }) < 0
+                }
+                Input::Mouse(_) => true,
+            })
+        });
     }
     let before = sh.active_index.load(Ordering::Relaxed);
-    let after = recompute_active(&exe_lower, is_self);
+    let after = recompute_active(&focus);
     update_mouse_hook();
     if before != after {
         // A toggled turbo or looping macro stops when you switch profile, and
         // focusing this window stops everything (a handy panic button).
         let _ = sh.worker.send(Cmd::StopAll);
+        DISPATCH.with(|d| d.borrow_mut().reset_layers());
     }
+    if !poll || before != after {
+        emit_focus();
+    }
+}
 
+/// Tell the UI what's focused and which profile is in use.
+fn emit_focus() {
+    let sh = shared();
+    let f = sh.focus.lock().map(|f| f.clone()).unwrap_or_default();
+    let index = sh.active_index.load(Ordering::Relaxed);
+    let forced = sh.forced.lock().map(|f| f.is_some()).unwrap_or(false);
     (sh.on_event)(EngineEvent::Focus(FocusInfo {
-        exe,
-        is_self,
-        elevation_blocked: elevated && !sh.self_elevated,
+        exe: f.exe,
+        is_self: f.is_self,
+        elevation_blocked: f.elevated && !sh.self_elevated,
+        profile: (index != NO_PROFILE).then_some(index),
+        forced: forced && !f.is_self,
     }));
 }
 
 /// Pick the active profile; returns its index (`NO_PROFILE` for our window).
-fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
+fn recompute_active(focus: &Focus) -> usize {
     let sh = shared();
-    let (index, layers) = if is_self {
+    let (index, layers) = if focus.is_self {
         // Never remap our own window, so a bad binding can't lock you out of the UI.
         (NO_PROFILE, None)
     } else {
@@ -385,13 +603,8 @@ fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
             Ok(p) => p,
             Err(_) => return NO_PROFILE,
         };
-        let index = profiles
-            .iter()
-            .enumerate()
-            .skip(1)
-            .find(|(_, p)| p.apps.iter().any(|a| a == exe_lower))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        let forced = sh.forced.lock().ok().and_then(|f| *f).filter(|i| *i < profiles.len());
+        let index = forced.unwrap_or_else(|| pick_profile(&profiles, &focus.window));
         (index, profiles.get(index).map(|p| p.layers.clone()))
     };
     if let Ok(mut a) = sh.active.write() {
@@ -401,7 +614,7 @@ fn recompute_active(exe_lower: &str, is_self: bool) -> usize {
     index
 }
 
-/// Returns (exe file name, is elevated). If we can't inspect the process at
+/// Returns (full exe path, is elevated). If we can't inspect the process at
 /// all we assume it is elevated, since that is the common reason for failure.
 fn process_info(pid: u32) -> (String, bool) {
     unsafe {
@@ -410,15 +623,15 @@ fn process_info(pid: u32) -> (String, bool) {
         };
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
-        let exe = if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            path.rsplit(['\\', '/']).next().unwrap_or_default().to_string()
+        let path = if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok()
+        {
+            String::from_utf16_lossy(&buf[..len as usize])
         } else {
             String::new()
         };
         let elevated = process_elevated(handle).unwrap_or(true);
         let _ = CloseHandle(handle);
-        (exe, elevated)
+        (path, elevated)
     }
 }
 
@@ -488,7 +701,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     && !DISPATCH.with(|d| d.borrow().holds_mouse())
                 {
                     // Finish a deferred unhook (not from inside the callback).
-                    request_hook_update();
+                    post_engine(WM_UPDATE_HOOKS);
                 }
                 if swallow {
                     return LRESULT(1);
@@ -612,29 +825,44 @@ fn capture_key(vk: u16, down: bool) -> bool {
 /// Returns true if the original input should be swallowed.
 fn handle(input: Input, phase: Phase) -> bool {
     let sh = shared();
-    let enabled = sh.enabled.load(Ordering::Relaxed);
     // try_read: never block inside a low-level hook. If a writer holds the
     // lock (a profile switch this instant) the event passes through.
     let active = sh.active.try_read().ok().and_then(|a| a.clone());
-    let mut sink = HookSink {
-        buf: [INPUT::default(); 16],
-        len: 0,
-        worker: &sh.worker,
+    let hotkeys = sh.hotkeys.try_read().ok().map(|h| h.clone()).unwrap_or_default();
+    let ctx = Ctx {
+        layers: active.as_deref(),
+        enabled: sh.enabled.load(Ordering::Relaxed),
+        hotkeys: &hotkeys,
+        now: Instant::now(),
     };
-    DISPATCH.with(|d| {
-        d.borrow_mut()
-            .handle(input, phase, active.as_deref(), enabled, &mut sink)
-    })
+    let mut sink = HookSink::new(sh);
+    let swallow = DISPATCH.with(|d| d.borrow_mut().handle(input, phase, &ctx, &mut sink));
+    sink.flush();
+    arm_tap_timer();
+    swallow
 }
 
 struct HookSink<'a> {
     buf: [INPUT; 16],
     len: usize,
-    worker: &'a Sender<Cmd>,
+    sh: &'a Shared,
+}
+
+impl<'a> HookSink<'a> {
+    fn new(sh: &'a Shared) -> Self {
+        HookSink {
+            buf: [INPUT::default(); 16],
+            len: 0,
+            sh,
+        }
+    }
 }
 
 impl Sink for HookSink<'_> {
     fn out(&mut self, out: Out) {
+        if self.len >= self.buf.len() - 2 {
+            self.flush();
+        }
         let mut push = |i: INPUT| {
             if self.len < self.buf.len() {
                 self.buf[self.len] = i;
@@ -652,7 +880,15 @@ impl Sink for HookSink<'_> {
     }
 
     fn worker(&mut self, cmd: Cmd) {
-        let _ = self.worker.send(cmd);
+        let _ = self.sh.worker.send(cmd);
+    }
+
+    fn command(&mut self, cmd: AppCommand) {
+        (self.sh.on_event)(EngineEvent::Command(cmd));
+    }
+
+    fn notice(&mut self, text: String) {
+        (self.sh.on_event)(EngineEvent::Notice(text));
     }
 }
 
@@ -675,6 +911,12 @@ fn emit_outs(outs: &[Out]) {
                 batch.clear();
                 set_pointer_speed(*speed);
             }
+            Out::System(command) => {
+                send(&batch);
+                batch.clear();
+                super::win_actions::run(*command, shared().on_event.clone());
+            }
+            Out::Notice(text) => (shared().on_event)(EngineEvent::Notice(text.clone())),
             other => out_to_inputs(other, &mut |i| batch.push(i)),
         }
     }
@@ -718,14 +960,15 @@ fn out_to_inputs(out: &Out, push: &mut impl FnMut(INPUT)) {
                 push(unicode_input(unit, true));
             }
         }
-        Out::Launch(_) | Out::PointerSpeed(_) => {}
+        Out::Move { x, y, absolute } => push(move_input(x, y, absolute)),
+        Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
     }
 }
 
 /// Keys that must be sent by virtual-key code: media/browser keys and a few
 /// whose scan codes don't round-trip through `SendInput`.
 fn send_as_vk(vk: u16) -> bool {
-    matches!(vk, 0x13 | 0x90 | 0xA6..=0xB7)
+    matches!(vk, 0x13 | 0x90 | 0xA6..=0xB7 | 0xE8)
 }
 
 /// Keys are sent as scan codes where possible: many games read scan codes
@@ -801,12 +1044,40 @@ fn wheel_input(button: MouseButton) -> INPUT {
 }
 
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: u32) -> INPUT {
+    raw_mouse_input(flags, data, 0, 0)
+}
+
+/// Relative moves go through like a mouse's (pointer speed applies);
+/// absolute ones are pixels on the virtual desktop (all monitors).
+fn move_input(x: i32, y: i32, absolute: bool) -> INPUT {
+    if !absolute {
+        return raw_mouse_input(MOUSEEVENTF_MOVE, 0, x, y);
+    }
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2),
+        )
+    };
+    let nx = ((x - vx) as i64 * 65535 / (vw - 1) as i64).clamp(0, 65535) as i32;
+    let ny = ((y - vy) as i64 * 65535 / (vh - 1) as i64).clamp(0, 65535) as i32;
+    raw_mouse_input(
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        0,
+        nx,
+        ny,
+    )
+}
+
+fn raw_mouse_input(flags: MOUSE_EVENT_FLAGS, data: u32, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
+                dx,
+                dy,
                 mouseData: data,
                 dwFlags: flags,
                 time: 0,

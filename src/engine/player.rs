@@ -6,7 +6,7 @@
 //! without threads or an OS; `run_worker` is the thread loop around it.
 
 use super::Input;
-use crate::config::MouseButton;
+use crate::config::{MouseButton, SystemCommand};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +28,13 @@ pub enum Step {
     Char(char),
     Delay(u32),
     Launch(Arc<LaunchSpec>),
+    /// Move the pointer by (x, y), or to the screen position (x, y).
+    Move {
+        x: i32,
+        y: i32,
+        absolute: bool,
+    },
+    System(SystemCommand),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +54,10 @@ pub struct Plan {
     /// Pause after the first repetition instead of `gap_ms` (turbo's
     /// "repeat after" delay).
     pub first_gap_ms: u32,
+    /// Delays are made up to this much shorter or longer, at random.
+    pub jitter_ms: u32,
+    /// Shown when a toggle starts or stops ("Turbo Space on").
+    pub label: Option<Arc<str>>,
     /// Total delay of one pass; loops with none get a 1 ms floor so they
     /// can't spin.
     has_delay: bool,
@@ -60,8 +71,20 @@ impl Plan {
             mode,
             gap_ms,
             first_gap_ms,
+            jitter_ms: 0,
+            label: None,
             has_delay,
         }
+    }
+
+    pub fn with_jitter(mut self, ms: u32) -> Self {
+        self.jitter_ms = ms;
+        self
+    }
+
+    pub fn with_label(mut self, label: &str) -> Self {
+        self.label = Some(label.into());
+        self
     }
 }
 
@@ -102,6 +125,50 @@ pub enum Out {
     Launch(Arc<LaunchSpec>),
     /// Set the pointer speed, or restore the user's own speed with `None`.
     PointerSpeed(Option<u32>),
+    Move {
+        x: i32,
+        y: i32,
+        absolute: bool,
+    },
+    System(SystemCommand),
+    /// Something to show on screen ("Turbo on").
+    Notice(String),
+}
+
+/// Small, fast pseudo-random numbers for delay jitter (xorshift64*).
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Rng(seed | 1)
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// `ms` moved by up to `jitter` either way (never below 0).
+    pub fn jitter(&mut self, ms: u32, jitter: u32) -> u32 {
+        if jitter == 0 {
+            return ms;
+        }
+        let span = 2 * jitter as u64 + 1;
+        let offset = (self.next() % span) as i64 - jitter as i64;
+        (ms as i64 + offset).max(0) as u32
+    }
+}
+
+impl Default for Rng {
+    fn default() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+        Rng::new(seed)
+    }
 }
 
 /// How long a wheel → key tap is held.
@@ -168,7 +235,7 @@ impl Player {
     }
 
     /// Run due steps. Returns false when the player is done.
-    fn run(&mut self, now: Instant, out: &mut Vec<Out>) -> bool {
+    fn run(&mut self, now: Instant, out: &mut Vec<Out>, rng: &mut Rng) -> bool {
         // Safety valve: never execute an unbounded number of steps in one go.
         let mut budget = 10_000;
         while self.next <= now && budget > 0 {
@@ -197,6 +264,7 @@ impl Player {
             self.pos += 1;
             match step {
                 Step::Delay(ms) => {
+                    let ms = rng.jitter(ms, self.plan.jitter_ms);
                     if ms > 0 {
                         self.wait(ms, now);
                     }
@@ -224,6 +292,8 @@ impl Player {
                 Step::Wheel(b) => out.push(Out::Wheel(b)),
                 Step::Char(c) => out.push(Out::Char(c)),
                 Step::Launch(spec) => out.push(Out::Launch(spec)),
+                Step::Move { x, y, absolute } => out.push(Out::Move { x, y, absolute }),
+                Step::System(c) => out.push(Out::System(c)),
             }
         }
         true
@@ -235,6 +305,13 @@ pub struct Scheduler {
     players: Vec<Player>,
     /// Held sensitivity buttons, most recent last.
     sensitivity: Vec<(Input, u32)>,
+    rng: Rng,
+}
+
+fn toggle_notice(plan: &Plan, on: bool, out: &mut Vec<Out>) {
+    if let Some(label) = &plan.label {
+        out.push(Out::Notice(format!("{label} {}", if on { "on" } else { "off" })));
+    }
 }
 
 impl Scheduler {
@@ -248,10 +325,14 @@ impl Scheduler {
                         if plan.mode == Mode::Toggle {
                             let mut p = self.players.remove(i);
                             p.release_all(out);
+                            toggle_notice(&p.plan, false, out);
                         }
                         return;
                     }
                     let single = tap && plan.mode != Mode::Toggle;
+                    if plan.mode == Mode::Toggle {
+                        toggle_notice(&plan, true, out);
+                    }
                     self.players.push(Player::new(Some(trigger), plan, now, single));
                 }
                 super::Target::Sensitivity(speed) => {
@@ -301,7 +382,8 @@ impl Scheduler {
     }
 
     pub fn poll(&mut self, now: Instant, out: &mut Vec<Out>) {
-        self.players.retain_mut(|p| p.run(now, out));
+        let rng = &mut self.rng;
+        self.players.retain_mut(|p| p.run(now, out, rng));
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -598,6 +680,42 @@ mod tests {
                     down: false
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn jitter_stays_within_bounds() {
+        let mut rng = Rng::new(42);
+        let (mut low, mut high) = (false, false);
+        for _ in 0..2000 {
+            let v = rng.jitter(100, 10);
+            assert!((90..=110).contains(&v), "{v}");
+            low |= v < 95;
+            high |= v > 105;
+        }
+        assert!(low && high);
+        assert!(rng.jitter(5, 10) <= 15);
+        assert_eq!(rng.jitter(100, 0), 100);
+    }
+
+    #[test]
+    fn toggles_announce_on_and_off() {
+        let start = Instant::now();
+        let mut s = Scheduler::default();
+        let target = Target::Play(Arc::new(
+            Plan::new(vec![Step::Delay(10)], Mode::Toggle, 0, 0).with_label("Turbo A"),
+        ));
+        let press = || Cmd::Press {
+            trigger: T,
+            target: target.clone(),
+            tap: false,
+        };
+        let mut out = Vec::new();
+        s.command(press(), start, &mut out);
+        s.command(press(), start + ms(5), &mut out);
+        assert_eq!(
+            out,
+            vec![Out::Notice("Turbo A on".into()), Out::Notice("Turbo A off".into())]
         );
     }
 

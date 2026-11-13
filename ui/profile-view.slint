@@ -43,7 +43,7 @@ component ProfileHeader inherits Rectangle {
                 selected(i) => { Store.device-tab = i; }
             }
             Segmented {
-                items: ["Base", "Shift layer"];
+                items: Store.layer-names;
                 current: Store.layer;
                 selected(i) => { Store.select-layer(i); }
             }
@@ -71,9 +71,9 @@ component ProfileHeader inherits Rectangle {
                 remove => { Store.remove-app(app); }
             }
             Field {
-                width: 170px;
+                width: 210px;
                 height: 22px;
-                placeholder: "add app, e.g. game.exe";
+                placeholder: "game.exe, a path, or title:text";
                 text <=> root.new-app;
                 accepted(t) => {
                     Store.add-app(t);
@@ -89,6 +89,15 @@ component ProfileHeader inherits Rectangle {
             for app in Store.recent-apps: Chip {
                 text: "+ " + app;
                 clicked => { Store.add-app(app); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: "Only when fullscreen"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            VerticalLayout {
+                alignment: center;
+                Switch {
+                    checked: Store.profile-fullscreen;
+                    toggled(on) => { Store.set-profile-fullscreen(on); }
+                }
             }
         }
     }
@@ -126,8 +135,8 @@ component Canvas inherits Rectangle {
         select(id) => { Store.select-input(id); }
     }
 
-    // Shift layer banner
-    if Store.layer == 1: Rectangle {
+    // Layer banner
+    if Store.layer != 0: Rectangle {
         x: 16px;
         y: 14px;
         width: banner.preferred-width + 20px;
@@ -135,7 +144,7 @@ component Canvas inherits Rectangle {
         border-radius: 13px;
         background: Theme.accent;
         banner := Text {
-            text: "SHIFT LAYER · " + Store.shift-hint;
+            text: Store.layer-banner;
             color: Theme.on-accent;
             font-size: Theme.font-sm;
             font-weight: 600;

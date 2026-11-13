@@ -19,6 +19,26 @@ component StatusItem inherits HorizontalLayout {
     Text { text: root.value; color: root.value-color; font-size: Theme.font-sm; vertical-alignment: center; overflow: elide; }
 }
 
+component StatusLink inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked;
+    width: lbl.preferred-width + 12px;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover && root.enabled ? Theme.control-hover : transparent;
+    lbl := Text {
+        text: root.text;
+        color: root.enabled ? Theme.text : Theme.text-faint;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component StatusBar inherits Rectangle {
     height: 28px;
     background: Theme.statusbar-bg;
@@ -56,6 +76,24 @@ component StatusBar inherits Rectangle {
 
         StatusItem { label: "Focused"; value: Store.focused-app != "" ? Store.focused-app : "—"; }
         StatusItem { label: "Active profile"; value: Store.live-profile; value-color: Theme.accent; }
+        if Store.live-forced: Rectangle {
+            width: auto-row.preferred-width + 12px;
+            border-radius: Theme.radius-sm;
+            background: auto-ta.has-hover ? Theme.control-hover : transparent;
+            auto-row := HorizontalLayout {
+                x: 6px;
+                Text {
+                    text: "chosen by hand · back to automatic";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+            }
+            auto-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { Store.auto-profile(); }
+            }
+        }
 
         if Store.elevation-warning: HorizontalLayout {
             spacing: 6px;
@@ -69,6 +107,8 @@ component StatusBar inherits Rectangle {
         }
 
         Rectangle { horizontal-stretch: 1; }
+        StatusLink { text: "Undo"; enabled: Store.can-undo; clicked => { Store.undo(); } }
+        StatusLink { text: "Redo"; enabled: Store.can-redo; clicked => { Store.redo(); } }
         Text {
             text: Store.self-elevated ? "Admin" : "Standard user";
             color: Theme.text-faint;
@@ -88,6 +128,45 @@ export component AppWindow inherits Window {
     background: Theme.window-bg;
     default-font-size: 12px;
 
+    // Window-level keys. While a capture box waits for a key, keys go to it
+    // (the engine normally captures them in its input hook first and
+    // swallows them; this catches anything it doesn't, and is the only path
+    // where there is no engine). Otherwise Ctrl+Z / Ctrl+Y undo and redo
+    // binding changes (text fields keep their own undo while focused).
+    window-keys := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0px;
+        height: 0px;
+        property <bool> capturing: Store.capturing != "";
+        changed capturing => {
+            if self.capturing { self.focus(); }
+        }
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if self.capturing {
+                Store.ui-key(event.text, false, root.mod-bits(event.modifiers));
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "z" || event.text == "Z") {
+                if event.modifiers.shift { Store.redo(); } else { Store.undo(); }
+                return accept;
+            }
+            if event.modifiers.control && (event.text == "y" || event.text == "Y") {
+                Store.redo();
+                return accept;
+            }
+            reject
+        }
+        key-released(event) => {
+            if self.capturing {
+                Store.ui-key(event.text, true, root.mod-bits(event.modifiers));
+                return accept;
+            }
+            reject
+        }
+    }
+
     VerticalLayout {
         HorizontalLayout {
             vertical-stretch: 1;
@@ -100,23 +179,6 @@ export component AppWindow inherits Window {
             if Store.view == 2: SettingsView { horizontal-stretch: 1; max-width: 100000px; }
         }
         StatusBar { }
-    }
-
-    // Key capture through the window. The engine normally captures keys in
-    // its input hook first (and swallows them); this catches anything it
-    // doesn't, and is the only path where there is no engine.
-    if Store.capturing != "": FocusScope {
-        width: 0px;
-        height: 0px;
-        init => { self.focus(); }
-        key-pressed(event) => {
-            Store.ui-key(event.text, false, root.mod-bits(event.modifiers));
-            accept
-        }
-        key-released(event) => {
-            Store.ui-key(event.text, true, root.mod-bits(event.modifiers));
-            accept
-        }
     }
 
     pure function mod-bits(m: KeyboardModifiers) -> int {

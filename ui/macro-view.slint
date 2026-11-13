@@ -73,12 +73,21 @@ component StepList inherits Rectangle {
                 suffix: "ms";
                 committed(v) => { Store.set-all-delays(v); }
             }
+            Text { text: "Randomize ±"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            ValueField {
+                width: 70px;
+                height: 24px;
+                value: Store.macro-jitter;
+                placeholder: "0";
+                suffix: "ms";
+                committed(v) => { Store.set-macro-jitter(v); }
+            }
             Button { text: "Clear steps"; compact: true; danger: true; clicked => { Store.clear-steps(); } }
         }
         ChoiceGrid {
-            columns: 4;
+            columns: 5;
             cell-height: 26px;
-            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text"];
+            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text", "+ Move by", "+ Move to"];
             selected(i) => { Store.add-step(i); }
         }
 
@@ -190,6 +199,27 @@ component StepInspector inherits Rectangle {
                 value: Store.step-text;
                 placeholder: "Text to type…";
                 edited(t) => { Store.set-step-text(t); }
+            }
+            if Store.step-kind >= 8: VerticalLayout {
+                spacing: 8px;
+                FormRow {
+                    label: Store.step-kind == 8 ? "Right (−: left)" : "X (pixels from the left)";
+                    ValueField { value: Store.step-x; committed(v) => { Store.set-step-xy(v, Store.step-y); } }
+                }
+                FormRow {
+                    label: Store.step-kind == 8 ? "Down (−: up)" : "Y (pixels from the top)";
+                    ValueField { value: Store.step-y; committed(v) => { Store.set-step-xy(Store.step-x, v); } }
+                }
+                if Store.step-kind == 9: Button {
+                    text: Store.picking-position ? "Move the pointer there…" : "Use the pointer's position in 3 s";
+                    enabled: !Store.picking-position;
+                    clicked => { Store.pick-position(); }
+                }
+                Hint {
+                    text: Store.step-kind == 8
+                        ? "Moves like the mouse would, so games that read the mouse see it. The Windows pointer speed and \"Enhance pointer precision\" change how far it goes on the desktop."
+                        : "A position on the screen, in pixels (all monitors together; the main one starts at 0, 0). Some games ignore it.";
+                }
             }
             HorizontalLayout {
                 spacing: 6px;

@@ -179,6 +179,142 @@ component SensitivityEditor inherits VerticalLayout {
     Hint { text: "This is the Windows pointer speed (10 is the default). Games that read raw mouse input ignore it."; }
 }
 
+component TapHoldPart inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <int> slot;
+    spacing: 8px;
+    Text {
+        width: 52px;
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.value;
+        color: root.value == "Nothing" ? Theme.text-faint : Theme.accent;
+        font-weight: 600;
+        font-size: Theme.font;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    Button { text: "Edit"; compact: true; clicked => { Store.edit-slot(root.slot); } }
+}
+
+component TapHoldEditor inherits VerticalLayout {
+    spacing: 8px;
+    Hint { text: "A quick press does one thing, holding it another. Pressing another key or button while it's held also counts as holding it, so it works as a modifier (tap for Esc, hold for Ctrl)."; }
+    TapHoldPart { label: "Tap"; value: Store.taphold-tap; slot: 1; }
+    TapHoldPart { label: "Hold"; value: Store.taphold-hold; slot: 2; }
+    TapHoldPart { label: "Double tap"; value: Store.taphold-double; slot: 3; }
+    Rectangle { height: 2px; }
+    SectionLabel { text: "TIMING"; }
+    FormRow {
+        label: "Held this long counts as a hold";
+        ValueField { value: Store.taphold-hold-ms; suffix: "ms"; committed(v) => { Store.set-taphold-number("hold", v); } }
+    }
+    FormRow {
+        label: "Second tap within (double tap)";
+        ValueField { value: Store.taphold-double-ms; suffix: "ms"; committed(v) => { Store.set-taphold-number("double", v); } }
+    }
+    Hint { text: "With a double-tap action, a single tap is sent once the double-tap time has passed."; }
+}
+
+component LayerEditor inherits VerticalLayout {
+    spacing: 8px;
+    SectionLabel { text: "LAYER"; }
+    Segmented {
+        items: ["Shift", "Layer 2", "Layer 3"];
+        current: Store.layer-target - 1;
+        selected(i) => { Store.set-layer-target(i + 1); }
+    }
+    Segmented {
+        items: ["While held", "Toggle on / off"];
+        current: Store.layer-toggle ? 1 : 0;
+        selected(i) => { Store.set-layer-toggle(i == 1); }
+    }
+    Hint {
+        text: Store.layer-toggle
+            ? "Press once to switch the layer on, again to switch it off. Switching apps turns it off."
+            : "While this input is held, the layer's bindings apply (like G-Shift or Hypershift). Inputs with nothing on the layer keep their normal binding.";
+    }
+    HorizontalLayout {
+        alignment: start;
+        Button { text: "Edit this layer"; clicked => { Store.select-layer(Store.layer-target); } }
+    }
+}
+
+component SystemEditor inherits VerticalLayout {
+    spacing: 8px;
+    Hint { text: "Window actions apply to the focused window. Audio output switches the default playback device to the next one."; }
+    ChoiceGrid {
+        columns: 2;
+        cell-height: 26px;
+        items: Store.system-names;
+        current: Store.system-current;
+        selected(i) => { Store.set-system(i); }
+    }
+}
+
+component ComboEditor inherits VerticalLayout {
+    spacing: 8px;
+    SectionLabel { text: "HOLD"; }
+    ModifierChips { target: "combo"; mods: Store.combo-mods; }
+    Text { text: "and also"; color: Theme.text-muted; font-size: Theme.font-sm; }
+    ChoiceGrid {
+        columns: 3;
+        cell-height: 24px;
+        items: Store.combo-mouse-names;
+        current: Store.combo-held-key != "" ? -1 : Store.combo-held-mouse;
+        selected(i) => { Store.set-combo-mouse(i); }
+    }
+    CaptureBox { target: "combo"; value: Store.combo-held-key; placeholder: "or a key: click, then press it"; }
+    Text { text: "then press " + Store.combo-trigger; color: Theme.text-muted; font-size: Theme.font-sm; }
+    Hint { text: "The keys and buttons you hold still reach the app. When the combo sends a key, held modifiers are let go while it's sent."; }
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        Button { text: "← " + Store.combo-trigger; compact: true; clicked => { Store.back-to-trigger(); } }
+        Button { text: "Remove combo"; compact: true; danger: true; clicked => { Store.remove-combo(); } }
+    }
+}
+
+component ComboList inherits VerticalLayout {
+    spacing: 4px;
+    HorizontalLayout {
+        SectionLabel { text: "COMBOS"; vertical-alignment: center; horizontal-stretch: 1; }
+        Button { text: "+ Add combo"; compact: true; clicked => { Store.add-combo(); } }
+    }
+    if Store.combos.length == 0: Hint { text: "Hold Ctrl, Shift, another key or a mouse button, then press this one, for something else."; }
+    for c in Store.combos: Rectangle {
+        height: 26px;
+        border-radius: Theme.radius-sm;
+        background: combo-ta.has-hover ? Theme.control-hover : Theme.input-bg;
+        combo-ta := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { Store.select-binding(c.input-id, c.layer); }
+        }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+            Text { text: c.input; color: Theme.text; font-size: Theme.font-sm; vertical-alignment: center; overflow: elide; }
+            Text { text: "→"; color: Theme.text-faint; font-size: Theme.font-sm; vertical-alignment: center; }
+            Text {
+                text: c.action;
+                color: Theme.accent;
+                font-weight: 600;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+    }
+}
+
 component BindingList inherits Flickable {
     VerticalLayout {
         alignment: start;
@@ -201,7 +337,7 @@ component BindingList inherits Flickable {
                 padding-right: 4px;
                 spacing: 6px;
                 Text {
-                    text: (b.layer == 1 ? "⇧ " : "") + b.input;
+                    text: (b.layer == 1 ? "⇧ " : b.layer > 1 ? "L" + b.layer + " " : "") + b.input;
                     color: Theme.text;
                     font-size: Theme.font;
                     vertical-alignment: center;
@@ -270,13 +406,34 @@ export component Inspector inherits Rectangle {
                     text: "This button is handled by the mouse's own firmware and never reaches Windows, so it can't be remapped in software.";
                 }
 
+                if Store.selected-input != "" && Store.selected-supported && Store.selected-is-combo && Store.slot == 0: VerticalLayout {
+                    spacing: 10px;
+                    Divider { }
+                    ComboEditor { }
+                }
+
                 if Store.selected-input != "" && Store.selected-supported: VerticalLayout {
                     spacing: 10px;
                     Divider { }
-                    SectionLabel { text: Store.layer == 1 ? "ACTION · SHIFT LAYER" : "ACTION"; }
+                    if Store.slot != 0: HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "← Tap / hold"; compact: true; clicked => { Store.edit-slot(0); } }
+                        Text {
+                            text: Store.slot-title;
+                            color: Theme.text-strong;
+                            font-weight: 700;
+                            font-size: Theme.font;
+                            vertical-alignment: center;
+                        }
+                    }
+                    SectionLabel {
+                        text: Store.slot != 0 ? "DOES"
+                            : Store.layer == 0 ? "ACTION"
+                            : "ACTION · " + Store.layer-names[Store.layer].to-uppercase() + (Store.layer == 1 ? " LAYER" : "");
+                    }
                     ChoiceGrid {
-                        items: Store.kind-names;
-                        current: Store.selected-kind;
+                        items: Store.kind-items;
+                        current: Store.kind-current;
                         selected(i) => { Store.set-kind(i); }
                     }
                     Divider { }
@@ -308,13 +465,17 @@ export component Inspector inherits Rectangle {
                             selected(i) => { Store.set-media(i); }
                         }
                     }
-                    if Store.selected-kind == 8: VerticalLayout {
-                        spacing: 8px;
-                        Hint { text: "While this input is held, the profile's shift layer is used: a second set of bindings for every other button and key (like G-Shift or Hypershift). Inputs with nothing on the shift layer keep their normal binding."; }
-                        Button { text: "Edit the shift layer"; clicked => { Store.select-layer(1); } }
-                    }
+                    if Store.selected-kind == 8: LayerEditor { }
                     if Store.selected-kind == 9: SensitivityEditor { }
-                    if Store.selected-kind == 10: Hint { text: "This input is blocked while the profile is active."; }
+                    if Store.selected-kind == 10: TapHoldEditor { }
+                    if Store.selected-kind == 11: SystemEditor { }
+                    if Store.selected-kind == 12: Hint { text: "This input is blocked while the profile is active."; }
+
+                    if !Store.selected-is-combo && Store.slot == 0: VerticalLayout {
+                        spacing: 10px;
+                        Divider { }
+                        ComboList { }
+                    }
                 }
             }
         }
