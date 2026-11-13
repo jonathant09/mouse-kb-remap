@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Store, StepRow } from "store.slint";
 import { Button, Callout, ChoiceGrid, Divider, Hint, SectionLabel, TextArea, ValueField } from "widgets.slint";
-import { CaptureBox, FormRow } from "controls.slint";
+import { CaptureBox, FormRow, KeyPicker } from "controls.slint";
 
 component MacroHeader inherits Rectangle {
     background: Theme.window-bg;
@@ -182,6 +182,7 @@ component StepInspector inherits Rectangle {
             }
             Divider { }
             if Store.step-kind <= 2: CaptureBox { target: "step"; value: Store.step-key; }
+            if Store.step-kind <= 2: KeyPicker { target: "step"; }
             if Store.step-kind >= 3 && Store.step-kind <= 5: ChoiceGrid {
                 items: Store.mouse-names;
                 current: Store.step-mouse;

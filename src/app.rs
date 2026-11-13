@@ -159,6 +159,9 @@ struct State {
     /// (Next field: waiting for a controller press to select it.)
     adding_device: bool,
     detecting: bool,
+    /// Capture target whose "Choose from a list" key picker is open ("" none), and its group.
+    picker_target: String,
+    picker_group: usize,
     /// Selected input id (`key:A`, `mouse:back`, a combo like
     /// `ctrl+mouse:back`) or empty.
     input: String,
@@ -373,6 +376,7 @@ pub struct Options {
 pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     system::stop_raw_keyboard_input();
+    repaint_fully_on_activation(&ui);
     let cfg = Config::load();
     ui.global::<Theme>().set_dark(cfg.theme == ThemeMode::Dark);
 
@@ -394,6 +398,8 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
             device: 0,
             adding_device: false,
             detecting: false,
+            picker_target: String::new(),
+            picker_group: 0,
             input: String::new(),
             slot: 0,
             pending_kind: None,
@@ -543,6 +549,28 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
 
 /// Centre the window in the work area, shrinking it if the screen is small.
 /// (The default position can push the bottom off screen at high scaling.)
+/// Repaint the whole window when it's activated, deactivated, uncovered or
+/// shown. The software renderer only redraws what changed in the UI, so a
+/// region Windows wants repainted (after alt-tab, or the first show from the
+/// tray) could otherwise stay unpainted and show what's behind the window.
+/// See `repaint-tick` in ui/app.slint.
+fn repaint_fully_on_activation(ui: &AppWindow) {
+    use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+    let weak = ui.as_weak();
+    ui.window().on_winit_window_event(move |_, event| {
+        if matches!(
+            event,
+            WindowEvent::Focused(_) | WindowEvent::Occluded(false) | WindowEvent::ThemeChanged(_)
+        ) {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_repaint_tick(!ui.get_repaint_tick());
+                ui.window().request_redraw();
+            }
+        }
+        EventResult::Propagate
+    });
+}
+
 fn center_window(ui: &AppWindow) {
     let Some((x, y, w, h)) = system::work_area() else {
         return;
@@ -821,6 +849,73 @@ fn short_pad_label(b: PadButton, style: PadLabels) -> String {
     s.to_string()
 }
 
+/// Groups of the "Choose from a list" key picker.
+const PICKER_GROUPS: [&str; 9] = [
+    "Letters",
+    "Numbers",
+    "F1–F24",
+    "Modifiers",
+    "Editing",
+    "Navigation",
+    "Symbols",
+    "Number pad",
+    "Media",
+];
+
+/// Which picker group a key is listed under.
+fn picker_group_of(k: &keys::KeyDef) -> usize {
+    if k.group == keys::Group::Numpad {
+        return 7;
+    }
+    match k.vk {
+        0x41..=0x5A => 0,
+        0x30..=0x39 => 1,
+        0x70..=0x87 => 2,
+        0x14 | 0x5D => 3,
+        _ if keys::modifier_of(k.vk).is_some() => 3,
+        0x21..=0x28 => 5,
+        0xBA..=0xC0 | 0xDB..=0xDF | 0xE2 => 6,
+        _ if keys::MEDIA.contains(&k.id) || (0xA6..=0xB7).contains(&k.vk) => 8,
+        _ => 4,
+    }
+}
+
+/// Keys of a picker group: letters A-Z and digits 0-9 in order, the rest
+/// in keyboard order.
+fn picker_keys(group: usize) -> Vec<&'static keys::KeyDef> {
+    let mut list: Vec<_> = keys::KEYS.iter().filter(|k| picker_group_of(k) == group).collect();
+    if group <= 1 {
+        list.sort_by_key(|k| k.vk);
+    }
+    list
+}
+
+/// The key a capture target holds now (`binding`, `turbo`, `step`, `combo`).
+fn picker_current(st: &State, target: &str) -> Option<String> {
+    match target {
+        "binding" => match st.action() {
+            Some(Action::Key { key, .. }) => Some(key.clone()),
+            _ => None,
+        },
+        "turbo" => match st.action() {
+            Some(Action::Turbo {
+                output: Output::Key { key, .. },
+                ..
+            }) => Some(key.clone()),
+            _ => None,
+        },
+        "step" => st
+            .macro_idx
+            .and_then(|m| st.cfg.macros.get(m))
+            .and_then(|m| st.step.and_then(|i| m.steps.get(i)))
+            .and_then(|s| step_key(s).map(str::to_string)),
+        "combo" => {
+            Combo::parse(&st.input).and_then(|c| c.held.iter().find_map(|h| h.strip_prefix("key:").map(str::to_string)))
+        }
+        _ => None,
+    }
+}
+
 /// The recognisable part of a device id, for the device list:
 /// "VID_046D PID_C539", "slot 1", "046d:c539".
 fn device_id_summary(id: &str) -> String {
@@ -1078,6 +1173,14 @@ impl App {
         let _ = ui.show();
         ui.window().set_minimized(false);
         self.st.borrow_mut().window_visible = true;
+        // Paint everything once the window is really on screen.
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(80), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_repaint_tick(!ui.get_repaint_tick());
+                ui.window().request_redraw();
+            }
+        });
         if !self.centred.replace(true) {
             // The real size is only known once the window exists.
             let weak = ui.as_weak();
@@ -1909,7 +2012,7 @@ impl App {
         ));
         let (stick_items, stick_current) = if st.profile == 0 {
             (
-                vec!["Off", "Left stick", "Right stick"],
+                vec!["Off", "Left", "Right"],
                 match profile.stick_pointer.unwrap_or_default() {
                     StickPointer::Off => 0,
                     StickPointer::Left => 1,
@@ -1918,7 +2021,7 @@ impl App {
             )
         } else {
             (
-                vec!["Same as Default", "Off", "Left stick", "Right stick"],
+                vec!["As Default", "Off", "Left", "Right"],
                 match profile.stick_pointer {
                     None => 0,
                     Some(StickPointer::Off) => 1,
@@ -1936,7 +2039,7 @@ impl App {
                 (vec!["Off".into(), "On".into()], own.unwrap_or(false) as i32)
             } else {
                 (
-                    vec!["Same as Default".into(), "Off".into(), "On".into()],
+                    vec!["As Default".into(), "Off".into(), "On".into()],
                     match own {
                         None => 0,
                         Some(false) => 1,
@@ -2271,6 +2374,31 @@ impl App {
         });
 
         s.set_capturing(st.capturing.clone().into());
+
+        // Key picker ("Choose from a list")
+        s.set_picker_target(st.picker_target.clone().into());
+        if !st.picker_target.is_empty() {
+            let group = st.picker_group.min(PICKER_GROUPS.len() - 1);
+            let list = picker_keys(group);
+            let current = picker_current(&st, &st.picker_target);
+            s.set_picker_groups(model(PICKER_GROUPS.iter().map(|g| SharedString::from(*g)).collect()));
+            s.set_picker_group(group as i32);
+            s.set_picker_keys(model(
+                list.iter()
+                    .map(|k| SharedString::from(keys::display_name(k.id)))
+                    .collect(),
+            ));
+            s.set_picker_current(
+                current
+                    .and_then(|c| list.iter().position(|k| k.id == c))
+                    .map_or(-1, |i| i as i32),
+            );
+            s.set_picker_columns(match group {
+                0..=2 => 4,
+                8 => 2,
+                _ => 3,
+            });
+        }
 
         // Macro editor
         let m = st.macro_idx.and_then(|i| cfg.macros.get(i));
@@ -2624,6 +2752,51 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         }
     });
     on!(on_add_device, | | app |a: &Rc<App>| a.toggle_add_device());
+    {
+        let a = app.clone();
+        s.on_toggle_picker(move |target| {
+            a.cancel_capture();
+            a.nav(|_, st| {
+                if st.picker_target == target.as_str() {
+                    st.picker_target.clear();
+                } else {
+                    // Open on the group of the key chosen now.
+                    st.picker_group = picker_current(st, &target)
+                        .and_then(|k| keys::find(&k).map(picker_group_of))
+                        .unwrap_or(0);
+                    st.picker_target = target.to_string();
+                }
+            });
+        });
+    }
+    on!(on_pick_group, |i| nav |st: &mut State| st.picker_group = (i.max(0) as usize).min(PICKER_GROUPS.len() - 1));
+    {
+        let a = app.clone();
+        s.on_pick_key(move |target, i| {
+            let (key, mods) = {
+                let st = a.st.borrow();
+                let Some(k) = picker_keys(st.picker_group).get(i.max(0) as usize).map(|k| k.id) else {
+                    return;
+                };
+                // Keep the modifiers already chosen for this key.
+                let mods = match (target.as_str(), st.action()) {
+                    ("binding", Some(Action::Key { mods, .. })) => Modifier::to_bits(mods),
+                    (
+                        "turbo",
+                        Some(Action::Turbo {
+                            output: Output::Key { mods, .. },
+                            ..
+                        }),
+                    ) => Modifier::to_bits(mods),
+                    _ => 0,
+                };
+                (k, mods)
+            };
+            a.cancel_capture();
+            a.st.borrow_mut().capturing = target.to_string();
+            a.captured(key, mods);
+        });
+    }
     {
         let a = app.clone();
         s.on_detect_pad(move || {

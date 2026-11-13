@@ -75,7 +75,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 | Action | Effect |
 | --- | --- |
 | **Default** | No binding in this profile/layer: passes through, or inherits |
-| **Key** | Sends a key or combo. Click the box and press it (Ctrl + C, Alt + Tab, Win…), or use the Ctrl/Shift/Alt/Win toggles and the *Common shortcuts* presets. Held as long as the input is held. |
+| **Key** | Sends a key or combo. Click the box and press it (Ctrl + C, Alt + Tab, Win…), or click **Choose from a list** and pick the key with the mouse (handy when a key is broken or missing), then add Ctrl / Shift / Alt / Win with the toggles; or use the *Common shortcuts* presets. Held as long as the input is held. |
 | **Mouse** | Sends a mouse button, a scroll step or a horizontal scroll step |
 | **Macro** | Plays a macro: once, repeat, while held or toggle. See [Macros & turbo](macros.md). |
 | **Turbo** | Repeats a key or button with your timing, while held or toggled. See [Macros & turbo](macros.md#turbo). |

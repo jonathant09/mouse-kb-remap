@@ -2,6 +2,7 @@
 
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
+import { Button, ChoiceGrid } from "widgets.slint";
 
 // Click, then press a key or combo. While waiting, the engine swallows the
 // next key press and reports it (so Win, Alt+Tab, PrintScreen etc. work).
@@ -95,5 +96,35 @@ export component FormRow inherits HorizontalLayout {
     HorizontalLayout {
         width: root.field-width;
         @children
+    }
+}
+
+// "Choose from a list": pick a key with the mouse instead of pressing it
+// (a broken key, a key the keyboard doesn't have, no keyboard at hand).
+export component KeyPicker inherits VerticalLayout {
+    in property <string> target;   // same targets as CaptureBox
+    property <bool> open: Store.picker-target == root.target;
+    spacing: 6px;
+
+    HorizontalLayout {
+        alignment: start;
+        Button {
+            text: root.open ? "Hide the key list" : "Choose from a list";
+            compact: true;
+            clicked => { Store.toggle-picker(root.target); }
+        }
+    }
+    if root.open: ChoiceGrid {
+        columns: 3;
+        cell-height: 24px;
+        items: Store.picker-groups;
+        current: Store.picker-group;
+        selected(i) => { Store.pick-group(i); }
+    }
+    if root.open: ChoiceGrid {
+        columns: Store.picker-columns;
+        items: Store.picker-keys;
+        current: Store.picker-current;
+        selected(i) => { Store.pick-key(root.target, i); }
     }
 }

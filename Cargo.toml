@@ -11,7 +11,7 @@ repository = "https://github.com/jonathant09/mouse-kb-remap"
 # The CPU (software) renderer keeps memory use low: no GPU/OpenGL context for a
 # settings window that is open a few minutes at a time. Build with
 # `--features gpu` to try the OpenGL renderer instead.
-slint = { version = "1.18", default-features = false, features = [
+slint = { version = "~1.18", default-features = false, features = [
     "std",
     "compat-1-2",
     "backend-winit",
@@ -20,6 +20,8 @@ slint = { version = "1.18", default-features = false, features = [
     "software-renderer-systemfonts",
     "accessibility",
     "system-tray",
+    # Window event hook for the repaint fix in app.rs (unstable API: hence ~1.18).
+    "unstable-winit-030",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

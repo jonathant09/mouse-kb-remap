@@ -197,6 +197,15 @@ ui/
 - [ ] Try controllers with real hardware; the original Steam Controller (2015) and Switch 2
       controllers; hide remapped controller buttons from games (needs
       a virtual controller driver such as ViGEmBus)
+- [ ] **Controller output** (planned): a virtual Xbox controller, so a key, mouse button or
+      controller button can send controller buttons, sticks and triggers (keyboard and mouse →
+      controller, controller → controller), and remapped controller buttons can be hidden from
+      games. Windows needs the ViGEmBus driver for this. Plan: off unless used; when a binding
+      needs it and the driver is missing, the app offers *Install controller driver*, downloads
+      the official signed installer, checks it against a checksum built into the app, and runs
+      it after Windows' admin prompt (never silently). Caveats to state in the app: ViGEmBus is
+      no longer actively developed (check its status before building on it), and some
+      anti-cheats distrust virtual controllers.
 - [ ] Bindings for one keyboard on Windows (needs a filter driver such as Interception, which
       anti-cheats often block)
 - [ ] Linux: try on real hardware, Wayland focus tracking (per compositor)

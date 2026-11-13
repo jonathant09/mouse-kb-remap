@@ -105,6 +105,8 @@ component ProfileHeader inherits Rectangle {
 }
 
 component Canvas inherits Rectangle {
+    // Where the controller tools start (below the layer banner and device choice).
+    property <length> pad-tools-y: 12px + (Store.layer != 0 ? 36px : 0) + (Store.device-names.length > 1 ? 36px : 0);
     background: Theme.window-bg;
     clip: true;
 
@@ -147,9 +149,10 @@ component Canvas inherits Rectangle {
     }
     if Store.device-note == "" && Store.device-tab == 2: ControllerDiagram {
         width: parent.width;
-        height: parent.height - 30px;
+        height: parent.height;
         buttons: Store.pad-buttons;
         glyphs: Store.pad-glyphs;
+        top-inset: root.pad-tools-y + 3 * 28px + 2 * 6px + 6px;
         selected: Store.selected-input;
         select(id) => { Store.select-input(id); }
     }
@@ -172,15 +175,15 @@ component Canvas inherits Rectangle {
     // Controller tools (below the layer banner and device choice, if shown)
     if Store.device-tab == 2: VerticalLayout {
         x: parent.width - self.width - 16px;
-        y: 12px + (Store.layer != 0 ? 36px : 0) + (Store.device-names.length > 1 ? 36px : 0);
+        y: root.pad-tools-y;
         width: self.preferred-width;
         height: self.preferred-height;
         spacing: 6px;
         HorizontalLayout {
             alignment: end;
             height: 28px;
-            spacing: 10px;
-            Text { text: "Stick moves pointer"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            spacing: 8px;
+            Text { text: "Stick pointer"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             Segmented {
                 items: Store.stick-items;
                 current: Store.stick-current;
@@ -188,7 +191,7 @@ component Canvas inherits Rectangle {
             }
             Text { text: "Speed"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             ValueField {
-                width: 54px;
+                width: 46px;
                 value: Store.stick-speed;
                 committed(v) => { Store.set-stick-speed(v); }
             }
@@ -196,7 +199,7 @@ component Canvas inherits Rectangle {
         HorizontalLayout {
             alignment: end;
             height: 28px;
-            spacing: 10px;
+            spacing: 8px;
             Text { text: "Gyro"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             Segmented {
                 items: Store.gyro-items;
@@ -209,6 +212,10 @@ component Canvas inherits Rectangle {
                 current: Store.touch-current;
                 selected(i) => { Store.set-touch(i); }
             }
+        }
+        HorizontalLayout {
+            alignment: end;
+            height: 28px;
             Button {
                 text: Store.pad-detecting ? "Press a button…" : "Detect button";
                 primary: Store.pad-detecting;
@@ -285,7 +292,7 @@ component Canvas inherits Rectangle {
             vertical-alignment: center;
         }
         if Store.device-tab == 2: Text {
-            text: "Games still see the controller's own buttons: remap ones the game doesn't use, or use the controller in other apps.";
+            text: "Games still see the controller's own buttons.";
             font-size: Theme.font-xs;
             color: Theme.text-faint;
             vertical-alignment: center;

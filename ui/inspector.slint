@@ -3,13 +3,14 @@
 import { Theme } from "theme.slint";
 import { Store, BindingRow } from "store.slint";
 import { Button, Callout, ChoiceGrid, Divider, Hint, SectionLabel, Segmented, TextArea, ValueField } from "widgets.slint";
-import { CaptureBox, FormRow, ModifierChips } from "controls.slint";
+import { CaptureBox, FormRow, KeyPicker, ModifierChips } from "controls.slint";
 
 component KeyEditor inherits VerticalLayout {
     spacing: 8px;
-    Hint { text: "Click the box, then press the key or combo to send (Ctrl + C, Alt + Tab…). Held for as long as the input is held."; }
+    Hint { text: "Click the box and press the key or combo to send (Ctrl + C, Alt + Tab…), or choose the key from the list and add Ctrl, Shift, Alt or Win with the buttons. Held for as long as the input is held."; }
     CaptureBox { target: "binding"; value: Store.key-value; }
     ModifierChips { target: "binding"; mods: Store.key-mods; }
+    KeyPicker { target: "binding"; }
     Rectangle { height: 2px; }
     SectionLabel { text: "COMMON SHORTCUTS"; }
     ChoiceGrid {
@@ -75,6 +76,7 @@ component TurboEditor inherits VerticalLayout {
     }
     if !Store.turbo-is-mouse: CaptureBox { target: "turbo"; value: Store.turbo-key; }
     if !Store.turbo-is-mouse: ModifierChips { target: "turbo"; mods: Store.turbo-mods; }
+    if !Store.turbo-is-mouse: KeyPicker { target: "turbo"; }
     if Store.turbo-is-mouse: ChoiceGrid {
         columns: 3;
         items: Store.mouse-names;
@@ -287,6 +289,7 @@ component ComboEditor inherits VerticalLayout {
         selected(i) => { Store.set-combo-mouse(i); }
     }
     CaptureBox { target: "combo"; value: Store.combo-held-key; placeholder: "or a key: click, then press it"; }
+    KeyPicker { target: "combo"; }
     Text { text: "then press " + Store.combo-trigger; color: Theme.text-muted; font-size: Theme.font-sm; }
     Hint { text: "The keys and buttons you hold still reach the app. When the combo sends a key, held modifiers are let go while it's sent."; }
     HorizontalLayout {

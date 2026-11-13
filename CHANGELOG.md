@@ -28,6 +28,16 @@
   per keyboard too). Buttons with a binding for one device are held back for a fraction of a
   millisecond until Windows says which device sent them (measured 0.3 ms median), and sent
   on unchanged when they came from another one.
+- **Choose a key from a list.** Every "press a key" box (key bindings, turbo, combos, macro
+  steps) has *Choose from a list*: pick the key from groups (letters, numbers, F1–F24,
+  modifiers, number pad, media…) with the mouse, then add Ctrl, Shift, Alt or Win with the
+  buttons. No working keyboard needed.
+- **Fixed parts of the window showing what's behind it** after alt-tab or opening it from the
+  tray (until it was resized): the whole window is now repainted when it's activated,
+  deactivated, uncovered or shown.
+- The window opens at its smallest size (1080 × 660); maximize it for more room. The mouse
+  and controller views fit at that size: the controller lists move under the drawing and
+  scroll.
 - Crashes now leave a line in `mouse-kb-remap.log`.
 - Config format version 4 (older files load unchanged; 0.3 can't read a file that uses the new
   actions).

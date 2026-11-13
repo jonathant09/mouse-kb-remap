@@ -78,18 +78,32 @@ export component ControllerDiagram inherits Rectangle {
     // Short glyph per button for the drawing, in the chosen style ("×", "L1"…).
     in property <[string]> glyphs;
     in property <string> selected;
+    // Space taken at the top by the tools drawn over the canvas.
+    in property <length> top-inset: 100px;
+    // Space kept free at the bottom (the legend under the canvas).
+    in property <length> bottom-inset: 36px;
     callback select(string);
 
     property <length> cw: 170px;
     property <length> gap: 22px;
     property <length> row-h: 28px;
+    // Wide: lists either side of the drawing. Compact (small window): the
+    // drawing on top, the lists in two scrolling columns below it.
+    property <bool> wide: root.width >= 2 * (root.cw + root.gap) + 280px
+        && root.height - root.top-inset - root.bottom-inset >= 17 * root.row-h + 8px;
     // px per drawing unit (the controller is 300 x 200 units)
-    property <length> s: max(0.6px, min(1.2px, (root.width - 2 * (root.cw + root.gap) - 24px) / 300));
+    property <length> s: root.wide
+        ? max(0.6px, min(1.2px, (root.width - 2 * (root.cw + root.gap) - 24px) / 300))
+        : max(0.45px, min(0.9px, min((root.width - 32px) / 300, (root.height - root.top-inset - root.bottom-inset) * 0.38 / 200)));
     property <length> pw: 300 * root.s;
     property <length> ph: 200 * root.s;
     property <length> px: (root.width - root.pw) / 2;
-    property <length> list-top: max(100px, (root.height - 17 * root.row-h) / 2);
-    property <length> py: root.list-top + (17 * root.row-h - root.ph) / 2;
+    property <length> list-top: root.wide
+        ? max(root.top-inset, (root.height - root.bottom-inset - 17 * root.row-h) / 2)
+        : root.top-inset + root.ph + 18px;
+    property <length> py: root.wide
+        ? root.list-top + (17 * root.row-h - root.ph) / 2
+        : root.top-inset + 12px;
 
     property <[int]> left-list: [6, 4, 8, 25, 12, 13, 14, 15, 10, 16, 17, 18, 19, 28, 30, 32];
     property <[int]> right-list: [7, 5, 9, 24, 3, 2, 1, 0, 11, 20, 21, 22, 23, 29, 31, 26, 27];
@@ -220,20 +234,53 @@ export component ControllerDiagram inherits Rectangle {
     }
 
     // ---- lists ----------------------------------------------------------
-    for i[n] in root.left-list: PadCallout {
-        x: root.px - root.gap - root.cw;
-        y: root.list-top + n * root.row-h;
-        width: root.cw;
-        btn: root.buttons[i];
-        selected: root.is-sel(i);
-        clicked => { root.select(root.buttons[i].id); }
+    if root.wide: Rectangle {
+        for i[n] in root.left-list: PadCallout {
+            x: root.px - root.gap - root.cw;
+            y: root.list-top + n * root.row-h;
+            width: root.cw;
+            btn: root.buttons[i];
+            selected: root.is-sel(i);
+            clicked => { root.select(root.buttons[i].id); }
+        }
+        for i[n] in root.right-list: PadCallout {
+            x: root.px + root.pw + root.gap;
+            y: root.list-top + n * root.row-h;
+            width: root.cw;
+            btn: root.buttons[i];
+            selected: root.is-sel(i);
+            clicked => { root.select(root.buttons[i].id); }
+        }
     }
-    for i[n] in root.right-list: PadCallout {
-        x: root.px + root.pw + root.gap;
-        y: root.list-top + n * root.row-h;
-        width: root.cw;
-        btn: root.buttons[i];
-        selected: root.is-sel(i);
-        clicked => { root.select(root.buttons[i].id); }
+    if !root.wide: Rectangle {
+        x: 12px;
+        y: root.list-top;
+        width: root.width - 24px;
+        height: root.height - root.list-top - root.bottom-inset;
+        clip: true;
+        Flickable {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
+            content-height: 17 * root.row-h;
+            property <length> col-w: (self.width - 8px) / 2;
+            for i[n] in root.left-list: PadCallout {
+                x: 0;
+                y: n * root.row-h;
+                width: parent.col-w;
+                btn: root.buttons[i];
+                selected: root.is-sel(i);
+                clicked => { root.select(root.buttons[i].id); }
+            }
+            for i[n] in root.right-list: PadCallout {
+                x: parent.col-w + 8px;
+                y: n * root.row-h;
+                width: parent.col-w;
+                btn: root.buttons[i];
+                selected: root.is-sel(i);
+                clicked => { root.select(root.buttons[i].id); }
+            }
+        }
     }
 }

@@ -74,8 +74,9 @@ export component MouseDiagram inherits Rectangle {
     property <length> mh: 340 * root.s;
     property <length> mx: (root.width - root.mw) / 2;
     property <length> my: max(28px, (root.height - root.mh) / 2);
-    property <length> gap: 44px;
-    property <length> cw: 150px;
+    // Callouts narrow (down to 110px) and move closer when the canvas is small.
+    property <length> cw: max(110px, min(150px, (root.width - root.mw - 2 * 24px - 16px) / 2));
+    property <length> gap: max(12px, min(44px, (root.width - root.mw - 2 * root.cw) / 2 - 8px));
 
     property <[CalloutSpec]> specs: [
         { idx: 0, right: false, cy: 40, tx: 55, ty: 72, line: true },
@@ -312,6 +313,7 @@ export component MouseDiagram inherits Rectangle {
     // ---- callouts -------------------------------------------------------------
     for spec in root.specs: Callout {
         x: spec.right ? root.mx + root.mw + root.gap : root.mx - root.gap - root.cw;
+        width: root.cw;
         y: root.my + spec.cy * root.s - self.height / 2;
         btn: root.buttons[spec.idx];
         selected: root.is-sel(spec.idx);

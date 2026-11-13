@@ -146,6 +146,13 @@ export global Store {
 
     // Which capture box is waiting for a key ("" when none).
     in property <string> capturing;
+    // "Choose from a list": the capture target whose key list is open ("" none).
+    in property <string> picker-target;
+    in property <[string]> picker-groups;
+    in property <int> picker-group;
+    in property <[string]> picker-keys;    // keys of the group shown
+    in property <int> picker-current: -1;  // the key chosen now, if in this group
+    in property <int> picker-columns: 3;
 
     // ---- macro editor ----------------------------------------------------------
     in property <string> macro-name;
@@ -248,6 +255,9 @@ export global Store {
     callback set-combo-mouse(int);
     callback start-capture(string);        // "binding", "turbo", "step", "detect", "combo", "hotkey0"…
     callback cancel-capture();
+    callback toggle-picker(string);        // open / close the key list of a capture target
+    callback pick-group(int);
+    callback pick-key(string, int);        // target, index into picker-keys
     callback ui-key(string, bool, int);    // window capture: key text, released, modifier bits
     callback toggle-mod(string, int);      // target ("binding"/"turbo"/"combo"), bit
     callback set-shortcut(int);

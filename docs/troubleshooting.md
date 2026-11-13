@@ -192,6 +192,12 @@ Release builds aren't code-signed yet, so the first launch may show *"Windows pr
 your PC"*. Click **More info → Run anyway**. You can also build from source
 ([Getting started](getting-started.md#option-b-build-from-source)) and run your own exe.
 
+## Parts of the window show what's behind it
+
+Fixed in 0.4.0: the window is repainted completely when it's activated, deactivated,
+uncovered or opened from the tray. If it still happens, resizing the window repaints it;
+please report what you did just before (and whether the app runs as administrator).
+
 ## My settings disappeared
 
 If `config.json` can't be parsed (usually a hand-edit typo), the app starts with defaults

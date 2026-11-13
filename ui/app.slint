@@ -121,12 +121,28 @@ component StatusBar inherits Rectangle {
 export component AppWindow inherits Window {
     title: "mouse-kb-remap";
     icon: @image-url("../assets/icon-64.png");
-    preferred-width: 1220px;
-    preferred-height: 760px;
+    // Opens at the smallest size everything fits in; maximize for more room.
+    preferred-width: 1080px;
+    preferred-height: 660px;
     min-width: 1080px;
     min-height: 660px;
     background: Theme.window-bg;
     default-font-size: 12px;
+
+    // Flipped by app.rs when the window is activated, deactivated or shown
+    // again: changing this full-window layer makes the (partial) software
+    // renderer repaint every pixel. Windows can ask for a repaint of a region
+    // that nothing in the UI changed (after alt-tab, or showing the window
+    // from the tray); without this it would stay unpainted and show what's
+    // behind the window. The colors differ by an invisible amount.
+    in property <bool> repaint-tick;
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: root.repaint-tick ? #00000001 : #00000000;
+    }
 
     // Window-level keys. While a capture box waits for a key, keys go to it
     // (the engine normally captures them in its input hook first and

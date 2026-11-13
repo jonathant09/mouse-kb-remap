@@ -295,6 +295,10 @@ as one.
 - Mouse and controller buttons are passed as fixed-order arrays (`MOUSE_ORDER` and
   `PadButton::ALL` in Rust, the comments in `mouse.slint` and `controller.slint`). Keep them
   in sync if you add a button.
+- The window repaints completely on activation, deactivation, uncovering and showing
+  (`repaint_fully_on_activation` in `app.rs` flips `repaint-tick` in `app.slint`): the software
+  renderer otherwise only paints what changed, and a region Windows asked to repaint could stay
+  unpainted and see-through.
 - Views get an explicit `max-width` in `app.slint`: without it, a view whose content has a
   bounded width would shrink the window.
 
