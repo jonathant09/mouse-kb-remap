@@ -222,6 +222,22 @@ component TapHoldEditor inherits VerticalLayout {
     Hint { text: "With a double-tap action, a single tap is sent once the double-tap time has passed."; }
 }
 
+component GestureEditor inherits VerticalLayout {
+    spacing: 8px;
+    Hint { text: "Hold this button, move the mouse in a direction and let go. Letting go without moving is a normal click (or whatever you set below)."; }
+    TapHoldPart { label: "↑ Up"; value: Store.gesture-parts[1]; slot: 2; }
+    TapHoldPart { label: "↓ Down"; value: Store.gesture-parts[2]; slot: 3; }
+    TapHoldPart { label: "← Left"; value: Store.gesture-parts[3]; slot: 4; }
+    TapHoldPart { label: "→ Right"; value: Store.gesture-parts[4]; slot: 5; }
+    TapHoldPart { label: "No move"; value: Store.gesture-parts[0]; slot: 1; }
+    Rectangle { height: 2px; }
+    FormRow {
+        label: "Move at least";
+        ValueField { value: Store.gesture-distance; suffix: "px"; committed(v) => { Store.set-gesture-distance(v); } }
+    }
+    Hint { text: "Gestures follow the pointer, so they don't work in games that hold the pointer in place."; }
+}
+
 component LayerEditor inherits VerticalLayout {
     spacing: 8px;
     SectionLabel { text: "LAYER"; }
@@ -417,7 +433,7 @@ export component Inspector inherits Rectangle {
                     Divider { }
                     if Store.slot != 0: HorizontalLayout {
                         spacing: 8px;
-                        Button { text: "← Tap / hold"; compact: true; clicked => { Store.edit-slot(0); } }
+                        Button { text: Store.slot-back; compact: true; clicked => { Store.edit-slot(0); } }
                         Text {
                             text: Store.slot-title;
                             color: Theme.text-strong;
@@ -469,7 +485,8 @@ export component Inspector inherits Rectangle {
                     if Store.selected-kind == 9: SensitivityEditor { }
                     if Store.selected-kind == 10: TapHoldEditor { }
                     if Store.selected-kind == 11: SystemEditor { }
-                    if Store.selected-kind == 12: Hint { text: "This input is blocked while the profile is active."; }
+                    if Store.selected-kind == 12: GestureEditor { }
+                    if Store.selected-kind == 13: Hint { text: "This input is blocked while the profile is active."; }
 
                     if !Store.selected-is-combo && Store.slot == 0: VerticalLayout {
                         spacing: 10px;

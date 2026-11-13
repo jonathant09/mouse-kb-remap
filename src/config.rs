@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 /// Current on-disk format. v2 added macros, turbo, combos and the shift layer;
 /// v3 added layers 2-3, tap / hold, combos as triggers, system actions,
-/// hotkeys and app rules. Older files load unchanged.
-pub const CONFIG_VERSION: u32 = 3;
+/// hotkeys and app rules; v4 added controllers, gestures and per-device
+/// bindings. Older files load unchanged.
+pub const CONFIG_VERSION: u32 = 4;
 
 /// Binding layers per profile: base, shift (layer 1), layer 2, layer 3.
 pub const LAYER_COUNT: usize = 4;
@@ -118,6 +119,200 @@ impl MouseButton {
             MouseButton::WheelUp | MouseButton::WheelDown | MouseButton::WheelLeft | MouseButton::WheelRight
         )
     }
+}
+
+/// A game controller (gamepad) button, or a stick pushed in one direction,
+/// as an input. Xbox names; other controllers map to the same positions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PadButton {
+    A,
+    B,
+    X,
+    Y,
+    Lb,
+    Rb,
+    Lt,
+    Rt,
+    Back,
+    Start,
+    Ls,
+    Rs,
+    Up,
+    Down,
+    Left,
+    Right,
+    LsUp,
+    LsDown,
+    LsLeft,
+    LsRight,
+    RsUp,
+    RsDown,
+    RsLeft,
+    RsRight,
+}
+
+impl PadButton {
+    pub const ALL: [PadButton; 24] = [
+        PadButton::A,
+        PadButton::B,
+        PadButton::X,
+        PadButton::Y,
+        PadButton::Lb,
+        PadButton::Rb,
+        PadButton::Lt,
+        PadButton::Rt,
+        PadButton::Back,
+        PadButton::Start,
+        PadButton::Ls,
+        PadButton::Rs,
+        PadButton::Up,
+        PadButton::Down,
+        PadButton::Left,
+        PadButton::Right,
+        PadButton::LsUp,
+        PadButton::LsDown,
+        PadButton::LsLeft,
+        PadButton::LsRight,
+        PadButton::RsUp,
+        PadButton::RsDown,
+        PadButton::RsLeft,
+        PadButton::RsRight,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            PadButton::A => "a",
+            PadButton::B => "b",
+            PadButton::X => "x",
+            PadButton::Y => "y",
+            PadButton::Lb => "lb",
+            PadButton::Rb => "rb",
+            PadButton::Lt => "lt",
+            PadButton::Rt => "rt",
+            PadButton::Back => "back",
+            PadButton::Start => "start",
+            PadButton::Ls => "ls",
+            PadButton::Rs => "rs",
+            PadButton::Up => "up",
+            PadButton::Down => "down",
+            PadButton::Left => "left",
+            PadButton::Right => "right",
+            PadButton::LsUp => "ls_up",
+            PadButton::LsDown => "ls_down",
+            PadButton::LsLeft => "ls_left",
+            PadButton::LsRight => "ls_right",
+            PadButton::RsUp => "rs_up",
+            PadButton::RsDown => "rs_down",
+            PadButton::RsLeft => "rs_left",
+            PadButton::RsRight => "rs_right",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|b| b.id() == id)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PadButton::A => "A",
+            PadButton::B => "B",
+            PadButton::X => "X",
+            PadButton::Y => "Y",
+            PadButton::Lb => "Left bumper",
+            PadButton::Rb => "Right bumper",
+            PadButton::Lt => "Left trigger",
+            PadButton::Rt => "Right trigger",
+            PadButton::Back => "View / Back",
+            PadButton::Start => "Menu / Start",
+            PadButton::Ls => "Left stick click",
+            PadButton::Rs => "Right stick click",
+            PadButton::Up => "D-pad up",
+            PadButton::Down => "D-pad down",
+            PadButton::Left => "D-pad left",
+            PadButton::Right => "D-pad right",
+            PadButton::LsUp => "Left stick up",
+            PadButton::LsDown => "Left stick down",
+            PadButton::LsLeft => "Left stick left",
+            PadButton::LsRight => "Left stick right",
+            PadButton::RsUp => "Right stick up",
+            PadButton::RsDown => "Right stick down",
+            PadButton::RsLeft => "Right stick left",
+            PadButton::RsRight => "Right stick right",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            PadButton::Lt | PadButton::Rt => "Controller trigger (pressed past a third)",
+            PadButton::LsUp
+            | PadButton::LsDown
+            | PadButton::LsLeft
+            | PadButton::LsRight
+            | PadButton::RsUp
+            | PadButton::RsDown
+            | PadButton::RsLeft
+            | PadButton::RsRight => "Controller stick, pushed past half way",
+            _ => "Controller button",
+        }
+    }
+}
+
+/// Which controller stick moves the mouse pointer.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StickPointer {
+    #[default]
+    Off,
+    Left,
+    Right,
+}
+
+/// A mouse or controller the user named, for bindings that only apply to
+/// it (`mouse:back@Trackball`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    pub name: String,
+    /// How the backend recognises it: a Windows HID device path, `xinput:1`
+    /// for a controller slot, or `evdev:vendor:product:name` on Linux.
+    pub id: String,
+}
+
+impl Device {
+    /// Short description of what kind of device the id is.
+    pub fn kind(&self) -> &'static str {
+        if self.id.starts_with("xinput:") {
+            "Controller"
+        } else if self.id.starts_with("evdev:") {
+            "Input device"
+        } else if self.id == "injected" {
+            "Synthetic input (testing)"
+        } else {
+            "Mouse"
+        }
+    }
+
+    pub fn is_controller(&self) -> bool {
+        self.id.starts_with("xinput:")
+    }
+}
+
+/// Split a binding id into the input part and the device it is limited to:
+/// `mouse:back@Trackball` → (`mouse:back`, Some(`Trackball`)). For a combo
+/// the device belongs to the last input (the trigger).
+pub fn split_device(id: &str) -> (&str, Option<&str>) {
+    match id.split_once('@') {
+        Some((input, device)) if !device.is_empty() => (input, Some(device)),
+        _ => (id, None),
+    }
+}
+
+/// Characters a device name can't contain (they'd break binding ids).
+pub fn clean_device_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '@' | '+'))
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Modifier keys that can be combined with a key ("Ctrl + C").
@@ -254,6 +449,9 @@ fn d5() -> u32 {
 }
 fn d200() -> u32 {
     200
+}
+fn d40() -> u32 {
+    40
 }
 fn d250() -> u32 {
     250
@@ -401,51 +599,89 @@ pub enum Action {
     },
     /// Lock the PC, mute the microphone, move the focused window…
     System { command: SystemCommand },
+    /// Mouse gesture: hold the input, move the pointer in a direction and
+    /// let go. Letting go without moving does `tap`.
+    Gesture {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tap: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        up: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        down: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<Box<Action>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        right: Option<Box<Action>>,
+        /// Pixels the pointer has to move to count as a swipe.
+        #[serde(default = "d40")]
+        distance: u32,
+    },
 }
 
 impl Action {
-    /// The action in tap / hold slot `slot` (1 tap, 2 hold, 3 double).
+    /// The nested action in slot `slot` of a tap / hold (1 tap, 2 hold,
+    /// 3 double) or a gesture (1 click, 2 up, 3 down, 4 left, 5 right).
     pub fn slot(&self, slot: usize) -> Option<&Action> {
-        match self {
-            Action::TapHold { tap, hold, double, .. } => match slot {
-                1 => tap.as_deref(),
-                2 => hold.as_deref(),
-                3 => double.as_deref(),
-                _ => None,
-            },
-            _ => None,
-        }
+        self.slots().get(slot.wrapping_sub(1)).and_then(|s| s.as_deref())
     }
 
     pub fn slot_mut(&mut self, slot: usize) -> Option<&mut Option<Box<Action>>> {
-        match self {
-            Action::TapHold { tap, hold, double, .. } => match slot {
-                1 => Some(tap),
-                2 => Some(hold),
-                3 => Some(double),
-                _ => None,
-            },
-            _ => None,
+        let mut slots = self.slots_mut();
+        if slot == 0 || slot > slots.len() {
+            return None;
         }
+        Some(slots.swap_remove(slot - 1))
+    }
+
+    /// Nested action slots, in slot order (empty for plain actions).
+    fn slots(&self) -> Vec<&Option<Box<Action>>> {
+        match self {
+            Action::TapHold { tap, hold, double, .. } => vec![tap, hold, double],
+            Action::Gesture {
+                tap,
+                up,
+                down,
+                left,
+                right,
+                ..
+            } => vec![tap, up, down, left, right],
+            _ => vec![],
+        }
+    }
+
+    fn slots_mut(&mut self) -> Vec<&mut Option<Box<Action>>> {
+        match self {
+            Action::TapHold { tap, hold, double, .. } => vec![tap, hold, double],
+            Action::Gesture {
+                tap,
+                up,
+                down,
+                left,
+                right,
+                ..
+            } => vec![tap, up, down, left, right],
+            _ => vec![],
+        }
+    }
+
+    /// Whether this action holds other actions (tap / hold, gesture).
+    pub fn has_slots(&self) -> bool {
+        matches!(self, Action::TapHold { .. } | Action::Gesture { .. })
     }
 
     /// Call `f` on this action and every action nested in it.
     pub fn walk(&self, f: &mut impl FnMut(&Action)) {
         f(self);
-        if let Action::TapHold { tap, hold, double, .. } = self {
-            for a in [tap, hold, double].into_iter().flatten() {
-                a.walk(f);
-            }
+        for a in self.slots().into_iter().flatten() {
+            a.walk(f);
         }
     }
 
     /// Like `walk`, mutably.
     pub fn walk_mut(&mut self, f: &mut impl FnMut(&mut Action)) {
         f(self);
-        if let Action::TapHold { tap, hold, double, .. } = self {
-            for a in [tap, hold, double].into_iter().flatten() {
-                a.walk_mut(f);
-            }
+        for a in self.slots_mut().into_iter().flatten() {
+            a.walk_mut(f);
         }
     }
 
@@ -494,6 +730,29 @@ impl Action {
                 s
             }
             Action::System { command } => command.name().to_string(),
+            Action::Gesture {
+                tap,
+                up,
+                down,
+                left,
+                right,
+                ..
+            } => {
+                let mut parts = Vec::new();
+                for (arrow, a) in [("↑", up), ("↓", down), ("←", left), ("→", right)] {
+                    if let Some(a) = a {
+                        parts.push(format!("{arrow} {}", a.label()));
+                    }
+                }
+                if let Some(t) = tap {
+                    parts.push(format!("click {}", t.label()));
+                }
+                if parts.is_empty() {
+                    "Gesture (nothing set)".to_string()
+                } else {
+                    format!("Gesture: {}", parts.join(" · "))
+                }
+            }
         }
     }
 
@@ -533,6 +792,7 @@ impl Action {
             Action::Layer { layer, .. } => format!("L{layer}"),
             Action::TapHold { .. } => "T/H".to_string(),
             Action::System { .. } => "Sys".to_string(),
+            Action::Gesture { .. } => "Gst".to_string(),
         }
     }
 }
@@ -658,6 +918,10 @@ pub struct Profile {
     /// Layers 2 and 3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<BindingMap>,
+    /// Controller stick that moves the pointer. `None`: same as the Default
+    /// profile (off for Default itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stick_pointer: Option<StickPointer>,
 }
 
 impl Profile {
@@ -669,6 +933,7 @@ impl Profile {
             bindings: BTreeMap::new(),
             shift_bindings: BTreeMap::new(),
             layers: vec![],
+            stick_pointer: None,
         }
     }
 
@@ -939,6 +1204,16 @@ pub struct Config {
     /// Look for a new version at start and once a day. Off unless turned on.
     #[serde(default)]
     pub check_updates: bool,
+    /// Mice and controllers with names, for bindings limited to one device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<Device>,
+    /// Pointer speed when a controller stick moves it (1-20).
+    #[serde(default = "d10")]
+    pub stick_speed: u32,
+}
+
+fn d10() -> u32 {
+    10
 }
 
 fn default_version() -> u32 {
@@ -977,6 +1252,8 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             notifications: false,
             check_updates: false,
+            devices: vec![],
+            stick_speed: 10,
         }
     }
 }
@@ -1114,6 +1391,52 @@ impl Config {
             .map(|p| p.name.clone())
             .collect()
     }
+
+    /// Rename a device, or forget it (`new` = None) together with the
+    /// bindings limited to it. Returns how many bindings were changed.
+    pub fn retarget_device(&mut self, old: &str, new: Option<&str>) -> usize {
+        let mut changed = 0;
+        for p in &mut self.profiles {
+            for map in p.maps_mut() {
+                let ids: Vec<String> = map
+                    .keys()
+                    .filter(|id| split_device(id).1 == Some(old))
+                    .cloned()
+                    .collect();
+                for id in ids {
+                    let Some(action) = map.remove(&id) else { continue };
+                    changed += 1;
+                    if let Some(new) = new {
+                        map.insert(format!("{}@{new}", split_device(&id).0), action);
+                    }
+                }
+            }
+        }
+        if let Some(d) = self.devices.iter_mut().find(|d| d.name == old) {
+            match new {
+                Some(n) => d.name = n.to_string(),
+                None => d.name.clear(),
+            }
+        }
+        self.devices.retain(|d| !d.name.is_empty());
+        changed
+    }
+
+    /// A free device name based on `base`.
+    pub fn unique_device_name(&self, base: &str) -> String {
+        let base = clean_device_name(base);
+        let base = if base.is_empty() { "Device".to_string() } else { base };
+        unique_name(&base, |n| self.devices.iter().any(|d| d.name.eq_ignore_ascii_case(n)))
+    }
+
+    /// The stick that moves the pointer in profile `index`.
+    pub fn stick_pointer(&self, index: usize) -> StickPointer {
+        self.profiles
+            .get(index)
+            .and_then(|p| p.stick_pointer)
+            .or_else(|| self.profiles.first().and_then(|p| p.stick_pointer))
+            .unwrap_or_default()
+    }
 }
 
 pub fn unique_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
@@ -1219,6 +1542,72 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_bindings_follow_renames_and_removal() {
+        assert_eq!(split_device("mouse:back@Left one"), ("mouse:back", Some("Left one")));
+        assert_eq!(split_device("ctrl+mouse:back@Pad"), ("ctrl+mouse:back", Some("Pad")));
+        assert_eq!(split_device("mouse:back"), ("mouse:back", None));
+        assert_eq!(clean_device_name(" a@b+c "), "abc");
+
+        let mut cfg = Config::default();
+        cfg.devices.push(Device {
+            name: "Trackball".into(),
+            id: "x".into(),
+        });
+        let key = |k: &str| Action::Key {
+            key: k.into(),
+            mods: vec![],
+        };
+        cfg.profiles[0].bindings.insert("mouse:back@Trackball".into(), key("A"));
+        cfg.profiles[1]
+            .layer_mut(2)
+            .insert("ctrl+mouse:left@Trackball".into(), key("B"));
+        cfg.profiles[1].bindings.insert("mouse:left".into(), key("C"));
+        assert_eq!(cfg.retarget_device("Trackball", Some("Ball")), 2);
+        assert_eq!(cfg.devices[0].name, "Ball");
+        assert!(cfg.profiles[0].bindings.contains_key("mouse:back@Ball"));
+        assert!(cfg.profiles[1].layer(2).contains_key("ctrl+mouse:left@Ball"));
+        assert_eq!(cfg.unique_device_name("ball"), "ball (2)");
+        assert_eq!(cfg.retarget_device("Ball", None), 2);
+        assert!(cfg.devices.is_empty());
+        assert_eq!(cfg.profiles[1].binding_count(), 3); // its own two, plus mouse:left
+    }
+
+    #[test]
+    fn gestures_and_controller_settings_round_trip() {
+        let mut cfg = Config::default();
+        cfg.profiles[0].bindings.insert(
+            "mouse:right".into(),
+            Action::Gesture {
+                tap: Some(Box::new(Action::Mouse {
+                    button: MouseButton::Right,
+                })),
+                up: None,
+                down: Some(Box::new(Action::System {
+                    command: SystemCommand::MinimizeWindow,
+                })),
+                left: None,
+                right: None,
+                distance: 60,
+            },
+        );
+        cfg.profiles[1].stick_pointer = Some(StickPointer::Right);
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert!(text.contains(r#""type":"gesture""#) && text.contains(r#""stick_pointer":"right""#));
+        let back = Config::parse(&text).unwrap();
+        assert_eq!(back.profiles, cfg.profiles);
+        assert_eq!(back.stick_pointer(0), StickPointer::Off);
+        assert_eq!(back.stick_pointer(1), StickPointer::Right);
+        let g = &back.profiles[0].bindings["mouse:right"];
+        assert!(g.has_slots());
+        assert_eq!(g.slot(3).map(|a| a.label()), Some("Minimize window".to_string()));
+        assert!(g.label().starts_with("Gesture: ↓ Minimize window"));
+        // A gesture missing its distance gets the default.
+        let a: Action = serde_json::from_str(r#"{"type":"gesture"}"#).unwrap();
+        assert!(matches!(a, Action::Gesture { distance: 40, .. }));
+        assert_eq!(PadButton::from_id("rs_left"), Some(PadButton::RsLeft));
+    }
 
     #[test]
     fn v1_config_still_loads() {

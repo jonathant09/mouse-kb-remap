@@ -4,7 +4,10 @@
 //!   access), so the desktop only sees what we forward.
 //! * One thread per device reads its events: remapped inputs go through the
 //!   shared `Dispatcher`, everything else is passed through unchanged to a
-//!   virtual uinput device.
+//!   virtual uinput device. Since each device is read on its own, bindings
+//!   for one device (keyboards too) need nothing special here.
+//! * Game controllers are read but not grabbed (games keep seeing them),
+//!   and a ticker moves the pointer with a stick when a profile asks.
 //! * A hot-plug thread picks up devices connected later.
 //! * The focused app is tracked through X11 (`_NET_ACTIVE_WINDOW` +
 //!   `_NET_WM_PID`). Under Wayland only XWayland windows can be seen; when the
@@ -14,17 +17,18 @@
 //! (see docs/troubleshooting.md for the udev rule).
 
 use super::dispatch::{Ctx, Dispatcher, Phase, Sink};
+use super::pad::{self, PadReading};
 use super::player::{self, Cmd, Out};
 use super::{
-    pick_profile, AppCommand, Compiled, CompiledProfile, EngineEvent, FocusInfo, HotkeyBinding, Input, Layers,
-    RecEvent, WindowInfo,
+    match_device, pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo,
+    HotkeyBinding, Input, Layers, RecEvent, WindowInfo,
 };
-use crate::config::{MouseButton, SystemCommand};
+use crate::config::{MouseButton, StickPointer, SystemCommand};
 
 use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -196,9 +200,39 @@ fn code_to_button(code: u16) -> Option<MouseButton> {
     BUTTONS.iter().find(|(_, c)| *c == code).map(|(b, _)| *b)
 }
 
+/// Controller buttons (evdev code → `PadReading` bit). Codes as the xpad
+/// driver uses them; some drivers swap X and Y.
+const PAD_KEYS: &[(u16, u16)] = &[
+    (0x130, pad::PAD_A),     // BTN_SOUTH
+    (0x131, pad::PAD_B),     // BTN_EAST
+    (0x133, pad::PAD_X),     // BTN_X / BTN_NORTH
+    (0x134, pad::PAD_Y),     // BTN_Y / BTN_WEST
+    (0x136, pad::PAD_LB),    // BTN_TL
+    (0x137, pad::PAD_RB),    // BTN_TR
+    (0x13a, pad::PAD_BACK),  // BTN_SELECT
+    (0x13b, pad::PAD_START), // BTN_START
+    (0x13d, pad::PAD_LS),    // BTN_THUMBL
+    (0x13e, pad::PAD_RS),    // BTN_THUMBR
+    (0x220, pad::PAD_UP),    // BTN_DPAD_UP
+    (0x221, pad::PAD_DOWN),
+    (0x222, pad::PAD_LEFT),
+    (0x223, pad::PAD_RIGHT),
+];
+const BTN_TL2: u16 = 0x138;
+const BTN_TR2: u16 = 0x139;
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+const ABS_Z: u16 = 0x02;
+const ABS_RX: u16 = 0x03;
+const ABS_RY: u16 = 0x04;
+const ABS_RZ: u16 = 0x05;
+const ABS_HAT0X: u16 = 0x10;
+const ABS_HAT0Y: u16 = 0x11;
+
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const EV_ABS: u16 = 0x03;
 const SYN_REPORT: u16 = 0;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
@@ -242,6 +276,16 @@ struct Shared {
     /// Pointer speed while a sensitivity button is held (0 = normal).
     /// Applied by scaling relative motion we forward: a true DPI shift.
     sensitivity: AtomicU32,
+    /// Named devices, and a counter bumped when they change.
+    devices: RwLock<Vec<crate::config::Device>>,
+    devices_gen: AtomicU32,
+    device_capture: AtomicBool,
+    /// Sum of all relative mouse motion: where the pointer is, as far as
+    /// gestures need to know.
+    pointer: (AtomicI32, AtomicI32),
+    /// The last controller reading, for moving the pointer with a stick.
+    stick: Mutex<PadReading>,
+    stick_speed: AtomicU32,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -296,6 +340,12 @@ impl Engine {
             record: Mutex::new(None),
             rec_down: Mutex::new(Vec::new()),
             sensitivity: AtomicU32::new(0),
+            devices: RwLock::new(compiled.devices),
+            devices_gen: AtomicU32::new(0),
+            device_capture: AtomicBool::new(false),
+            pointer: (AtomicI32::new(0), AtomicI32::new(0)),
+            stick: Mutex::new(PadReading::default()),
+            stick_speed: AtomicU32::new(compiled.stick_speed),
         });
         recompute_active(&WindowInfo::default(), false);
 
@@ -307,6 +357,12 @@ impl Engine {
             .name("remap-ticker".into())
             .spawn(ticker)
             .expect("failed to spawn ticker thread");
+        if have_output {
+            std::thread::Builder::new()
+                .name("remap-stick".into())
+                .spawn(stick_thread)
+                .expect("failed to spawn stick thread");
+        }
         // Without an output device, grabbing would swallow all input.
         if have_output {
             std::thread::Builder::new()
@@ -335,7 +391,16 @@ impl Engine {
         if let Ok(mut h) = sh.hotkeys.write() {
             *h = Arc::new(compiled.hotkeys);
         }
+        if let Ok(mut d) = sh.devices.write() {
+            *d = compiled.devices;
+        }
+        sh.devices_gen.fetch_add(1, Ordering::SeqCst);
+        sh.stick_speed.store(compiled.stick_speed, Ordering::SeqCst);
         profile_changed_elsewhere();
+    }
+
+    pub fn capture_device(&self, on: bool) {
+        shared().device_capture.store(on, Ordering::SeqCst);
     }
 
     pub fn force_profile(&self, index: Option<usize>) {
@@ -415,34 +480,59 @@ fn build_virtual_device() -> std::io::Result<evdev::uinput::VirtualDevice> {
 // Devices
 // ---------------------------------------------------------------------------
 
-/// Keyboards and mice we should grab. Touchpads, tablets and joysticks
-/// (absolute axes) are left alone.
-fn wanted(dev: &Device) -> bool {
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    /// Keyboard or mouse: grabbed, events go through the dispatcher.
+    Grab,
+    /// Game controller: read only, games keep seeing it.
+    Pad,
+}
+
+/// What to do with a device. Keyboards and mice are grabbed; game
+/// controllers are read; touchpads, tablets and joysticks are left alone.
+fn wanted(dev: &Device) -> Option<Kind> {
     if dev.name() == Some(VIRTUAL_NAME) {
-        return false;
-    }
-    if dev.supported_absolute_axes().is_some_and(|a| a.iter().next().is_some()) {
-        return false;
+        return None;
     }
     let keys = dev.supported_keys();
+    if keys.is_some_and(|k| k.contains(KeyCode(0x130)) && k.contains(KeyCode(0x131))) {
+        return Some(Kind::Pad);
+    }
+    if dev.supported_absolute_axes().is_some_and(|a| a.iter().next().is_some()) {
+        return None;
+    }
     let keyboard = keys.is_some_and(|k| k.contains(KeyCode::KEY_A) && k.contains(KeyCode::KEY_SPACE));
     let mouse = keys.is_some_and(|k| k.contains(KeyCode::BTN_LEFT))
         && dev
             .supported_relative_axes()
             .is_some_and(|r| r.contains(RelativeAxisCode::REL_X));
-    keyboard || mouse
+    (keyboard || mouse).then_some(Kind::Grab)
+}
+
+/// `Device::id` for an evdev device: vendor, product and name.
+fn device_id(dev: &Device) -> String {
+    let id = dev.input_id();
+    format!(
+        "evdev:{:04x}:{:04x}:{}",
+        id.vendor(),
+        id.product(),
+        dev.name().unwrap_or("")
+    )
 }
 
 fn device_scanner() {
     let grabbed: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
     loop {
         for (path, mut dev) in evdev::enumerate() {
-            if grabbed.lock().map(|g| g.contains(&path)).unwrap_or(true) || !wanted(&dev) {
+            if grabbed.lock().map(|g| g.contains(&path)).unwrap_or(true) {
                 continue;
             }
-            if let Err(e) = dev.grab() {
-                crate::log!("engine: can't grab {}: {e}", path.display());
-                continue;
+            let Some(kind) = wanted(&dev) else { continue };
+            if kind == Kind::Grab {
+                if let Err(e) = dev.grab() {
+                    crate::log!("engine: can't grab {}: {e}", path.display());
+                    continue;
+                }
             }
             crate::log!("engine: using {} ({})", path.display(), dev.name().unwrap_or("?"));
             if let Ok(mut g) = grabbed.lock() {
@@ -450,7 +540,10 @@ fn device_scanner() {
             }
             let grabbed = grabbed.clone();
             std::thread::spawn(move || {
-                device_loop(dev);
+                match kind {
+                    Kind::Grab => device_loop(dev),
+                    Kind::Pad => pad_loop(dev),
+                }
                 // Unplugged (or failed): allow a re-grab when it comes back.
                 if let Ok(mut g) = grabbed.lock() {
                     g.remove(&path);
@@ -458,6 +551,47 @@ fn device_scanner() {
             });
         }
         std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// Which named device a device thread reads, kept up to date with the
+/// device list.
+struct DeviceMatch {
+    id: String,
+    name: String,
+    generation: u32,
+    index: Option<DeviceIndex>,
+}
+
+impl DeviceMatch {
+    fn new(dev: &Device) -> Self {
+        DeviceMatch {
+            id: device_id(dev),
+            name: dev.name().unwrap_or("Input device").to_string(),
+            generation: u32::MAX,
+            index: None,
+        }
+    }
+
+    fn index(&mut self) -> Option<DeviceIndex> {
+        let sh = shared();
+        let generation = sh.devices_gen.load(Ordering::SeqCst);
+        if generation != self.generation {
+            self.generation = generation;
+            self.index = sh.devices.read().ok().and_then(|d| match_device(&d, &self.id));
+        }
+        self.index
+    }
+
+    /// A press while a device is being added: report this one.
+    fn pressed(&self) {
+        let sh = shared();
+        if sh.device_capture.swap(false, Ordering::SeqCst) {
+            (sh.on_event)(EngineEvent::DeviceCaptured {
+                id: self.id.clone(),
+                name: self.name.clone(),
+            });
+        }
     }
 }
 
@@ -471,6 +605,8 @@ struct MotionScale {
 fn device_loop(mut dev: Device) {
     let mut batch: Vec<InputEvent> = Vec::new();
     let mut scale = MotionScale::default();
+    let mut device = DeviceMatch::new(&dev);
+    let sh = shared();
     loop {
         let events: Vec<InputEvent> = match dev.fetch_events() {
             Ok(it) => it.collect(),
@@ -489,9 +625,166 @@ fn device_loop(mut dev: Device) {
             if ty == EV_SYN {
                 continue;
             }
-            if !process_event(ty, code, value) {
+            if ty == EV_REL && code == REL_X {
+                sh.pointer.0.fetch_add(value, Ordering::Relaxed);
+            } else if ty == EV_REL && code == REL_Y {
+                sh.pointer.1.fetch_add(value, Ordering::Relaxed);
+            } else if ty == EV_KEY && value == 1 {
+                device.pressed();
+            }
+            if !process_event(ty, code, value, &mut device) {
                 batch.push(scale_motion(ev, &mut scale));
             }
+        }
+    }
+}
+
+/// Map an absolute axis value to -32767..32767 (or 0..255 for triggers).
+fn scale_axis(value: i32, min: i32, max: i32, trigger: bool) -> i32 {
+    let span = (max - min).max(1) as f32;
+    let t = (value - min) as f32 / span;
+    if trigger {
+        (t * 255.0).round().clamp(0.0, 255.0) as i32
+    } else {
+        ((t * 2.0 - 1.0) * 32767.0).round().clamp(-32767.0, 32767.0) as i32
+    }
+}
+
+/// A game controller: build up a reading from its events, and at each
+/// report turn the changes into inputs. Not grabbed, so nothing is
+/// swallowed: games keep seeing the controller.
+fn pad_loop(mut dev: Device) {
+    let mut ranges: Vec<(u16, i32, i32)> = Vec::new();
+    if let Ok(infos) = dev.get_absinfo() {
+        for (axis, info) in infos {
+            ranges.push((axis.0, info.minimum(), info.maximum()));
+        }
+    }
+    let range = |code: u16| {
+        ranges
+            .iter()
+            .find(|(c, _, _)| *c == code)
+            .map(|(_, a, b)| (*a, *b))
+            .unwrap_or((-32768, 32767))
+    };
+    let mut device = DeviceMatch::new(&dev);
+    let mut reading = PadReading::default();
+    let mut mask = 0u32;
+    let sh = shared();
+    loop {
+        let events: Vec<InputEvent> = match dev.fetch_events() {
+            Ok(it) => it.collect(),
+            Err(e) => {
+                crate::log!("engine: controller read failed: {e}");
+                // Unplugged: release whatever was held.
+                for (b, _) in pad::changes(mask, 0) {
+                    dispatch(Input::Pad(b), Phase::Up, device.index());
+                }
+                return;
+            }
+        };
+        for ev in events {
+            let (ty, code, value) = (ev.event_type().0, ev.code(), ev.value());
+            match ty {
+                EV_KEY => {
+                    if value == 1 {
+                        device.pressed();
+                    }
+                    if let Some((_, bit)) = PAD_KEYS.iter().find(|(c, _)| *c == code) {
+                        if value != 0 {
+                            reading.buttons |= bit;
+                        } else {
+                            reading.buttons &= !bit;
+                        }
+                    } else if code == BTN_TL2 {
+                        reading.lt = if value != 0 { 255 } else { 0 };
+                    } else if code == BTN_TR2 {
+                        reading.rt = if value != 0 { 255 } else { 0 };
+                    }
+                }
+                EV_ABS => {
+                    let (min, max) = range(code);
+                    match code {
+                        ABS_X => reading.lx = scale_axis(value, min, max, false) as i16,
+                        // evdev's y grows downwards; a reading's grows up.
+                        ABS_Y => reading.ly = -scale_axis(value, min, max, false) as i16,
+                        ABS_RX => reading.rx = scale_axis(value, min, max, false) as i16,
+                        ABS_RY => reading.ry = -scale_axis(value, min, max, false) as i16,
+                        ABS_Z => reading.lt = scale_axis(value, min, max, true) as u8,
+                        ABS_RZ => reading.rt = scale_axis(value, min, max, true) as u8,
+                        ABS_HAT0X | ABS_HAT0Y => {
+                            let (neg, pos) = if code == ABS_HAT0X {
+                                (pad::PAD_LEFT, pad::PAD_RIGHT)
+                            } else {
+                                (pad::PAD_UP, pad::PAD_DOWN)
+                            };
+                            reading.buttons &= !(neg | pos);
+                            if value < 0 {
+                                reading.buttons |= neg;
+                            } else if value > 0 {
+                                reading.buttons |= pos;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                EV_SYN if code == SYN_REPORT => {
+                    if let Ok(mut s) = sh.stick.lock() {
+                        *s = reading;
+                    }
+                    let next = pad::pad_mask(&reading, mask);
+                    for (b, down) in pad::changes(mask, next) {
+                        dispatch(
+                            Input::Pad(b),
+                            if down { Phase::Down } else { Phase::Up },
+                            device.index(),
+                        );
+                    }
+                    mask = next;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Moves the pointer with a controller stick while the profile asks for it.
+fn stick_thread() {
+    let sh = shared();
+    let mut rest = (0.0f32, 0.0f32);
+    let mut last = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(4));
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f32().min(0.05);
+        last = now;
+        let stick = sh
+            .active
+            .read()
+            .ok()
+            .and_then(|a| a.as_ref().map(|l| l.stick_pointer))
+            .unwrap_or_default();
+        if stick == StickPointer::Off || !sh.enabled.load(Ordering::Relaxed) {
+            continue;
+        }
+        let r = sh.stick.lock().map(|s| *s).unwrap_or_default();
+        let (x, y) = if stick == StickPointer::Left {
+            (r.lx, r.ly)
+        } else {
+            (r.rx, r.ry)
+        };
+        let (dx, dy) = pad::stick_move(x, y, sh.stick_speed.load(Ordering::Relaxed), dt, &mut rest);
+        if dx != 0 || dy != 0 {
+            let mut events = Vec::new();
+            out_to_events(
+                &Out::Move {
+                    x: dx,
+                    y: dy,
+                    absolute: false,
+                },
+                &mut events,
+            );
+            emit_raw(&events);
         }
     }
 }
@@ -514,7 +807,7 @@ fn scale_motion(ev: InputEvent, scale: &mut MotionScale) -> InputEvent {
 }
 
 /// Returns true if the event was consumed.
-fn process_event(ty: u16, code: u16, value: i32) -> bool {
+fn process_event(ty: u16, code: u16, value: i32, device: &mut DeviceMatch) -> bool {
     let sh = shared();
     let (input, phase) = match ty {
         EV_KEY => {
@@ -587,7 +880,12 @@ fn process_event(ty: u16, code: u16, value: i32) -> bool {
             });
         }
     }
+    dispatch(input, phase, device.index())
+}
 
+/// Run one input through the dispatcher. Returns true if it was consumed.
+fn dispatch(input: Input, phase: Phase, device: Option<DeviceIndex>) -> bool {
+    let sh = shared();
     let active = sh.active.read().ok().and_then(|a| a.clone());
     let hotkeys = sh.hotkeys.read().map(|h| h.clone()).unwrap_or_default();
     let ctx = Ctx {
@@ -595,6 +893,7 @@ fn process_event(ty: u16, code: u16, value: i32) -> bool {
         enabled: sh.enabled.load(Ordering::Relaxed),
         hotkeys: &hotkeys,
         now: Instant::now(),
+        device,
     };
     let mut sink = UinputSink { events: Vec::new(), sh };
     let mut d = sh.dispatch.lock().unwrap_or_else(|e| e.into_inner());
@@ -707,6 +1006,13 @@ impl Sink for UinputSink<'_> {
 
     fn notice(&mut self, text: String) {
         (self.sh.on_event)(EngineEvent::Notice(text));
+    }
+
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        Some((
+            self.sh.pointer.0.load(Ordering::Relaxed),
+            self.sh.pointer.1.load(Ordering::Relaxed),
+        ))
     }
 }
 

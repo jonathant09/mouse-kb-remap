@@ -7,8 +7,8 @@ The window has four areas:
 | Area | Purpose |
 | --- | --- |
 | **Sidebar** (left) | Profiles, macros, Settings and the theme switch |
-| **Header** (top) | Profile name, which apps activate it, Mouse / Keyboard, the binding layer (Base / Shift / Layer 2 / Layer 3) |
-| **Canvas** (center) | A generic mouse or keyboard. Click any button or key to select it. |
+| **Header** (top) | Profile name, which apps activate it, Mouse / Keyboard / Controller, the binding layer (Base / Shift / Layer 2 / Layer 3) |
+| **Canvas** (center) | A generic mouse, keyboard or game controller. Click any button or key to select it. Once you've named devices, *Bindings for* at its top picks whose bindings you see. |
 | **Inspector** (right) | What the selected input does, or a list of all bindings in the profile |
 
 A **status bar** along the bottom shows whether remapping is on, which app is focused and
@@ -68,7 +68,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 
 ## Remapping an input
 
-1. Choose **Mouse** or **Keyboard** in the header.
+1. Choose **Mouse**, **Keyboard** or **Controller** in the header.
 2. Click a button or key on the drawing (or its callout box).
 3. Pick an **Action** in the inspector. Changes save and apply immediately.
 
@@ -86,6 +86,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 | **Sensitivity** | Hold to change the pointer speed (a "sniper" / DPI-shift button) |
 | **Tap / hold** | One action on a quick press, another when held, optionally a third on a double tap ([Tap / hold](#tap--hold)) |
 | **System** | Lock the PC, mute the microphone, switch audio output, act on the focused window, switch profile ([System actions](#system-actions)) |
+| **Gesture** | Hold and move the mouse up, down, left or right, then let go: a different action per direction ([Gestures](#gestures)) |
 | **Off** | The input is swallowed and does nothing |
 
 Remapped inputs are outlined in the accent color. On the keyboard, the new key is printed in
@@ -168,6 +169,67 @@ The keys and buttons you hold still reach the app, so a combo whose action is a 
 with them held. When the action is a **Key**, the held modifiers are let go while it's sent,
 so *Ctrl + Back → F* arrives as F, not Ctrl + F.
 
+## Gestures
+
+**Gesture** turns a held button into five: hold it, move the mouse at least *Move at least*
+pixels (40 by default) in a direction, and let go.
+
+| Part | When |
+| --- | --- |
+| **↑ Up**, **↓ Down**, **← Left**, **→ Right** | Let go after moving mostly in that direction |
+| **No move** | Let go without moving that far |
+
+Click **Edit** next to a part to choose what it does (any action except a tap / hold or
+another gesture); **← Gesture** goes back. Choosing Gesture for a button keeps what it did
+as its *No move* part, so a gesture on the right button still right-clicks when you don't
+move. The button itself never reaches the app while it's a gesture; other buttons work as
+usual while you hold it.
+
+Gestures follow the pointer on screen, so they don't work in games that hold the pointer in
+the middle of the screen.
+
+## Controllers
+
+The **Controller** tab shows an Xbox-style controller. Every button, both triggers, the d-pad
+and each stick pushed up, down, left or right (past half way) can be remapped like a mouse
+button: to keys, mouse buttons, macros, layers, tap / hold and so on. Combos work too, e.g.
+*Ctrl + A*.
+
+**Pointer moves with** (top right) lets the left or right stick move the mouse pointer while
+this profile is active, faster the further you push it; **Speed** is 1–20. Other profiles
+use Default's choice unless they pick their own (*Same as Default*), so a game profile can
+turn it off.
+
+On Windows this works with controllers that use XInput: Xbox controllers and most PC
+gamepads (PlayStation controllers through DS4Windows or a similar tool). The app reads the
+controller only while the active profile uses it.
+
+Remapping can't hide a controller's buttons from games: a game that reads the controller
+still sees them. Remap buttons the game doesn't use, or use the controller to drive other
+apps (a media PC, a browser, a second screen while gaming).
+
+## Devices
+
+By default a binding applies to every mouse, keyboard and controller. To give one device
+its own bindings (a second mouse as a macro pad, a trackball that scrolls instead):
+
+1. In **Settings → Devices**, click **Add a device** and press a button or turn the wheel on
+   it. It's added with the name it reports; click the name to rename it.
+2. In a profile, pick it under **Bindings for** at the top of the canvas and bind its
+   buttons as usual. Labels then read *Back (Trackball)*.
+
+A device's own binding wins over the one for all devices (also over one inherited from
+Default); its unbound buttons do what they do on every device. Layers, combos (the device is
+the one the last button is pressed on), tap / hold and gestures all work per device.
+Removing a device removes its bindings too.
+
+On **Windows**, mice and controllers can have their own bindings, keyboards can't: Windows
+doesn't tell programs like this one which keyboard a key came from. (On Linux every device
+is read separately, so keyboards can.) A button that has a binding for one device is held
+back for a fraction of a millisecond (0.3 ms median in testing) until Windows says which
+mouse it came from; if it came from another one it is sent on unchanged, as a simulated
+click, which a few games ignore. Buttons without per-device bindings are never held back.
+
 ## System actions
 
 | Action | |
@@ -223,6 +285,7 @@ Starting the app a second time opens the running copy instead.
 | **Start with Windows** | *On* starts hidden in the tray at sign-in. *On, as administrator* does the same with admin rights (Task Scheduler, one admin prompt to set up), for games that run as admin. |
 | **Window** | Keep running in the tray when the window is closed |
 | **Hotkeys** | Keys that control the app itself ([below](#hotkeys)) |
+| **Devices** | Mice and controllers with names, for bindings of their own ([Devices](#devices)) |
 | **Notifications** | On-screen notifications, off unless you turn them on ([below](#notifications)) |
 | **Updates** | Check for a new version, install it, check automatically ([below](#updates)) |
 | **Command line** | The flags for scripts ([below](#command-line)) |

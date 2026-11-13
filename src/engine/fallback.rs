@@ -26,6 +26,8 @@ impl Engine {
 
     pub fn cancel_capture(&self) {}
 
+    pub fn capture_device(&self, _on: bool) {}
+
     pub fn start_recording(&self) -> bool {
         false
     }

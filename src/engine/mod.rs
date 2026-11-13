@@ -10,17 +10,20 @@
 //! * `fallback.rs`: no-op engine so the UI runs elsewhere.
 
 use crate::config::{
-    Action, AppRule, BindingMap, Combo, Config, MacroMode, MacroStep, Modifier, MouseButton, Output, SystemCommand,
-    LAYER_COUNT,
+    split_device, Action, AppRule, BindingMap, Combo, Config, Device, MacroMode, MacroStep, Modifier, MouseButton,
+    Output, PadButton, StickPointer, SystemCommand, LAYER_COUNT,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod dispatch;
+pub mod pad;
 pub mod player;
 
 #[cfg(windows)]
 mod win_actions;
+#[cfg(windows)]
+mod win_devices;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -78,7 +81,17 @@ pub enum EngineEvent {
     Command(AppCommand),
     /// Worth an on-screen notification ("Layer 2 on").
     Notice(String),
+    /// A button was pressed on a device while device capture was on.
+    DeviceCaptured {
+        /// `Device::id`.
+        id: String,
+        /// What the device calls itself, for a first name.
+        name: String,
+    },
 }
+
+/// Index into `Compiled::devices` (and `Config::devices`).
+pub type DeviceIndex = u16;
 
 /// A recorded physical input, for building macros.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +106,8 @@ pub enum Input {
     /// Windows virtual-key code (also used as the key identity on Linux).
     Key(u16),
     Mouse(MouseButton),
+    /// Game controller button or stick direction.
+    Pad(PadButton),
 }
 
 /// What an input does, ready for the hot path.
@@ -117,6 +132,39 @@ pub enum Target {
     Sensitivity(u32),
     /// Decided on release or after a while: tap, hold or double tap.
     TapHold(Arc<TapHold>),
+    /// Decided on release by how far the pointer moved.
+    Gesture(Arc<Gesture>),
+}
+
+#[derive(Debug)]
+pub struct Gesture {
+    pub tap: Option<Target>,
+    /// Up, down, left, right.
+    pub swipes: [Option<Target>; 4],
+    pub distance: u32,
+}
+
+impl Gesture {
+    /// What a release `dx`, `dy` pixels away from the press does.
+    pub fn pick(&self, dx: i32, dy: i32) -> Option<&Target> {
+        let d = self.distance as i64;
+        let (x, y) = (dx as i64, dy as i64);
+        if x * x + y * y < d * d {
+            return self.tap.as_ref();
+        }
+        let i = if y.abs() >= x.abs() {
+            if y < 0 {
+                0
+            } else {
+                1
+            }
+        } else if x < 0 {
+            2
+        } else {
+            3
+        };
+        self.swipes[i].as_ref()
+    }
 }
 
 #[derive(Debug)]
@@ -135,6 +183,8 @@ pub struct ComboBinding {
     pub mods: u8,
     pub held: Vec<Input>,
     pub trigger: Input,
+    /// Only when the trigger comes from this device.
+    pub device: Option<DeviceIndex>,
     pub target: Target,
 }
 
@@ -144,47 +194,98 @@ impl ComboBinding {
     }
 
     fn same_keys(&self, other: &ComboBinding) -> bool {
-        self.mods == other.mods && self.trigger == other.trigger && self.held == other.held
+        self.mods == other.mods
+            && self.trigger == other.trigger
+            && self.held == other.held
+            && self.device == other.device
     }
 }
 
 pub type Bindings = HashMap<Input, Target>;
+/// Bindings that only apply to one device's input.
+pub type DeviceBindings = HashMap<(DeviceIndex, Input), Target>;
 
 /// The binding layers of a profile, Default already merged underneath.
 #[derive(Default, Debug)]
 pub struct Layers {
     pub maps: [Bindings; LAYER_COUNT],
+    /// Per layer: bindings for one device, which win over `maps`.
+    pub device_maps: [DeviceBindings; LAYER_COUNT],
     /// Per layer, most specific first.
     pub combos: [Vec<ComboBinding>; LAYER_COUNT],
+    /// Controller stick that moves the pointer.
+    pub stick_pointer: StickPointer,
 }
 
 impl Layers {
+    /// Every input that triggers or is held for a binding.
+    fn inputs(&self) -> impl Iterator<Item = &Input> {
+        self.maps
+            .iter()
+            .flat_map(|m| m.keys())
+            .chain(self.device_maps.iter().flat_map(|m| m.keys().map(|(_, i)| i)))
+            .chain(
+                self.combos
+                    .iter()
+                    .flatten()
+                    .flat_map(|c| std::iter::once(&c.trigger).chain(c.held.iter())),
+            )
+    }
+
     /// Whether any mouse button or wheel input is remapped or part of a combo.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn uses_mouse(&self) -> bool {
-        let mouse = |i: &Input| matches!(i, Input::Mouse(_));
-        self.maps.iter().any(|m| m.keys().any(mouse))
-            || self
-                .combos
-                .iter()
-                .flatten()
-                .any(|c| mouse(&c.trigger) || c.held.iter().any(mouse))
+        self.inputs().any(|i| matches!(i, Input::Mouse(_)))
+    }
+
+    /// Whether any controller input is remapped (or the stick moves the
+    /// pointer), so the controller has to be read.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn uses_pad(&self) -> bool {
+        self.stick_pointer != StickPointer::Off || self.inputs().any(|i| matches!(i, Input::Pad(_)))
     }
 
     /// Whether `input` does anything on any layer.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn binds(&self, input: &Input) -> bool {
-        self.maps.iter().any(|m| m.contains_key(input)) || self.combos.iter().flatten().any(|c| c.trigger == *input)
+        self.maps.iter().any(|m| m.contains_key(input))
+            || self.device_maps.iter().any(|m| m.keys().any(|(_, i)| i == input))
+            || self.combos.iter().flatten().any(|c| c.trigger == *input)
     }
 
-    /// What `input` does: the highest active layer wins, and within a layer
-    /// a combo whose keys are held wins over the plain binding. `active` has
-    /// bit n set for each active layer n (the base layer always is); `mods`
-    /// are the modifier bits held. Returns the target and whether it came
-    /// from a combo.
+    /// Whether what `input` does depends on the device it came from.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn device_specific(&self, input: &Input) -> bool {
+        self.device_maps.iter().any(|m| m.keys().any(|(_, i)| i == input))
+            || self
+                .combos
+                .iter()
+                .flatten()
+                .any(|c| c.device.is_some() && c.trigger == *input)
+    }
+
+    /// Whether any mouse button or wheel binding is limited to a device.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn mouse_device_bindings(&self) -> bool {
+        let mouse = |i: &Input| matches!(i, Input::Mouse(_));
+        self.device_maps.iter().any(|m| m.keys().any(|(_, i)| mouse(i)))
+            || self
+                .combos
+                .iter()
+                .flatten()
+                .any(|c| c.device.is_some() && mouse(&c.trigger))
+    }
+
+    /// What `input` from `device` does: the highest active layer wins, and
+    /// within a layer a combo whose keys are held wins over the plain
+    /// binding, and a binding for the device over one for all devices.
+    /// `active` has bit n set for each active layer n (the base layer always
+    /// is); `mods` are the modifier bits held. Returns the target and
+    /// whether it came from a combo.
     pub fn lookup(
         &self,
         input: &Input,
+        device: Option<DeviceIndex>,
         active: u8,
         mods: u8,
         is_down: impl Fn(&Input) -> bool,
@@ -194,8 +295,17 @@ impl Layers {
                 continue;
             }
             for c in &self.combos[layer] {
-                if c.trigger == *input && c.mods & mods == c.mods && c.held.iter().all(&is_down) {
+                if c.trigger == *input
+                    && (c.device.is_none() || c.device == device)
+                    && c.mods & mods == c.mods
+                    && c.held.iter().all(&is_down)
+                {
                     return Some((&c.target, true));
+                }
+            }
+            if let Some(d) = device {
+                if let Some(t) = self.device_maps[layer].get(&(d, *input)) {
+                    return Some((t, false));
                 }
             }
             if let Some(t) = self.maps[layer].get(input) {
@@ -234,6 +344,51 @@ pub struct HotkeyBinding {
 pub struct Compiled {
     pub profiles: Vec<CompiledProfile>,
     pub hotkeys: Vec<HotkeyBinding>,
+    /// Named devices; `DeviceIndex` values index this.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    pub devices: Vec<Device>,
+    /// Pointer speed for a controller stick (1-20).
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+    pub stick_speed: u32,
+}
+
+/// Which named device a backend device id belongs to: an exact id match,
+/// else the same hardware interface (plugged into another port since), else
+/// the same vendor and product: one mouse often reports through several
+/// interfaces (`MI_00`, `MI_01`), and its buttons may come from either.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn match_device(devices: &[Device], id: &str) -> Option<DeviceIndex> {
+    if let Some(i) = devices.iter().position(|d| d.id.eq_ignore_ascii_case(id)) {
+        return Some(i as DeviceIndex);
+    }
+    let hw = hardware_part(id)?;
+    let find = |key: &dyn Fn(&str) -> String| {
+        let want = key(hw);
+        devices
+            .iter()
+            .position(|d| hardware_part(&d.id).is_some_and(|h| key(h) == want))
+            .map(|i| i as DeviceIndex)
+    };
+    find(&|h| h.to_ascii_uppercase()).or_else(|| find(&|h| vendor_product(h)))
+}
+
+/// `VID_046D&PID_C539` out of a hardware part.
+fn vendor_product(hw: &str) -> String {
+    hw.to_ascii_uppercase()
+        .split('&')
+        .filter(|p| p.starts_with("VID_") || p.starts_with("PID_"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// `VID_046D&PID_C539&MI_01&COL01` out of a Windows device path
+/// (`\\?\HID#VID_046D&PID_C539&MI_01&Col01#8&2d8e1a4&0&0000#{…}`).
+fn hardware_part(id: &str) -> Option<&str> {
+    let mut parts = id.split('#');
+    parts.next()?;
+    let hw = parts.next()?;
+    parts.next()?; // only device paths have an instance part
+    hw.to_ascii_uppercase().contains("VID_").then_some(hw)
 }
 
 /// The profile for a window: the most specific matching rule wins (title,
@@ -274,6 +429,8 @@ pub fn parse_input(id: &str) -> Option<Input> {
         crate::keys::find(k).map(|k| Input::Key(k.vk))
     } else if let Some(m) = id.strip_prefix("mouse:") {
         MouseButton::from_id(m).map(Input::Mouse)
+    } else if let Some(p) = id.strip_prefix("pad:") {
+        PadButton::from_id(p).map(Input::Pad)
     } else {
         None
     }
@@ -454,12 +611,7 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
             hold_ms,
             double_ms,
         } => {
-            // One level only: a tap / hold inside a tap / hold does nothing.
-            let part = |a: &Option<Box<Action>>| {
-                a.as_deref()
-                    .filter(|a| !matches!(a, Action::TapHold { .. }))
-                    .and_then(|a| parse_action(a, cfg))
-            };
+            let part = |a: &Option<Box<Action>>| nested(a, cfg);
             let spec = TapHold {
                 tap: part(tap),
                 hold: part(hold),
@@ -473,7 +625,27 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
                 Target::TapHold(Arc::new(spec))
             }
         }
+        Action::Gesture {
+            tap,
+            up,
+            down,
+            left,
+            right,
+            distance,
+        } => Target::Gesture(Arc::new(Gesture {
+            tap: nested(tap, cfg),
+            swipes: [up, down, left, right].map(|a| nested(a, cfg)),
+            distance: (*distance).clamp(5, 2000),
+        })),
     })
+}
+
+/// A part of a tap / hold or gesture. One level only: a tap / hold or
+/// gesture inside another does nothing.
+fn nested(a: &Option<Box<Action>>, cfg: &Config) -> Option<Target> {
+    a.as_deref()
+        .filter(|a| !a.has_slots())
+        .and_then(|a| parse_action(a, cfg))
 }
 
 fn system_target(command: SystemCommand) -> Target {
@@ -485,11 +657,27 @@ fn system_target(command: SystemCommand) -> Target {
     )))
 }
 
-/// One binding layer: plain inputs and combos.
-fn compile_layer(map: &BindingMap, cfg: &Config) -> (Bindings, Vec<ComboBinding>) {
-    let mut plain = Bindings::new();
-    let mut combos = Vec::new();
+/// One compiled binding layer.
+#[derive(Clone, Default)]
+struct LayerParts {
+    plain: Bindings,
+    device: DeviceBindings,
+    combos: Vec<ComboBinding>,
+}
+
+/// One binding layer: plain inputs, inputs of one device, and combos.
+/// Bindings for a device that isn't in the device list are skipped.
+fn compile_layer(map: &BindingMap, cfg: &Config) -> LayerParts {
+    let mut out = LayerParts::default();
     for (id, action) in map {
+        let (id, device_name) = split_device(id);
+        let device = match device_name {
+            Some(name) => match cfg.devices.iter().position(|d| d.name == name) {
+                Some(i) => Some(i as DeviceIndex),
+                None => continue,
+            },
+            None => None,
+        };
         let Some(target) = parse_action(action, cfg) else {
             continue;
         };
@@ -500,17 +688,21 @@ fn compile_layer(map: &BindingMap, cfg: &Config) -> (Bindings, Vec<ComboBinding>
             ) else {
                 continue;
             };
-            combos.push(ComboBinding {
+            out.combos.push(ComboBinding {
                 mods: Modifier::to_bits(&c.mods),
                 held,
                 trigger,
+                device,
                 target,
             });
         } else if let Some(input) = parse_input(id) {
-            plain.insert(input, target);
+            match device {
+                Some(d) => out.device.insert((d, input), target),
+                None => out.plain.insert(input, target),
+            };
         }
     }
-    (plain, combos)
+    out
 }
 
 fn compile_hotkeys(cfg: &Config) -> Vec<HotkeyBinding> {
@@ -536,7 +728,7 @@ fn compile_hotkeys(cfg: &Config) -> Vec<HotkeyBinding> {
 /// Turn the user-facing config into lookup tables the input hook can use
 /// without allocating.
 pub fn compile(cfg: &Config) -> Compiled {
-    let default: Vec<(Bindings, Vec<ComboBinding>)> = (0..LAYER_COUNT)
+    let default: Vec<LayerParts> = (0..LAYER_COUNT)
         .map(|l| {
             cfg.profiles
                 .first()
@@ -544,39 +736,59 @@ pub fn compile(cfg: &Config) -> Compiled {
                 .unwrap_or_default()
         })
         .collect();
-    let merged = |own: Option<&crate::config::Profile>| -> Layers {
-        let mut layers = Layers::default();
+    let merged = |index: usize| -> Layers {
+        let own = (index > 0).then(|| &cfg.profiles[index]);
+        let mut layers = Layers {
+            stick_pointer: cfg.stick_pointer(index),
+            ..Layers::default()
+        };
         for (l, inherited) in default.iter().enumerate() {
-            let (mut plain, mut combos) = inherited.clone();
+            let mut parts = inherited.clone();
             if let Some(p) = own {
-                let (p_plain, p_combos) = compile_layer(p.layer(l), cfg);
-                plain.extend(p_plain);
+                let mine = compile_layer(p.layer(l), cfg);
+                parts.plain.extend(mine.plain);
+                parts.device.extend(mine.device);
                 // The profile's own combo replaces Default's for the same keys.
-                combos.retain(|c| !p_combos.iter().any(|o| o.same_keys(c)));
-                combos.splice(0..0, p_combos);
+                parts.combos.retain(|c| !mine.combos.iter().any(|o| o.same_keys(c)));
+                parts.combos.splice(0..0, mine.combos);
             }
-            // Most specific first; stable, so the profile's come before Default's.
-            combos.sort_by_key(|c| std::cmp::Reverse(c.specificity()));
-            layers.maps[l] = plain;
-            layers.combos[l] = combos;
+            // Most specific first, a device's own before all devices'; stable,
+            // so the profile's come before Default's.
+            parts
+                .combos
+                .sort_by_key(|c| (std::cmp::Reverse(c.specificity()), c.device.is_none()));
+            layers.maps[l] = parts.plain;
+            layers.device_maps[l] = parts.device;
+            layers.combos[l] = parts.combos;
         }
         layers
     };
-    let mut profiles = vec![CompiledProfile {
-        rules: vec![],
-        fullscreen_only: false,
-        layers: Arc::new(merged(None)),
-    }];
-    for p in cfg.profiles.iter().skip(1) {
+    let mut profiles: Vec<CompiledProfile> = cfg
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| CompiledProfile {
+            rules: if i == 0 {
+                vec![]
+            } else {
+                p.apps.iter().map(|a| AppRule::parse(a)).collect()
+            },
+            fullscreen_only: i > 0 && p.fullscreen_only,
+            layers: Arc::new(merged(i)),
+        })
+        .collect();
+    if profiles.is_empty() {
         profiles.push(CompiledProfile {
-            rules: p.apps.iter().map(|a| AppRule::parse(a)).collect(),
-            fullscreen_only: p.fullscreen_only,
-            layers: Arc::new(merged(Some(p))),
+            rules: vec![],
+            fullscreen_only: false,
+            layers: Arc::new(merged(0)),
         });
     }
     Compiled {
         profiles,
         hotkeys: compile_hotkeys(cfg),
+        devices: cfg.devices.clone(),
+        stick_speed: cfg.stick_speed.clamp(1, 20),
     }
 }
 
@@ -660,6 +872,12 @@ impl Engine {
         self.inner.cancel_capture();
     }
 
+    /// Report the next button pressed on a mouse or controller as
+    /// `EngineEvent::DeviceCaptured` (the press itself goes through).
+    pub fn capture_device(&self, on: bool) {
+        self.inner.capture_device(on);
+    }
+
     /// Start recording keys and mouse buttons for a macro.
     pub fn start_recording(&self) -> bool {
         self.inner.start_recording()
@@ -707,7 +925,7 @@ mod tests {
         let f1 = Input::Key(0x70);
         let f2 = Input::Key(0x71);
         let f3 = Input::Key(0x72);
-        let get = |i: &Input, active: u8| game.layers.lookup(i, active, 0, NONE_DOWN).map(|(t, _)| t);
+        let get = |i: &Input, active: u8| game.layers.lookup(i, None, active, 0, NONE_DOWN).map(|(t, _)| t);
         assert!(matches!(get(&f1, 0), Some(Target::Key { vk: 0x43, .. })));
         // Layer lookups fall back to the base layer...
         assert!(matches!(get(&f1, 0b10), Some(Target::Key { vk: 0x43, .. })));
@@ -756,7 +974,7 @@ mod tests {
         let t = |mods| {
             c.profiles[1]
                 .layers
-                .lookup(&f1, 0, mods, NONE_DOWN)
+                .lookup(&f1, None, 0, mods, NONE_DOWN)
                 .map(|(t, combo)| (t.clone(), combo))
         };
         assert!(matches!(t(ctrl), Some((Target::Key { vk: 0x43, .. }, true))));
@@ -766,8 +984,8 @@ mod tests {
         let left = Input::Mouse(MouseButton::Left);
         let right = Input::Mouse(MouseButton::Right);
         let l = &c.profiles[1].layers;
-        assert!(l.lookup(&left, 0, 0, NONE_DOWN).is_none());
-        assert!(l.lookup(&left, 0, 0, |i| *i == right).is_some());
+        assert!(l.lookup(&left, None, 0, 0, NONE_DOWN).is_none());
+        assert!(l.lookup(&left, None, 0, 0, |i| *i == right).is_some());
         assert!(l.uses_mouse());
         assert!(!c.profiles[0].layers.uses_mouse());
     }
@@ -832,6 +1050,79 @@ mod tests {
         assert_eq!(pick_profile(&c.profiles, &w("game.exe", "", false)), 0);
         assert_eq!(pick_profile(&c.profiles, &w("game.exe", "", true)), 4);
         assert!(needs_window_poll(&c.profiles));
+    }
+
+    #[test]
+    fn device_controller_and_gesture_bindings_compile() {
+        let mut cfg = Config::default();
+        cfg.devices.push(Device {
+            name: "Pad".into(),
+            id: "xinput:1".into(),
+        });
+        cfg.devices.push(Device {
+            name: "Ball".into(),
+            id: r"\\?\HID#VID_046D&PID_C539&MI_01&Col01#8&2d8e1a4&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}".into(),
+        });
+        cfg.profiles[0].bindings.insert("pad:a@Pad".into(), key("A"));
+        cfg.profiles[0].bindings.insert("pad:b".into(), key("B"));
+        cfg.profiles[0].bindings.insert("mouse:back@Ball".into(), key("C"));
+        cfg.profiles[0].bindings.insert("mouse:back@Gone".into(), key("D")); // no such device
+        cfg.profiles[1].bindings.insert(
+            "mouse:right".into(),
+            Action::Gesture {
+                tap: None,
+                up: Some(Box::new(key("E"))),
+                down: Some(Box::new(Action::Gesture {
+                    tap: None,
+                    up: None,
+                    down: None,
+                    left: None,
+                    right: None,
+                    distance: 1,
+                })),
+                left: None,
+                right: None,
+                distance: 1,
+            },
+        );
+        cfg.profiles[1].stick_pointer = Some(StickPointer::Left);
+        let c = compile(&cfg);
+        let l = &c.profiles[0].layers;
+        let pad_a = Input::Pad(PadButton::A);
+        let back = Input::Mouse(MouseButton::Back);
+        assert!(l.lookup(&pad_a, None, 0, 0, NONE_DOWN).is_none());
+        assert!(l.lookup(&pad_a, Some(0), 0, 0, NONE_DOWN).is_some());
+        assert!(l.lookup(&back, Some(1), 0, 0, NONE_DOWN).is_some());
+        assert_eq!(l.device_maps[0].len(), 2);
+        assert!(l.uses_pad() && l.uses_mouse() && l.mouse_device_bindings());
+        assert!(l.device_specific(&back) && !l.device_specific(&Input::Pad(PadButton::B)));
+        assert_eq!(l.stick_pointer, StickPointer::Off);
+        let game = &c.profiles[1].layers;
+        assert_eq!(game.stick_pointer, StickPointer::Left);
+        let Some(Target::Gesture(g)) = game.maps[0].get(&Input::Mouse(MouseButton::Right)) else {
+            panic!("expected a gesture");
+        };
+        assert_eq!(g.distance, 5);
+        assert!(g.swipes[0].is_some());
+        assert!(g.swipes[1].is_none(), "a gesture inside a gesture is dropped");
+        assert!(matches!(g.pick(0, -9), Some(Target::Key { vk: 0x45, .. })));
+        assert!(g.pick(2, 2).is_none());
+
+        // Device ids: exact, or the same hardware in another port.
+        assert_eq!(match_device(&cfg.devices, "XINPUT:1"), Some(0));
+        assert_eq!(match_device(&cfg.devices, "xinput:2"), None);
+        let moved = r"\\?\HID#VID_046D&PID_C539&MI_01&Col01#9&1111111&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        assert_eq!(match_device(&cfg.devices, moved), Some(1));
+        let other = r"\\?\HID#VID_1532&PID_0084&MI_00#9&1111111&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        assert_eq!(match_device(&cfg.devices, other), None);
+        // Another interface of the same mouse.
+        let sibling = r"\\?\HID#VID_046D&PID_C539&MI_00#8&3333333&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}";
+        assert_eq!(match_device(&cfg.devices, sibling), Some(1));
+        // No vendor / product in the path: exact matches only.
+        assert_eq!(
+            match_device(&cfg.devices, r"\\?\HID#hid&Col02#1&2d595ca7&0&0001#{x}"),
+            None
+        );
     }
 
     #[test]

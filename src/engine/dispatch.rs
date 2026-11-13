@@ -7,7 +7,7 @@
 //! at `deadline`.
 
 use super::player::{Cmd, Out};
-use super::{AppCommand, HotkeyBinding, Input, Layers, TapHold, Target};
+use super::{AppCommand, DeviceIndex, HotkeyBinding, Input, Layers, TapHold, Target};
 use crate::config::{layer_name, Modifier, MouseButton, LAYER_COUNT};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +32,9 @@ pub trait Sink {
     fn command(&mut self, cmd: AppCommand);
     /// Something worth an on-screen notification ("Layer 2 on").
     fn notice(&mut self, text: String);
+    /// Where the pointer is now, in pixels (only differences matter), for
+    /// gestures. `None` if unknown.
+    fn pointer(&mut self) -> Option<(i32, i32)>;
 }
 
 /// What the dispatcher needs to know about the world for one event.
@@ -40,6 +43,8 @@ pub struct Ctx<'a> {
     pub enabled: bool,
     pub hotkeys: &'a [HotkeyBinding],
     pub now: Instant,
+    /// The named device the event came from, if known.
+    pub device: Option<DeviceIndex>,
 }
 
 /// Unassigned virtual key sent while Alt or Win is held on its own, so
@@ -79,6 +84,8 @@ pub struct Dispatcher {
     swallow: Vec<Input>,
     /// Modifiers released while a combo sends its key, to press again after.
     lifted: Vec<(Input, Vec<u16>)>,
+    /// Gesture inputs held, with the pointer position at the press.
+    gestures: Vec<(Input, Option<(i32, i32)>)>,
 }
 
 fn mod_vks(mods: u8) -> impl DoubleEndedIterator<Item = u16> {
@@ -171,11 +178,14 @@ impl Dispatcher {
             // What the tap / hold input produced was sent from here, after
             // this event had already been seen; send this one again so the
             // app gets them in the right order.
-            sink.out(match (input, phase) {
+            let again = match (input, phase) {
                 (Input::Key(vk), _) => Out::Key { vk, down: true },
                 (Input::Mouse(b), Phase::Tap) => Out::Wheel(b),
                 (Input::Mouse(b), _) => Out::Button { button: b, down: true },
-            });
+                // Controller input isn't held back, so there is nothing to resend.
+                (Input::Pad(_), _) => return false,
+            };
+            sink.out(again);
             sink.flush();
             return true;
         }
@@ -190,7 +200,8 @@ impl Dispatcher {
         let Some(layers) = ctx.layers else { return false };
         let mods = self.mods_held(Some(input));
         let down = &self.down;
-        let Some((target, combo)) = layers.lookup(&input, self.active_layers(), mods, |i| down.contains(i)) else {
+        let Some((target, combo)) = layers.lookup(&input, ctx.device, self.active_layers(), mods, |i| down.contains(i))
+        else {
             return false;
         };
         let target = target.clone();
@@ -214,6 +225,7 @@ impl Dispatcher {
             Phase::Tap => {
                 let target = match &target {
                     Target::TapHold(spec) => spec.tap.clone(),
+                    Target::Gesture(spec) => spec.tap.clone(),
                     t => Some(t.clone()),
                 };
                 if let Some(t) = target {
@@ -362,7 +374,7 @@ impl Dispatcher {
                 Input::Key(vk) => crate::keys::modifier_of(*vk)
                     .filter(|m| keep & m.bit() == 0)
                     .map(|_| *vk),
-                Input::Mouse(_) => None,
+                Input::Mouse(_) | Input::Pad(_) => None,
             })
             .collect();
         if vks.is_empty() {
@@ -426,6 +438,11 @@ impl Dispatcher {
                 sink.flush();
             }
             Target::Disabled | Target::TapHold(_) => {}
+            Target::Gesture(_) => {
+                let at = sink.pointer();
+                self.gestures.retain(|(i, _)| *i != input);
+                self.gestures.push((input, at));
+            }
             Target::Layer { layer, toggle: false } => self.layer_hold[layer as usize] += 1,
             Target::Layer { layer, toggle: true } => self.toggle_layer(layer, sink),
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Press {
@@ -457,6 +474,20 @@ impl Dispatcher {
                 *n = n.saturating_sub(1);
             }
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Release(input)),
+            Target::Gesture(ref spec) => {
+                let start = self
+                    .gestures
+                    .iter()
+                    .position(|(i, _)| *i == input)
+                    .and_then(|i| self.gestures.remove(i).1);
+                let (dx, dy) = match (start, sink.pointer()) {
+                    (Some((x0, y0)), Some((x1, y1))) => (x1 - x0, y1 - y0),
+                    _ => (0, 0),
+                };
+                if let Some(t) = spec.pick(dx, dy).cloned() {
+                    self.tap(input, &t, sink, false);
+                }
+            }
         }
     }
 
@@ -494,6 +525,11 @@ impl Dispatcher {
                 tap: true,
             }),
             Target::Layer { layer, toggle: true } => self.toggle_layer(layer, sink),
+            Target::Gesture(ref spec) => {
+                if let Some(t) = spec.tap.clone() {
+                    self.tap(input, &t, sink, immediate);
+                }
+            }
             Target::Disabled | Target::Layer { .. } | Target::Sensitivity(_) | Target::TapHold(_) => {}
         }
     }
@@ -517,7 +553,7 @@ impl Dispatcher {
         let keep: Vec<Input> = self
             .down
             .iter()
-            .filter(|i| matches!(i, Input::Mouse(_)) || ours(i) || still_down(i))
+            .filter(|i| matches!(i, Input::Mouse(_) | Input::Pad(_)) || ours(i) || still_down(i))
             .copied()
             .collect();
         self.down = keep;
@@ -527,7 +563,7 @@ impl Dispatcher {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub fn forget_mouse(&mut self) {
         self.down
-            .retain(|i| matches!(i, Input::Key(_)) || self.held.contains_key(i));
+            .retain(|i| !matches!(i, Input::Mouse(_)) || self.held.contains_key(i));
     }
 
     /// Whether a remapped mouse button is being held (its release must still
@@ -568,6 +604,7 @@ mod tests {
         out: Vec<Out>,
         cmds: Vec<String>,
         events: Vec<String>,
+        pointer: (i32, i32),
     }
     impl Sink for Rec {
         fn out(&mut self, out: Out) {
@@ -587,6 +624,9 @@ mod tests {
         }
         fn notice(&mut self, text: String) {
             self.events.push(text);
+        }
+        fn pointer(&mut self) -> Option<(i32, i32)> {
+            Some(self.pointer)
         }
     }
 
@@ -617,6 +657,7 @@ mod tests {
         start: Instant,
         ms: u64,
         enabled: bool,
+        device: Option<DeviceIndex>,
     }
 
     impl T {
@@ -629,6 +670,7 @@ mod tests {
                 start: Instant::now(),
                 ms: 0,
                 enabled: true,
+                device: None,
             }
         }
         fn now(&self) -> Instant {
@@ -640,6 +682,7 @@ mod tests {
                 enabled: self.enabled,
                 hotkeys: &self.hotkeys,
                 now: self.now(),
+                device: self.device,
             };
             self.d.handle(input, phase, &ctx, &mut self.s)
         }
@@ -655,6 +698,99 @@ mod tests {
             let now = self.now();
             self.d.tick(now, &mut self.s);
         }
+    }
+
+    fn gesture(distance: u32) -> Target {
+        Target::Gesture(Arc::new(crate::engine::Gesture {
+            tap: Some(Target::Mouse(MouseButton::Right)),
+            swipes: [Some(key(0x70)), Some(key(0x71)), Some(key(0x72)), None],
+            distance,
+        }))
+    }
+
+    #[test]
+    fn gestures_pick_by_direction_and_click_without_moving() {
+        let right = Input::Mouse(MouseButton::Right);
+        let mut t = T::new(layers(vec![(right, gesture(40))], vec![]));
+        let swipe = |t: &mut T, dx: i32, dy: i32| {
+            t.s.cmds.clear();
+            t.s.out.clear();
+            t.s.pointer = (500, 500);
+            assert!(t.down(right));
+            t.s.pointer = (500 + dx, 500 + dy);
+            assert!(t.up(right));
+        };
+        swipe(&mut t, 3, -80);
+        assert_eq!(t.s.cmds, vec!["tap 112"]); // up: F1, held briefly on the worker
+        swipe(&mut t, -10, 60);
+        assert_eq!(t.s.cmds, vec!["tap 113"]); // down
+        swipe(&mut t, -90, 20);
+        assert_eq!(t.s.cmds, vec!["tap 114"]); // left
+        swipe(&mut t, 90, 0);
+        assert!(t.s.cmds.is_empty() && t.s.out.is_empty()); // right: nothing set
+        swipe(&mut t, 20, 20); // under the distance: a click
+        assert_eq!(
+            t.s.out,
+            vec![
+                Out::Button {
+                    button: MouseButton::Right,
+                    down: true
+                },
+                Out::Button {
+                    button: MouseButton::Right,
+                    down: false
+                }
+            ]
+        );
+        // Other input while the gesture button is held passes through.
+        t.s.out.clear();
+        t.down(right);
+        assert!(!t.down(Input::Mouse(MouseButton::Left)));
+        assert!(!t.up(Input::Mouse(MouseButton::Left)));
+    }
+
+    #[test]
+    fn device_bindings_win_for_their_device_only() {
+        let back = Input::Mouse(MouseButton::Back);
+        let mut l = layers(vec![(back, key(0x41))], vec![]);
+        l.device_maps[0].insert((1, back), key(0x42));
+        assert!(l.device_specific(&back) && l.mouse_device_bindings());
+        let mut t = T::new(l);
+        let press = |t: &mut T, device| {
+            t.device = device;
+            t.s.out.clear();
+            t.down(back);
+            t.up(back);
+            t.s.out.first().cloned()
+        };
+        assert_eq!(press(&mut t, None), Some(k(0x41, true)));
+        assert_eq!(press(&mut t, Some(0)), Some(k(0x41, true)));
+        assert_eq!(press(&mut t, Some(1)), Some(k(0x42, true)));
+        // A device combo beats the device's plain binding.
+        t.l.combos[0].push(ComboBinding {
+            mods: Modifier::Ctrl.bit(),
+            held: vec![],
+            trigger: back,
+            device: Some(1),
+            target: key(0x43),
+        });
+        t.down(CTRL);
+        assert_eq!(press(&mut t, Some(0)), Some(k(0x41, true)));
+        assert_eq!(press(&mut t, Some(1)), Some(k(0xA2, false)));
+        assert!(t.s.out.contains(&k(0x43, true)));
+    }
+
+    #[test]
+    fn controller_buttons_work_like_keys() {
+        let a = Input::Pad(crate::config::PadButton::A);
+        let mut t = T::new(layers(vec![(a, key(0x20))], vec![]));
+        t.down(a);
+        t.up(a);
+        assert_eq!(t.s.out, vec![k(0x20, true), k(0x20, false)]);
+        // An unbound controller button never resends anything.
+        let b = Input::Pad(crate::config::PadButton::B);
+        assert!(!t.down(b));
+        assert!(t.s.out.len() == 2);
     }
 
     #[test]
@@ -962,6 +1098,7 @@ mod tests {
             mods,
             held,
             trigger,
+            device: None,
             target,
         }
     }

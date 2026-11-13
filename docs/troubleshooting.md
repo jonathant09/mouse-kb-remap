@@ -62,6 +62,38 @@ changed, and the app only watches the mouse at all while the active profile rema
 button or the wheel: a profile that only remaps keys leaves the mouse completely alone. The
 input thread runs at high priority so a busy PC doesn't delay it.
 
+A binding [for one device](user-guide.md#devices) costs a little more: that button is held
+back until Windows says which mouse sent it, about 0.3 ms in testing (0.2 ms more than a
+plain remap). Buttons without per-device bindings are not affected.
+
+## Controller buttons do nothing
+
+- The app reads controllers through XInput: Xbox controllers and most PC gamepads. A
+  PlayStation or Switch controller needs a tool that presents it as an Xbox controller
+  (DS4Windows, or the driver's "XInput mode").
+- It only reads the controller while the active profile remaps a controller input or moves
+  the pointer with a stick. `mouse-kb-remap.log` says *controller 1 connected* once it does.
+- A game still sees the original buttons as well; the app can't hide them.
+
+## A per-device binding doesn't apply
+
+- **Keys:** on Windows a key can't have a binding for one keyboard (Windows doesn't say
+  which keyboard a key came from). Bind it under *All devices*.
+- **The mouse was re-added, or plugged into another port:** the app matches it by vendor and
+  product too, so this normally keeps working. If you have two identical mice, add each one
+  again after moving it.
+- **Some buttons work for the device, others don't:** a few mice report some buttons through
+  a second interface. The app treats interfaces with the same vendor and product as one
+  device; if a button still isn't recognised, *Add a device* again with that button and
+  give its bindings to the new entry.
+- Buttons from other devices are sent on as simulated input; a few games ignore simulated
+  clicks. Bind the button per device only where you need to.
+
+## A gesture does nothing in a game
+
+Gestures follow the pointer on screen. Games that keep the pointer in the middle of the
+screen (most first-person games) never let it move, so every gesture counts as *No move*.
+
 ## Remapping stops working after a while
 
 Windows silently removes low-level hooks that respond too slowly, for example when the
@@ -161,7 +193,8 @@ devices it grabbed, or why it couldn't.
 - **Per-app profiles** need X11 or XWayland: the focused window is read from
   `_NET_ACTIVE_WINDOW`. On a pure Wayland session the Default profile applies everywhere.
 - **Text** actions type printable ASCII only (US layout).
-- Touchpads, tablets and game controllers are left alone.
+- Touchpads and tablets are left alone. Game controllers are read (not grabbed) for
+  controller bindings; some drivers swap the X and Y buttons.
 
 ## `git` says "detected dubious ownership"
 

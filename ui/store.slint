@@ -24,6 +24,11 @@ export struct BindingRow {
     layer: int,      // 0 base, 1 shift
 }
 
+export struct DeviceItem {
+    name: string,
+    detail: string,  // "Mouse · VID_046D PID_C539"
+}
+
 export struct StepRow {
     kind: string,    // "Key down"
     value: string,   // "A"
@@ -43,7 +48,14 @@ export global Store {
     in property <string> profile-name;
     in property <[string]> profile-apps;
     in property <[string]> recent-apps;
-    in-out property <int> device-tab;      // 0 mouse, 1 keyboard
+    in-out property <int> device-tab;      // 0 mouse, 1 keyboard, 2 controller
+    in property <[string]> device-names;   // "All devices", then named devices
+    in property <int> device-current;      // 0 all devices
+    in property <string> device-note;      // shown instead of the drawing ("" none)
+    in property <[MouseBtn]> pad-buttons;
+    in property <[string]> stick-items;    // what moves the pointer
+    in property <int> stick-current;
+    in property <string> stick-speed;
     in property <int> layer;               // 0 base, 1 shift, 2-3
     in property <[string]> layer-names: ["Base", "Shift", "Layer 2", "Layer 3"];
     in property <string> layer-banner;     // "SHIFT LAYER · hold Back to use"
@@ -60,15 +72,20 @@ export global Store {
     in property <string> selected-detail;
     in property <bool> selected-supported: true;
     // Action kind: 0 default, 1 key, 2 mouse, 3 macro, 4 turbo, 5 text,
-    // 6 launch, 7 media, 8 layer, 9 sensitivity, 10 tap / hold, 11 system, 12 off
+    // 6 launch, 7 media, 8 layer, 9 sensitivity, 10 tap / hold, 11 system,
+    // 12 gesture, 13 off
     in property <int> selected-kind;
     in property <string> inherited-value;
     in property <[string]> kind-items;     // choices shown (fewer inside a tap / hold)
     in property <int> kind-current: -1;    // index into kind-items
 
-    // Editing a part of a tap / hold binding: 0 the binding itself, 1 tap, 2 hold, 3 double tap.
+    // Editing a part of a tap / hold binding (0 the binding itself, 1 tap,
+    // 2 hold, 3 double tap) or of a gesture (1 no move, 2 up, 3 down, 4 left, 5 right).
     in property <int> slot;
     in property <string> slot-title;       // "On tap"
+    in property <string> slot-back;        // "← Tap / hold"
+    in property <[string]> gesture-parts;  // labels: no move, up, down, left, right
+    in property <string> gesture-distance;
     in property <string> taphold-tap;      // labels of the parts
     in property <string> taphold-hold;
     in property <string> taphold-double;
@@ -157,6 +174,9 @@ export global Store {
     in property <string> update-available; // newer version, "" if none
     in property <bool> update-busy;
     in property <string> cli-help;         // command-line flags
+    in property <[DeviceItem]> devices;    // named devices
+    in property <bool> adding-device;      // waiting for a press on the new device
+    in property <bool> keyboards-per-device; // the platform can tell keyboards apart
 
     // ---- status bar ----------------------------------------------------------------
     in property <string> focused-app;
@@ -188,6 +208,14 @@ export global Store {
     callback set-kind(int);                // index into kind-items
     callback edit-slot(int);               // 0 back to the binding, 1 tap, 2 hold, 3 double
     callback set-taphold-number(string, string); // field ("hold"/"double"), value
+    callback set-gesture-distance(string);
+    callback select-device(int);           // index into device-names
+    callback tab-changed();                // device-tab was changed in the UI
+    callback set-stick(int);               // index into stick-items
+    callback set-stick-speed(string);
+    callback add-device();                 // start / stop waiting for a press
+    callback rename-device(int, string);
+    callback remove-device(int);
     callback set-layer-target(int);
     callback set-layer-toggle(bool);
     callback set-system(int);

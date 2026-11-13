@@ -38,12 +38,14 @@ tables, and the engine sends the UI events.
 | `src/engine/player.rs` | `Scheduler` (timed playback state machine, unit-tested) and the worker loop |
 | `src/engine/windows.rs` | Hooks, timers, focus tracking (exe, path, title, fullscreen), elevation checks, key capture, recording, `SendInput` |
 | `src/engine/win_actions.rs` | System actions: lock, microphone, audio output, window actions |
-| `src/engine/linux.rs` | evdev grab per device, uinput output, X11 focus tracking |
+| `src/engine/win_devices.rs` | Raw input thread (which mouse a button came from, adding a device) and XInput controller polling |
+| `src/engine/pad.rs` | Controller readings → pressed inputs (with hysteresis), stick → pointer movement; shared by both backends |
+| `src/engine/linux.rs` | evdev grab per device (controllers read, not grabbed), uinput output, X11 focus tracking |
 | `src/engine/fallback.rs` | No-op engine for other OSes (UI preview) |
 | `ui/store.slint` | The `Store` global: every property and callback shared with Rust |
 | `ui/app.slint` | Main window and `AppTray` |
 | `ui/*-view.slint`, `ui/inspector.slint`, `ui/sidebar.slint` | Views |
-| `ui/mouse.slint`, `ui/keyboard.slint` | Device illustrations |
+| `ui/mouse.slint`, `ui/keyboard.slint`, `ui/controller.slint` | Device illustrations |
 | `ui/controls.slint`, `ui/widgets.slint`, `ui/theme.slint` | Shared controls and design tokens |
 
 ## Data flow
@@ -134,9 +136,54 @@ The dispatcher also keeps the set of physical keys and buttons that are down, wh
 - **`prune`** on focus changes forgets pass-through keys whose release went to a window the
   hooks couldn't see (checked with `GetAsyncKeyState`), so they don't stay "held" for combos.
 
-The engine thread runs two thread timers (`SetTimer` with no window): one at the
+- **Gestures** (`Target::Gesture`): the press records `Sink::pointer()` (the cursor on
+  Windows, summed relative motion on Linux); the release compares and taps the part for the
+  dominant direction, or the *no move* part under `distance`.
+
+The engine thread runs three thread timers (`SetTimer` with no window): one at the
 dispatcher's tap / hold deadline, one every 500 ms that re-reads the focused window's title
-and fullscreen state, only while some profile has a title or fullscreen rule.
+and fullscreen state (only while some profile has a title or fullscreen rule), and one that
+gives up waiting for a device report (below).
+
+**Output is sent after the dispatcher returns** (`HookSink::send_all`), never while it is
+borrowed: a `SendInput` made outside a hook callback can run this thread's own hooks
+re-entrantly for input that was waiting on them, and those need the dispatcher.
+
+### Which device an input came from (Windows)
+
+Low-level hooks don't say which mouse sent an event; raw input (`WM_INPUT`, with a device
+handle) does. For mice, raw input still arrives when the hook swallowed the event, but only
+*after* the hook returned. (For keyboards a swallowed key never reaches raw input, which is
+why keys can't have per-device bindings on Windows.) So, while the active profile has a mouse
+binding limited to a device (`Layers::mouse_device_bindings`):
+
+1. `win_devices.rs` registers a message-only window for mouse raw input (`RIDEV_INPUTSINK`)
+   on its own thread, so the flood of movement reports never touches the engine thread. For
+   each report with button or wheel flags it posts `WM_RAW_BUTTON` (flags, named device) to
+   the engine thread. Our own output is recognised by `ulExtraInformation`.
+2. The mouse hook swallows events whose binding depends on the device
+   (`Layers::device_specific`) and queues them (`DEFERRED`); while anything is queued, other
+   mouse events queue behind them to keep the order.
+3. Each report gives its device to the oldest queued events with matching `RI_MOUSE_*`
+   flags; the queue is then dispatched from the front with `Ctx::device` set. Events nothing
+   is bound to are sent on unchanged (tagged as ours). A report that arrives before its hook
+   event is kept 20 ms (`EARLY`); an event with no report after 30 ms goes on as "no named
+   device".
+
+Device paths are matched to named devices by exact path, then interface, then vendor and
+product (`match_device`). Synthetic input has no device handle; with
+`MOUSE_KB_REMAP_ACCEPT_INJECTED=1` it counts as the device `injected`, which is how the
+end-to-end tests exercise this path.
+
+### Controllers
+
+The controller thread in `win_devices.rs` polls XInput every 4 ms while the active profile
+uses a controller (`Layers::uses_pad`), checking empty slots once a second (asking about an
+unplugged slot is slow). `pad::pad_mask` turns a reading into pressed inputs, with
+hysteresis for triggers (a third) and stick directions (half way); changes go to the engine
+thread as `WM_PAD` and through the dispatcher like keys. They can't be swallowed: XInput is
+read-only. A stick chosen in the profile moves the pointer with relative `SendInput` moves
+(`pad::stick_move`: dead zone, then speed growing with the square of the tilt).
 
 Keys are sent as **scan codes** (`KEYEVENTF_SCANCODE`, with `KEYEVENTF_EXTENDEDKEY` when
 `MapVirtualKeyW(.., MAPVK_VK_TO_VSC_EX)` reports an `E0`/`E1` prefix). Many games read
@@ -187,6 +234,12 @@ later. The focused window comes from X11 (`_NET_ACTIVE_WINDOW` → `_NET_WM_PID`
 `/proc/<pid>/exe`). Key identity uses the same virtual-key codes as Windows, mapped to
 evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y` motion.
 
+Since each device has its own thread, per-device bindings need nothing special: the thread
+knows its device (`evdev:vendor:product:name`) and passes it in `Ctx::device`, keyboards
+included. Game controllers (devices with `BTN_SOUTH` and `BTN_EAST`) are read without a grab;
+their keys and axes fill the same `PadReading` as XInput, and a ticker thread moves the
+pointer with a stick through uinput.
+
 ## Safety rules
 
 - **Never remap our own window.** When the foreground process is us, there is no active
@@ -208,11 +261,12 @@ evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y
 - Dark theme surfaces follow a Discord-like charcoal ramp (`#1e1f22 → #2b2d31 → #313338
   → #383a40`); light mirrors it with neutral greys.
 - Rust owns all state, exposed through the `Store` global. Components keep only purely
-  visual state (the Mouse / Keyboard tab, the inspector tab).
+  visual state (the Mouse / Keyboard / Controller tab, the inspector tab).
 - Text fields bound to Rust values use `ValueField`, which reports edits on Enter / focus
   loss and then shows whatever Rust stored.
-- Mouse buttons are passed as a fixed-order array (see `MOUSE_ORDER` in `app.rs` and the
-  comment in `mouse.slint`). Keep them in sync if you add a button.
+- Mouse and controller buttons are passed as fixed-order arrays (`MOUSE_ORDER` and
+  `PadButton::ALL` in Rust, the comments in `mouse.slint` and `controller.slint`). Keep them
+  in sync if you add a button.
 - Views get an explicit `max-width` in `app.slint`: without it, a view whose content has a
   bounded width would shrink the window.
 
@@ -223,6 +277,8 @@ evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y
 3. If it needs new output, add an `Out` variant and handle it in `windows.rs::emit_outs`
    and `linux.rs::emit_outs`.
 4. Add a kind constant and name in `app.rs` (`KIND_NAMES`, and `SLOT_NAMES` / `SLOT_KINDS`
-   if it can be a tap / hold part), handle it in `kind_of`, `set_kind` and `refresh`, and add
-   an editor in `ui/inspector.slint` keyed on `Store.selected-kind`.
+   if it can be a tap / hold or gesture part), handle it in `kind_of`, `set_kind` and
+   `refresh`, and add an editor in `ui/inspector.slint` keyed on `Store.selected-kind`.
+   An action that holds other actions lists them in `Action::slots` (so `walk`, macro
+   renames and the slot editor see them) and is excluded by `has_slots` from nesting.
 5. Document the JSON shape in [configuration.md](configuration.md) and add a test.

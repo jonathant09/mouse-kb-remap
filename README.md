@@ -30,9 +30,14 @@ app that works with **any** mouse or keyboard.
   - **system actions**: lock the PC, mute the microphone, switch audio output, minimize,
     maximize, always on top, move the window to the next monitor, switch profile
   - a **sensitivity clutch** ("sniper" button): lower pointer speed while held
+  - **mouse gestures**: hold a button, swipe up / down / left / right, let go
   - **off**
 - **Combos as triggers**: Ctrl + Back, Right click + Left click, Shift + Wheel… do
   something other than the button alone.
+- **Game controllers** (XInput): remap buttons, triggers, d-pad and stick directions like
+  any other input, and move the pointer with a stick.
+- **Bindings for one device**: give a second mouse, a trackball or a controller its own
+  bindings (keyboards too on Linux).
 - **Macros** can move the pointer and randomize their delays.
 - **Games-friendly output.** Keys are sent as scan codes, which most games read, and timed
   output (turbo, macros) runs on a precise timer thread (typically within 1 ms).
@@ -69,7 +74,8 @@ replacing the exe with a newer version keeps them. To have it start when you sig
 
 | Area | State |
 | --- | --- |
-| Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, layers, tap / hold, hotkeys, system actions, notifications, the command line and updating tested end-to-end on Windows 11 |
+| Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, layers, tap / hold, gestures, per-device bindings, hotkeys, system actions, notifications, the command line and updating tested end-to-end on Windows 11 |
+| Controllers (XInput) | Working in unit tests; not yet tried with a real controller |
 | UI (profiles, mouse and keyboard diagrams, macro editor, settings) | Working |
 | Linux engine (evdev + uinput, X11 focus tracking) | Experimental: builds and passes unit tests, not yet tried on real hardware |
 | macOS engine | Not yet (the UI runs in preview mode) |
@@ -88,7 +94,8 @@ sent until a hook further down the chain receives it, without and with mouse-kb-
 | Remapped key, until the new key arrives | 0.075 ms | 0.26 ms | 0.36 ms | 1.7 ms |
 
 So the app adds about 0.025 ms to a typical input, around 2.5% of one report from a
-1,000 Hz mouse. When the active profile doesn't remap any mouse button or the wheel, the app
+1,000 Hz mouse. A button with a binding for one device is held until Windows says which
+mouse sent it: about 0.3 ms from press to the new key (median, measured the same way). When the active profile doesn't remap any mouse button or the wheel, the app
 doesn't watch the mouse at all and mouse movement isn't affected. The tests used
 `SendInput`, which enters Windows slightly earlier than real hardware but goes through the
 same hooks.
@@ -110,7 +117,7 @@ See [Building & releasing](docs/building.md).
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
-- [User guide](docs/user-guide.md): profiles, actions, layers, tap / hold, combos, hotkeys, command line, updates
+- [User guide](docs/user-guide.md): profiles, actions, layers, tap / hold, combos, gestures, controllers, devices, hotkeys, command line, updates
 - [Macros & turbo](docs/macros.md): recording, editing, playback modes, timing tips
 - [Configuration](docs/configuration.md): `config.json` format and all key ids
 - [Troubleshooting](docs/troubleshooting.md): games, admin rights, anti-cheat, other remappers, Linux permissions
@@ -144,6 +151,8 @@ src/
     player.rs        Timed playback: macros, turbo, text, launch, system actions
     windows.rs       Low-level hooks, timers, focus tracking, SendInput (Windows)
     win_actions.rs   System actions: audio, microphone, windows, lock (Windows)
+    win_devices.rs   Which mouse a button came from (raw input), controllers (Windows)
+    pad.rs           Controller readings → inputs, stick → pointer
     linux.rs         evdev grab + uinput output, X11 focus (Linux, experimental)
     fallback.rs      No-op engine so the UI runs on other OSes
 ui/
@@ -156,6 +165,7 @@ ui/
   settings-view.slint Settings page
   mouse.slint        Generic mouse illustration with callouts
   keyboard.slint     Generic TKL / full-size keyboard
+  controller.slint   Generic game controller
   controls.slint     Key capture box, modifier toggles
   widgets.slint      Buttons, chips, segmented control, fields, switch
   theme.slint        Colors, radii, type scale (light + dark)
@@ -175,15 +185,14 @@ ui/
 - [x] Hotkeys and command line, on-screen notifications, undo / redo
 - [x] Window-title, path and fullscreen profile rules; system and window actions
 - [x] Mouse moves and random delays in macros; updates from inside the app
-- [ ] Gamepad input (XInput): map controller buttons to keys and mouse actions, through the
-      same dispatcher
-- [ ] Mouse gestures: hold a button and swipe in a direction. Needs mouse movement in the
-      hook, so only installed while a gesture button is held, to keep movement untouched
-      otherwise
-- [ ] Per-device bindings (tell two mice apart). Windows doesn't tell low-level hooks which
-      device an event came from, so this needs a filter driver (e.g. Interception), which
-      anti-cheats often block. On Linux each device is already read on its own thread, so
-      it's planned there first.
+- [x] Game controllers (XInput), stick as pointer
+- [x] Mouse gestures (follow the pointer, so no mouse-movement hook is needed)
+- [x] Bindings for one mouse or controller (raw input on Windows, no driver needed); for one
+      keyboard on Linux
+- [ ] Try controllers with real hardware; hide remapped controller buttons from games (needs
+      a virtual controller driver such as ViGEmBus)
+- [ ] Bindings for one keyboard on Windows (needs a filter driver such as Interception, which
+      anti-cheats often block)
 - [ ] Linux: try on real hardware, Wayland focus tracking (per compositor)
 - [ ] macOS backend
 

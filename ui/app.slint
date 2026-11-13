@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Store, ProfileItem, MacroItem, BindingRow, StepRow } from "store.slint";
+import { Store, ProfileItem, MacroItem, BindingRow, StepRow, DeviceItem } from "store.slint";
 import { Dot } from "widgets.slint";
 import { MouseBtn } from "mouse.slint";
 import { KeyCap } from "keyboard.slint";
@@ -8,7 +8,7 @@ import { ProfileView } from "profile-view.slint";
 import { MacroView } from "macro-view.slint";
 import { SettingsView } from "settings-view.slint";
 
-export { Theme, Store, MouseBtn, KeyCap, ProfileItem, MacroItem, BindingRow, StepRow }
+export { Theme, Store, MouseBtn, KeyCap, ProfileItem, MacroItem, BindingRow, StepRow, DeviceItem }
 
 component StatusItem inherits HorizontalLayout {
     in property <string> label;

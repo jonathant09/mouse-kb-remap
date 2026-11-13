@@ -2,9 +2,10 @@
 
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
-import { Button, Chip, Divider, Field, Segmented, Switch } from "widgets.slint";
+import { Button, Chip, Divider, Field, Segmented, Switch, ValueField } from "widgets.slint";
 import { MouseDiagram } from "mouse.slint";
 import { KeyboardDiagram } from "keyboard.slint";
+import { ControllerDiagram } from "controller.slint";
 import { Inspector } from "inspector.slint";
 
 component ProfileHeader inherits Rectangle {
@@ -37,10 +38,10 @@ component ProfileHeader inherits Rectangle {
                 edited => { Store.rename-profile(self.text); }
             }
             Segmented {
-                items: ["Mouse", "Keyboard"];
+                items: ["Mouse", "Keyboard", "Controller"];
                 current: Store.device-tab;
                 item-min-width: 76px;
-                selected(i) => { Store.device-tab = i; }
+                selected(i) => { Store.device-tab = i; Store.tab-changed(); }
             }
             Segmented {
                 items: Store.layer-names;
@@ -119,20 +120,73 @@ component Canvas inherits Rectangle {
         background: Theme.canvas-dot;
     }
 
-    if Store.device-tab == 0: MouseDiagram {
+    if Store.device-note != "": Text {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: min(420px, parent.width - 40px);
+        text: Store.device-note;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        color: Theme.text-muted;
+        font-size: Theme.font;
+    }
+    if Store.device-note == "" && Store.device-tab == 0: MouseDiagram {
         width: parent.width;
         height: parent.height;
         buttons: Store.mouse-buttons;
         selected: Store.selected-input;
         select(id) => { Store.select-input(id); }
     }
-    if Store.device-tab == 1: KeyboardDiagram {
+    if Store.device-note == "" && Store.device-tab == 1: KeyboardDiagram {
         width: parent.width;
         height: parent.height;
         keys: Store.keys;
         units-wide: Store.full-keyboard ? 22.5 : 18.25;
         selected: Store.selected-input;
         select(id) => { Store.select-input(id); }
+    }
+    if Store.device-note == "" && Store.device-tab == 2: ControllerDiagram {
+        width: parent.width;
+        height: parent.height - 30px;
+        buttons: Store.pad-buttons;
+        selected: Store.selected-input;
+        select(id) => { Store.select-input(id); }
+    }
+
+    // Which device the bindings are for (only once devices are named)
+    if Store.device-names.length > 1: HorizontalLayout {
+        x: 16px;
+        y: Store.layer != 0 ? 48px : 12px;
+        width: self.preferred-width;
+        height: 28px;
+        spacing: 8px;
+        Text { text: "Bindings for"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+        Segmented {
+            items: Store.device-names;
+            current: Store.device-current;
+            selected(i) => { Store.select-device(i); }
+        }
+    }
+
+    // Controller tools (below the layer banner and device choice, if shown)
+    if Store.device-tab == 2: HorizontalLayout {
+        x: parent.width - self.width - 16px;
+        y: 12px + (Store.layer != 0 ? 36px : 0) + (Store.device-names.length > 1 ? 36px : 0);
+        width: self.preferred-width;
+        height: 28px;
+        spacing: 10px;
+        Text { text: "Pointer moves with"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+        Segmented {
+            items: Store.stick-items;
+            current: Store.stick-current;
+            selected(i) => { Store.set-stick(i); }
+        }
+        Text { text: "Speed"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+        ValueField {
+            width: 54px;
+            value: Store.stick-speed;
+            committed(v) => { Store.set-stick-speed(v); }
+        }
     }
 
     // Layer banner
@@ -198,6 +252,12 @@ component Canvas inherits Rectangle {
         }
         if Store.device-tab == 1: Text {
             text: "Keys not on the drawing (F13–F24, media keys, extra mouse keys): use Detect key.";
+            font-size: Theme.font-xs;
+            color: Theme.text-faint;
+            vertical-alignment: center;
+        }
+        if Store.device-tab == 2: Text {
+            text: "Games still see the controller's own buttons: remap ones the game doesn't use, or use the controller in other apps.";
             font-size: Theme.font-xs;
             color: Theme.text-faint;
             vertical-alignment: center;

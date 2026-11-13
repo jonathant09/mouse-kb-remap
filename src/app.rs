@@ -2,14 +2,15 @@
 //! state back into the `Store` global (`refresh`).
 
 use crate::config::{
-    self, combo_label, per_second, Action, Combo, Config, Hotkey, Hotkeys, Macro, MacroMode, MacroStep, Modifier,
-    MouseButton, Output, Profile, SystemCommand, ThemeMode, LAYER_COUNT,
+    self, clean_device_name, combo_label, per_second, split_device, Action, Combo, Config, Device, Hotkey, Hotkeys,
+    Macro, MacroMode, MacroStep, Modifier, MouseButton, Output, PadButton, Profile, StickPointer, SystemCommand,
+    ThemeMode, LAYER_COUNT,
 };
 use crate::engine::{self, AppCommand, Engine, EngineEvent, RecEvent};
 use crate::system::{self, Autostart};
 use crate::{
-    ipc, keys, osd, update, AppTray, AppWindow, BindingRow, KeyCap, MacroItem, MouseBtn, ProfileItem, StepRow, Store,
-    Theme,
+    ipc, keys, osd, update, AppTray, AppWindow, BindingRow, DeviceItem, KeyCap, MacroItem, MouseBtn, ProfileItem,
+    StepRow, Store, Theme,
 };
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
@@ -54,10 +55,11 @@ const K_LAYER: i32 = 8;
 const K_SENS: i32 = 9;
 const K_TAPHOLD: i32 = 10;
 const K_SYSTEM: i32 = 11;
-const K_OFF: i32 = 12;
+const K_GESTURE: i32 = 12;
+const K_OFF: i32 = 13;
 
 /// Choices for a binding, in kind order.
-const KIND_NAMES: [&str; 13] = [
+const KIND_NAMES: [&str; 14] = [
     "Default",
     "Key",
     "Mouse",
@@ -70,6 +72,7 @@ const KIND_NAMES: [&str; 13] = [
     "Sensitivity",
     "Tap / hold",
     "System",
+    "Gesture",
     "Off",
 ];
 
@@ -91,6 +94,14 @@ const SLOT_KINDS: [i32; 11] = [
     K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM,
 ];
 const SLOT_TITLES: [&str; 4] = ["", "On tap", "On hold", "On double tap"];
+const GESTURE_TITLES: [&str; 6] = [
+    "",
+    "Let go without moving",
+    "Swipe up",
+    "Swipe down",
+    "Swipe left",
+    "Swipe right",
+];
 
 /// Mouse buttons a combo can hold, after "Nothing" in `combo-mouse-names`.
 const COMBO_MOUSE: [MouseButton; 5] = [
@@ -139,6 +150,10 @@ struct State {
     profile: usize,
     /// Binding layer shown: 0 base, 1 shift, 2-3.
     layer: usize,
+    /// Device whose bindings are shown: 0 all devices, n `cfg.devices[n - 1]`.
+    device: usize,
+    /// Waiting for a press on a device to add.
+    adding_device: bool,
     /// Selected input id (`key:A`, `mouse:back`, a combo like
     /// `ctrl+mouse:back`) or empty.
     input: String,
@@ -245,11 +260,21 @@ impl State {
         }
         self.pending_kind = None;
     }
-    /// A tap / hold part can only be edited while the binding is one.
+    /// A tap / hold or gesture part can only be edited while the binding is one.
     fn fix_slot(&mut self) {
-        if self.slot != 0 && !matches!(self.binding(), Some(Action::TapHold { .. })) {
+        if self.slot != 0 && !self.binding().is_some_and(|a| a.has_slots()) {
             self.slot = 0;
         }
+    }
+    /// `@Device` for ids of the device shown, or "" for all devices.
+    fn device_suffix(&self) -> String {
+        match self.device.checked_sub(1).and_then(|i| self.cfg.devices.get(i)) {
+            Some(d) => format!("@{}", d.name),
+            None => String::new(),
+        }
+    }
+    fn shown_device(&self) -> Option<&Device> {
+        self.device.checked_sub(1).and_then(|i| self.cfg.devices.get(i))
     }
     fn select_input(&mut self, id: &str) {
         self.input = id.to_string();
@@ -361,6 +386,8 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
             view: 0,
             profile: 0,
             layer: 0,
+            device: 0,
+            adding_device: false,
             input: String::new(),
             slot: 0,
             pending_kind: None,
@@ -557,6 +584,7 @@ fn kind_of(action: &Action) -> i32 {
         Action::Sensitivity { .. } => K_SENS,
         Action::TapHold { .. } => K_TAPHOLD,
         Action::System { .. } => K_SYSTEM,
+        Action::Gesture { .. } => K_GESTURE,
         Action::Disabled => K_OFF,
     }
 }
@@ -634,16 +662,81 @@ fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>, xy: O
     }
 }
 
-/// Plain input ids look like `key:A`, `key:F1`, `mouse:back`.
+/// Plain input ids look like `key:A`, `key:F1`, `mouse:back`, `pad:a`, and
+/// may be limited to a device: `mouse:back@Trackball` → "Back (Trackball)".
 fn plain_label(input: &str) -> String {
-    if let Some(k) = input.strip_prefix("key:") {
+    let (input, device) = split_device(input);
+    let label = if let Some(k) = input.strip_prefix("key:") {
         keys::display_name(k)
     } else if let Some(m) = input.strip_prefix("mouse:") {
         MouseButton::from_id(m)
             .map(|b| b.name().to_string())
             .unwrap_or_else(|| m.to_string())
+    } else if let Some(p) = input.strip_prefix("pad:") {
+        PadButton::from_id(p)
+            .map(|b| b.name().to_string())
+            .unwrap_or_else(|| p.to_string())
     } else {
         input.to_string()
+    };
+    match device {
+        Some(d) => format!("{label} ({d})"),
+        None => label,
+    }
+}
+
+/// Whether keys can have bindings for one keyboard. Windows can't tell
+/// keyboards apart (see engine/win_devices.rs); Linux reads each one.
+const KEYBOARDS_PER_DEVICE: bool = cfg!(target_os = "linux");
+
+/// Short names for the controller drawing's lists.
+fn short_pad_label(b: PadButton) -> &'static str {
+    match b {
+        PadButton::A => "A",
+        PadButton::B => "B",
+        PadButton::X => "X",
+        PadButton::Y => "Y",
+        PadButton::Lb => "LB",
+        PadButton::Rb => "RB",
+        PadButton::Lt => "LT",
+        PadButton::Rt => "RT",
+        PadButton::Back => "View",
+        PadButton::Start => "Menu",
+        PadButton::Ls => "LS click",
+        PadButton::Rs => "RS click",
+        PadButton::Up => "D-pad ↑",
+        PadButton::Down => "D-pad ↓",
+        PadButton::Left => "D-pad ←",
+        PadButton::Right => "D-pad →",
+        PadButton::LsUp => "LS ↑",
+        PadButton::LsDown => "LS ↓",
+        PadButton::LsLeft => "LS ←",
+        PadButton::LsRight => "LS →",
+        PadButton::RsUp => "RS ↑",
+        PadButton::RsDown => "RS ↓",
+        PadButton::RsLeft => "RS ←",
+        PadButton::RsRight => "RS →",
+    }
+}
+
+/// The recognisable part of a device id, for the device list:
+/// "VID_046D PID_C539", "slot 1", "046d:c539".
+fn device_id_summary(id: &str) -> String {
+    if let Some(slot) = id.strip_prefix("xinput:") {
+        return format!("slot {slot}");
+    }
+    if let Some(rest) = id.strip_prefix("evdev:") {
+        return rest.splitn(3, ':').take(2).collect::<Vec<_>>().join(":");
+    }
+    let upper = id.to_ascii_uppercase();
+    let part = |key: &str| {
+        upper
+            .find(key)
+            .map(|i| upper[i..].chars().take(key.len() + 4).collect::<String>())
+    };
+    match (part("VID_"), part("PID_")) {
+        (Some(v), Some(p)) => format!("{v} {p}"),
+        _ => id.chars().take(40).collect(),
     }
 }
 
@@ -663,8 +756,22 @@ fn input_label(input: &str) -> String {
 }
 
 fn input_detail(input: &str) -> String {
+    let (base, device) = split_device(input);
+    if let Some(d) = device {
+        let what = input_detail(base);
+        return if what.is_empty() {
+            format!("Only on {d}")
+        } else {
+            format!("{what} · only on {d}")
+        };
+    }
+    let input = base;
     if Combo::parse(input).is_some() {
         "Combo: hold the first, then press the last".to_string()
+    } else if let Some(p) = input.strip_prefix("pad:") {
+        PadButton::from_id(p)
+            .map(|b| b.detail().to_string())
+            .unwrap_or_default()
     } else if let Some(k) = input.strip_prefix("key:") {
         match keys::find(k).map(|k| k.group) {
             Some(keys::Group::Extra) => "Keyboard key (not on the drawing)".to_string(),
@@ -692,6 +799,23 @@ fn layer_phrase(layer: usize) -> String {
 fn inherited(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<String> {
     let def = &cfg.profiles[0];
     let p = &cfg.profiles[profile];
+    if let (base, Some(device)) = split_device(input) {
+        if profile > 0 {
+            if let Some(a) = def.layer(layer).get(input) {
+                return Some(format!("Inherits from the Default profile: {}.", a.label()));
+            }
+        }
+        if let Some(a) = p.layer(layer).get(base) {
+            return Some(format!(
+                "Nothing just for {device}, so the binding for all devices applies: {}.",
+                a.label()
+            ));
+        }
+        return Some(match inherited(cfg, profile, layer, base) {
+            Some(s) => format!("Nothing just for {device}. {s}"),
+            None => format!("Nothing just for {device}: the binding for all devices applies (none)."),
+        });
+    }
     if layer > 0 {
         let name = layer_phrase(layer);
         if profile > 0 {
@@ -727,6 +851,24 @@ fn inherited(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<
 fn inherited_short(cfg: &Config, profile: usize, layer: usize, input: &str) -> Option<String> {
     let def = &cfg.profiles[0];
     let p = &cfg.profiles[profile];
+    if let (base, Some(_)) = split_device(input) {
+        if profile > 0 {
+            if let Some(a) = def.layer(layer).get(input) {
+                return Some(format!("{} (Default)", a.label()));
+            }
+        }
+        return p
+            .layer(layer)
+            .get(base)
+            .map(|a| a.label())
+            .or_else(|| inherited_short(cfg, profile, layer, base))
+            .map(|s| {
+                format!(
+                    "{} (all devices)",
+                    s.trim_end_matches(" (base)").trim_end_matches(" (Default)")
+                )
+            });
+    }
     if layer > 0 {
         let a = (profile > 0)
             .then(|| def.layer(layer).get(input))
@@ -933,7 +1075,51 @@ impl App {
             }
             EngineEvent::Command(cmd) => self.command(cmd),
             EngineEvent::Notice(text) => self.osd(&text),
+            EngineEvent::DeviceCaptured { id, name } => self.device_captured(id, name),
         }
+    }
+
+    /// "Add a device": wait for a press on it, or stop waiting.
+    fn toggle_add_device(&self) {
+        let on = !self.st.borrow().adding_device;
+        self.engine.capture_device(on);
+        self.nav(|_, st| {
+            st.adding_device = on;
+            st.notice = (String::new(), false);
+        });
+    }
+
+    fn device_captured(&self, id: String, name: String) {
+        if !self.st.borrow().adding_device {
+            return;
+        }
+        let existing = self
+            .st
+            .borrow()
+            .cfg
+            .devices
+            .iter()
+            .find(|d| d.id.eq_ignore_ascii_case(&id))
+            .map(|d| d.name.clone());
+        if let Some(existing) = existing {
+            self.nav(|_, st| {
+                st.adding_device = false;
+                st.notice = (format!("That one is already added, as \"{existing}\"."), false);
+            });
+            return;
+        }
+        self.edit(|_, st| {
+            st.adding_device = false;
+            let name = st.cfg.unique_device_name(&name);
+            st.cfg.devices.push(Device {
+                name: name.clone(),
+                id: id.clone(),
+            });
+            st.notice = (
+                format!("Added \"{name}\". Rename it here, then pick it under \"Bindings for\" in a profile."),
+                false,
+            );
+        });
     }
 
     /// An app hotkey or a "Next profile" / "Automatic profile" binding.
@@ -1549,11 +1735,86 @@ impl App {
         s.set_layer_banner(layer_banner(cfg, st.profile, st.layer).into());
         s.set_full_keyboard(cfg.full_keyboard);
 
+        // Device shown, and what can't be bound for it
+        let suffix = st.device_suffix();
+        let mut device_names = vec![SharedString::from("All devices")];
+        device_names.extend(cfg.devices.iter().map(|d| SharedString::from(&d.name)));
+        s.set_device_names(model(device_names));
+        s.set_device_current(if st.shown_device().is_some() {
+            st.device as i32
+        } else {
+            0
+        });
+        let tab = s.get_device_tab();
+        s.set_device_note(
+            match st.shown_device() {
+                Some(d) if d.is_controller() && tab != 2 => {
+                    format!("{} is a controller: its bindings are on the Controller tab.", d.name)
+                }
+                Some(d) if !d.is_controller() && d.kind() != "Input device" && tab == 2 => {
+                    format!("{} is a mouse: its bindings are on the Mouse tab.", d.name)
+                }
+                Some(d) if tab == 1 && !KEYBOARDS_PER_DEVICE => format!(
+                    "Windows can't tell which keyboard a key came from, so keys can't have bindings just for {}. \
+                     Keyboard bindings are under \"All devices\".",
+                    d.name
+                ),
+                _ => String::new(),
+            }
+            .into(),
+        );
+
+        // Controller
+        s.set_pad_buttons(model(
+            PadButton::ALL
+                .iter()
+                .map(|b| {
+                    let id = format!("pad:{}{suffix}", b.id());
+                    let action = bindings.get(&id);
+                    let value = match action {
+                        Some(a) => a.label(),
+                        None => inherited_short(cfg, st.profile, st.layer, &id).unwrap_or_else(|| "—".into()),
+                    };
+                    MouseBtn {
+                        id: id.clone().into(),
+                        label: short_pad_label(*b).into(),
+                        detail: b.detail().into(),
+                        value: value.into(),
+                        mapped: action.is_some(),
+                        supported: true,
+                    }
+                })
+                .collect(),
+        ));
+        let (stick_items, stick_current) = if st.profile == 0 {
+            (
+                vec!["Off", "Left stick", "Right stick"],
+                match profile.stick_pointer.unwrap_or_default() {
+                    StickPointer::Off => 0,
+                    StickPointer::Left => 1,
+                    StickPointer::Right => 2,
+                },
+            )
+        } else {
+            (
+                vec!["Same as Default", "Off", "Left stick", "Right stick"],
+                match profile.stick_pointer {
+                    None => 0,
+                    Some(StickPointer::Off) => 1,
+                    Some(StickPointer::Left) => 2,
+                    Some(StickPointer::Right) => 3,
+                },
+            )
+        };
+        s.set_stick_items(model(stick_items.into_iter().map(SharedString::from).collect()));
+        s.set_stick_current(stick_current);
+        s.set_stick_speed(cfg.stick_speed.to_string().into());
+
         // Keyboard
         s.set_keys(model(
             keys::layout(cfg.full_keyboard)
                 .map(|k| {
-                    let id = format!("key:{}", k.id);
+                    let id = format!("key:{}{suffix}", k.id);
                     let action = bindings.get(&id);
                     KeyCap {
                         id: id.into(),
@@ -1574,7 +1835,7 @@ impl App {
             MOUSE_ORDER
                 .iter()
                 .map(|m| {
-                    let id = format!("mouse:{m}");
+                    let id = format!("mouse:{m}{suffix}");
                     if *m == "dpi" {
                         return MouseBtn {
                             id: id.into(),
@@ -1592,8 +1853,8 @@ impl App {
                     };
                     MouseBtn {
                         id: id.clone().into(),
-                        label: input_label(&id).into(),
-                        detail: input_detail(&id).into(),
+                        label: plain_label(split_device(&id).0).into(),
+                        detail: input_detail(split_device(&id).0).into(),
                         value: value.into(),
                         mapped: action.is_some(),
                         supported: true,
@@ -1624,15 +1885,16 @@ impl App {
         let combo = Combo::parse(input);
         s.set_selected_input(input.into());
         s.set_selected_label(input_label(input).into());
+        let is_dpi = split_device(input).0 == "mouse:dpi";
         s.set_selected_detail(
-            if input == "mouse:dpi" {
+            if is_dpi {
                 "Handled by firmware".into()
             } else {
                 input_detail(input)
             }
             .into(),
         );
-        s.set_selected_supported(input != "mouse:dpi");
+        s.set_selected_supported(!is_dpi);
         s.set_selected_is_combo(combo.is_some());
         if let Some(c) = &combo {
             s.set_combo_mods(Modifier::to_bits(&c.mods) as i32);
@@ -1675,7 +1937,29 @@ impl App {
             .unwrap_or_else(|| action.map(kind_of).unwrap_or(K_DEFAULT));
         s.set_selected_kind(kind);
         s.set_slot(st.slot as i32);
-        s.set_slot_title(SLOT_TITLES[st.slot.min(3)].into());
+        let gesture = matches!(st.binding(), Some(Action::Gesture { .. }));
+        s.set_slot_title(
+            if gesture {
+                GESTURE_TITLES[st.slot.min(5)]
+            } else {
+                SLOT_TITLES[st.slot.min(3)]
+            }
+            .into(),
+        );
+        s.set_slot_back(if gesture { "← Gesture" } else { "← Tap / hold" }.into());
+        if let Some(Action::Gesture { distance, .. }) = st.binding() {
+            let parts: Vec<SharedString> = (1..=5)
+                .map(|n| {
+                    st.binding()
+                        .and_then(|a| a.slot(n))
+                        .map(|a| a.label())
+                        .unwrap_or_else(|| "Nothing".into())
+                        .into()
+                })
+                .collect();
+            s.set_gesture_parts(model(parts));
+            s.set_gesture_distance(distance.to_string().into());
+        }
         if st.slot == 0 {
             s.set_kind_items(model(KIND_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
             s.set_kind_current(kind);
@@ -1690,9 +1974,11 @@ impl App {
                     .unwrap_or(-1),
             );
             s.set_inherited_value(
-                match st.slot {
-                    1 => "Nothing happens on a tap.",
-                    2 => "Nothing happens on a hold.",
+                match (gesture, st.slot) {
+                    (true, 1) => "Nothing happens when you let go without moving.",
+                    (true, _) => "Nothing happens for this direction.",
+                    (false, 1) => "Nothing happens on a tap.",
+                    (false, 2) => "Nothing happens on a hold.",
                     _ => "No double tap: a second tap is just another tap.",
                 }
                 .into(),
@@ -1918,6 +2204,17 @@ impl App {
         ));
         s.set_notifications(cfg.notifications);
         s.set_check_updates(cfg.check_updates);
+        s.set_devices(model(
+            cfg.devices
+                .iter()
+                .map(|d| DeviceItem {
+                    name: d.name.clone().into(),
+                    detail: format!("{} · {}", d.kind(), device_id_summary(&d.id)).into(),
+                })
+                .collect(),
+        ));
+        s.set_adding_device(st.adding_device);
+        s.set_keyboards_per_device(KEYBOARDS_PER_DEVICE);
         s.set_update_status(st.update_status.clone().into());
         s.set_update_busy(st.update_busy);
 
@@ -2079,21 +2376,28 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     {
         let a = app.clone();
         s.on_select_binding(move |id, layer| {
+            let shown = Combo::parse(&id).map(|c| c.trigger).unwrap_or_else(|| id.to_string());
+            let (shown, device) = split_device(&shown);
             if let Some(ui) = a.ui() {
                 ui.global::<Store>().set_inspector_tab(0);
-                let shown = Combo::parse(&id).map(|c| c.trigger).unwrap_or_else(|| id.to_string());
                 if let Some(key) = shown.strip_prefix("key:") {
                     let on_drawing = keys::find(key).is_some_and(|k| k.group != keys::Group::Extra);
                     if on_drawing {
                         ui.global::<Store>().set_device_tab(1);
                     }
+                } else if shown.starts_with("pad:") {
+                    ui.global::<Store>().set_device_tab(2);
                 } else {
                     ui.global::<Store>().set_device_tab(0);
                 }
             }
+            let device = device.map(str::to_string);
             a.nav(|_, st| {
                 st.select_input(&id);
                 st.layer = layer.clamp(0, LAYER_COUNT as i32 - 1) as usize;
+                st.device = device
+                    .and_then(|d| st.cfg.devices.iter().position(|x| x.name == d))
+                    .map_or(0, |i| i + 1);
             });
         });
     }
@@ -2121,8 +2425,93 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         s.on_edit_slot(move |slot| {
             a.cancel_capture();
             a.nav(|_, st| {
-                st.slot = slot.clamp(0, 3) as usize;
+                st.slot = slot.clamp(0, 5) as usize;
                 st.pending_kind = None;
+            });
+        });
+    }
+    on!(on_set_gesture_distance, |value| edit |st: &mut State| {
+        let Some(v) = parse_ms(&value) else { return };
+        if let Some(Action::Gesture { distance, .. }) = st.binding_mut() {
+            *distance = v.clamp(5, 2000);
+        }
+    });
+    on!(on_select_device, |i| nav |st: &mut State| {
+        st.device = (i.max(0) as usize).min(st.cfg.devices.len());
+        // The same input, on the device picked.
+        let (base, _) = split_device(&st.input);
+        let base = base.to_string();
+        let id = if base.is_empty() { base } else { format!("{base}{}", st.device_suffix()) };
+        st.select_input(&id);
+    });
+    on!(on_tab_changed, | | nav |_st: &mut State| {});
+    on!(on_set_stick, |i| edit |st: &mut State| {
+        let p = st.profile;
+        let choice = if p == 0 { i + 1 } else { i };
+        st.cfg.profiles[p].stick_pointer = match choice {
+            1 => Some(StickPointer::Off),
+            2 => Some(StickPointer::Left),
+            3 => Some(StickPointer::Right),
+            _ => None,
+        };
+        if p == 0 && st.cfg.profiles[0].stick_pointer == Some(StickPointer::Off) {
+            st.cfg.profiles[0].stick_pointer = None;
+        }
+    });
+    on!(on_set_stick_speed, |value| edit |st: &mut State| {
+        if let Ok(v) = value.trim().parse::<u32>() {
+            st.cfg.stick_speed = v.clamp(1, 20);
+        }
+    });
+    on!(on_add_device, | | app |a: &Rc<App>| a.toggle_add_device());
+    {
+        let a = app.clone();
+        s.on_rename_device(move |i, name| {
+            let name = clean_device_name(&name);
+            a.edit(|_, st| {
+                let Some(old) = st.cfg.devices.get(i.max(0) as usize).map(|d| d.name.clone()) else {
+                    return;
+                };
+                if name.is_empty() || name == old {
+                    return;
+                }
+                if st
+                    .cfg
+                    .devices
+                    .iter()
+                    .any(|d| d.name.eq_ignore_ascii_case(&name) && d.name != old)
+                {
+                    st.notice = (format!("There is already a device called \"{name}\"."), true);
+                    return;
+                }
+                st.cfg.retarget_device(&old, Some(&name));
+                let (base, dev) = split_device(&st.input);
+                if dev == Some(old.as_str()) {
+                    st.input = format!("{base}@{name}");
+                }
+                st.notice = (String::new(), false);
+            });
+        });
+    }
+    {
+        let a = app.clone();
+        s.on_remove_device(move |i| {
+            a.edit(|_, st| {
+                let Some(name) = st.cfg.devices.get(i.max(0) as usize).map(|d| d.name.clone()) else {
+                    return;
+                };
+                let n = st.cfg.retarget_device(&name, None);
+                st.device = 0;
+                let base = split_device(&st.input).0.to_string();
+                st.select_input(&base);
+                st.notice = (
+                    match n {
+                        0 => format!("Removed \"{name}\"."),
+                        1 => format!("Removed \"{name}\" and its binding."),
+                        n => format!("Removed \"{name}\" and its {n} bindings."),
+                    },
+                    false,
+                );
             });
         });
     }
@@ -2588,6 +2977,7 @@ fn set_kind(st: &mut State, kind: i32) {
     let base = Combo::parse(&st.input)
         .map(|c| c.trigger)
         .unwrap_or_else(|| st.input.clone());
+    let base = split_device(&base).0.to_string();
     match kind {
         K_DEFAULT => st.clear_action(),
         K_OFF => st.set_action(Action::Disabled),
@@ -2599,17 +2989,43 @@ fn set_kind(st: &mut State, kind: i32) {
         K_TAPHOLD => {
             if st.slot == 0 {
                 // Keep what the input did as its tap action.
-                let tap = st
-                    .binding()
-                    .filter(|a| !matches!(a, Action::TapHold { .. }))
-                    .cloned()
-                    .map(Box::new);
+                let tap = st.binding().filter(|a| !a.has_slots()).cloned().map(Box::new);
                 st.set_action(Action::TapHold {
                     tap,
                     hold: None,
                     double: None,
                     hold_ms: 200,
                     double_ms: 250,
+                });
+            }
+        }
+        K_GESTURE => {
+            if st.slot == 0 {
+                // Letting go without moving does what the button did.
+                let tap = st
+                    .binding()
+                    .filter(|a| !a.has_slots())
+                    .cloned()
+                    .or_else(|| {
+                        base.strip_prefix("mouse:")
+                            .and_then(MouseButton::from_id)
+                            .filter(|b| !b.is_wheel())
+                            .map(|button| Action::Mouse { button })
+                    })
+                    .or_else(|| {
+                        base.strip_prefix("key:").map(|k| Action::Key {
+                            key: k.to_string(),
+                            mods: vec![],
+                        })
+                    })
+                    .map(Box::new);
+                st.set_action(Action::Gesture {
+                    tap,
+                    up: None,
+                    down: None,
+                    left: None,
+                    right: None,
+                    distance: 40,
                 });
             }
         }

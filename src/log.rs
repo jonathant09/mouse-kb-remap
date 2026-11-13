@@ -17,6 +17,16 @@ pub fn init() {
             *slot = Some(f);
         }
     }
+    // Release builds have no console: make a crash leave a trace.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        write(format_args!(
+            "panic on thread {:?}: {info}",
+            thread.name().unwrap_or("?")
+        ));
+        default(info);
+    }));
 }
 
 pub fn write(msg: std::fmt::Arguments) {

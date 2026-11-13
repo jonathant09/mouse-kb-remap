@@ -80,7 +80,7 @@ typo never loses your profiles.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `version` | number | `3` | Format version. Version 1 and 2 files load unchanged. |
+| `version` | number | `4` | Format version. Version 1–3 files load unchanged. |
 | `theme` | `"dark"` / `"light"` | `"dark"` | UI theme |
 | `enabled` | bool | `true` | Master switch (the status-bar toggle) |
 | `close_to_tray` | bool | `true` | Closing the window keeps the app in the tray |
@@ -90,6 +90,8 @@ typo never loses your profiles.
 | `hotkeys` | object | `{}` | App hotkeys: `pause`, `next_profile`, `auto_profile`, each `{ "key": …, "mods": [ … ] }` (optional) |
 | `profiles` | array | | **The first profile is always Default** |
 | `macros` | array | `[]` | Macro library, referenced by name |
+| `devices` | array | `[]` | Named mice and controllers: `{ "name": "Trackball", "id": … }` (below) |
+| `stick_speed` | number | `10` | Pointer speed (1–20) when a controller stick moves the pointer |
 
 ## Profile
 
@@ -101,6 +103,7 @@ typo never loses your profiles.
 | `bindings` | object | Map of **input id → action** (the base layer) |
 | `shift_bindings` | object | Layer 1 (the shift layer), used while an input bound to it is held or toggled (optional) |
 | `layers` | object[] | Layers 2 and 3, the same kind of map (optional) |
+| `stick_pointer` | `"off"` / `"left"` / `"right"` | Controller stick that moves the pointer. Left out: same as Default (off for Default itself). |
 
 Entries in `apps`, all case-insensitive, `*` and `?` as wildcards:
 
@@ -124,9 +127,38 @@ XButton1), `mouse:forward` (button 5 / XButton2), `mouse:wheel_up`, `mouse:wheel
 **Keyboard:** `key:<key id>`, using the key ids below, e.g. `key:A`, `key:F5`,
 `key:LShift`, `key:Numpad7`.
 
+**Controller:** `pad:a`, `pad:b`, `pad:x`, `pad:y`, `pad:lb`, `pad:rb`, `pad:lt`, `pad:rt`
+(triggers, pressed past a third), `pad:back` (View), `pad:start` (Menu), `pad:ls`, `pad:rs`
+(stick clicks), `pad:up`, `pad:down`, `pad:left`, `pad:right` (d-pad), and the sticks pushed
+past half way: `pad:ls_up`, `pad:ls_down`, `pad:ls_left`, `pad:ls_right`, `pad:rs_up`,
+`pad:rs_down`, `pad:rs_left`, `pad:rs_right`.
+
 **Combos:** parts joined by `+`; the last is the input pressed, the others must be held:
 modifiers (`ctrl`, `shift`, `alt`, `win`, either side) and other input ids. For example
 `ctrl+mouse:back`, `ctrl+shift+key:F1`, `mouse:right+mouse:left`, `key:Q+key:E`.
+
+**One device:** `@` and a device's name after an id limits the binding to that device:
+`mouse:back@Trackball`, `ctrl+mouse:back@Trackball` (the device is the one the last input
+comes from). Bindings for a device that isn't in `devices` are ignored.
+
+## Devices
+
+```json
+"devices": [
+  { "name": "Trackball", "id": "\\\\?\\HID#VID_046D&PID_C539&MI_01&Col01#8&2d8e1a4&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}" },
+  { "name": "Pad", "id": "xinput:1" }
+]
+```
+
+`name` is what binding ids use (no `@` or `+`). `id` says how the device is recognised:
+
+| `id` | Device |
+| --- | --- |
+| `\\?\HID#VID_…&PID_…#…` | A mouse on Windows (its raw input device path). If the exact path isn't connected (another USB port), a device with the same vendor, product and interface matches, then one with the same vendor and product. |
+| `xinput:1` … `xinput:4` | A controller in that XInput slot (Windows) |
+| `evdev:vendor:product:name` | Any input device on Linux, e.g. `evdev:046d:c539:Logitech G502` |
+
+Use *Settings → Devices → Add a device* rather than writing ids by hand.
 
 ## Actions
 
@@ -143,6 +175,7 @@ modifiers (`ctrl`, `shift`, `alt`, `win`, either side) and other input ids. For 
 | `{ "type": "sensitivity", "speed": 4 }` | Hold to set the pointer speed (1–20, Windows default 10) |
 | `{ "type": "tap_hold", "tap": {…}, "hold": {…}, "double": {…}, "hold_ms": 200, "double_ms": 250 }` | An action on a tap, one when held for `hold_ms`, one on a double tap within `double_ms`. Each part is optional and is any action except another `tap_hold`. |
 | `{ "type": "system", "command": "mute_mic" }` | `lock_pc`, `mute_mic`, `next_audio_output`, `minimize_window`, `maximize_window` (toggles), `always_on_top` (toggles), `next_monitor`, `close_window`, `next_profile`, `auto_profile` |
+| `{ "type": "gesture", "tap": {…}, "up": {…}, "down": {…}, "left": {…}, "right": {…}, "distance": 40 }` | Hold, move the pointer at least `distance` pixels and let go: the part for the direction moved most. `tap`: let go without moving that far. Each part is optional and is any action except a `tap_hold` or `gesture`. |
 | `{ "type": "disabled" }` | Swallow the input |
 
 ## Macros

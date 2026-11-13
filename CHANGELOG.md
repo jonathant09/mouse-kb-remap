@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0
+
+- **Game controllers.** A new *Controller* tab maps the buttons, triggers, d-pad and stick
+  directions of an Xbox-style controller (XInput) to keys, mouse buttons, macros and every
+  other action, with layers, combos and tap / hold like any other input. A stick can move the
+  pointer, per profile, at a speed you choose. Games still see the controller's own buttons,
+  so remap ones the game doesn't use or use the controller in other apps.
+- **Mouse gestures.** The *Gesture* action: hold a button, move the mouse up, down, left or
+  right and let go to do something different for each direction; letting go without moving
+  does what the button did (a normal click by default). The distance to move is adjustable.
+- **Bindings for one device.** Name a mouse or controller in *Settings → Devices* (press a
+  button on it to add it), then pick it under *Bindings for* at the top of a profile: its
+  bindings there win over the ones for all devices, so two mice can do different things.
+  Windows can't tell keyboards apart, so keys apply to every keyboard (on Linux they can be
+  per keyboard too). Buttons with a binding for one device are held back for a fraction of a
+  millisecond until Windows says which device sent them (measured 0.3 ms median), and sent
+  on unchanged when they came from another one.
+- Crashes now leave a line in `mouse-kb-remap.log`.
+- Config format version 4 (older files load unchanged; 0.3 can't read a file that uses the new
+  actions).
+
 ## 0.3.0
 
 - **Tap / hold.** One button or key can do one thing on a quick press, another when held, and

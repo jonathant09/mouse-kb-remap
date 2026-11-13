@@ -19,6 +19,7 @@ cargo build --release        # exe at target\release\mouse-kb-remap.exe
 .\start.bat install          # build + install/update Documents\mouse-kb-remap (see below)
 cargo run -- --quit          # ask the running copy to quit
 cargo test                   # unit tests (config, keys, dispatcher, scheduler, …)
+cargo test list_devices -- --ignored --nocapture   # the mice and controllers Windows reports here
 cargo clippy --all-targets   # lints (CI fails on warnings)
 cargo fmt                    # formatting (max width 120, see rustfmt.toml)
 ```
@@ -32,7 +33,7 @@ Debug builds show a console window so log output is visible. Release builds hide
 | Variable | Effect |
 | --- | --- |
 | `MOUSE_KB_REMAP_CONFIG` | Use this config file instead of the default (portable installs, testing). A copy with its own config file runs as a separate instance. |
-| `MOUSE_KB_REMAP_ACCEPT_INJECTED=1` | Also remap synthetic input from other programs. For end-to-end tests that drive the app with `SendInput`; leave it off otherwise. |
+| `MOUSE_KB_REMAP_ACCEPT_INJECTED=1` | Also remap synthetic input from other programs, which then counts as the device `injected` for per-device bindings. For end-to-end tests that drive the app with `SendInput`; leave it off otherwise. |
 | `MOUSE_KB_REMAP_UPDATE_URL` | Where the update check reads the "latest release" JSON (GitHub's format) instead of the GitHub API, e.g. `http://127.0.0.1:8765/latest.json` from a local server, to test updating without publishing a release. |
 
 ### Checking the Linux build from Windows

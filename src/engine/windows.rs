@@ -12,16 +12,25 @@
 //! low-level hooks that time out. So they only do a non-blocking lookup in a
 //! pre-built table, a `SendInput` and maybe a channel send; anything timed
 //! (macros, turbo, text) runs on a separate worker thread (`player.rs`).
+//!
+//! Per-device bindings: the hook can't tell which mouse a button came from.
+//! When the active profile has a binding limited to a device, presses of
+//! that button are held back (swallowed) and queued until the raw input
+//! thread (`win_devices.rs`) reports the device, normally well under a
+//! millisecond later; then they are dispatched, or sent on unchanged.
+//! Controller events arrive from the controller thread as thread messages.
 
 use super::dispatch::{wheel_for, Ctx, Dispatcher, Phase, Sink};
 use super::player::{self, Cmd, Out};
+use super::win_devices::{self, WM_PAD, WM_RAW_BUTTON};
 use super::{
-    pick_profile, AppCommand, Compiled, CompiledProfile, EngineEvent, FocusInfo, HotkeyBinding, Input, Layers,
-    RecEvent, WindowInfo,
+    pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo, HotkeyBinding, Input,
+    Layers, RecEvent, WindowInfo,
 };
-use crate::config::MouseButton;
+use crate::config::{MouseButton, PadButton};
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -29,7 +38,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
@@ -50,15 +59,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetClassNameW, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND, HC_ACTION, HHOOK,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, WH_KEYBOARD_LL, WH_MOUSE_LL, WINEVENT_OUTOFCONTEXT, WM_APP,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
-    XBUTTON2,
+    CallNextHookEx, DispatchMessageW, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer,
+    SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND,
+    HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WHEEL_DELTA, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WINEVENT_OUTOFCONTEXT, WM_APP, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_TIMER, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 pub const SUPPORTED: bool = true;
@@ -84,6 +93,29 @@ const WM_RESET_LAYERS: u32 = WM_APP + 2;
 /// How often the focused window's title / fullscreen state is re-checked
 /// while a profile has a title or fullscreen rule.
 const WINDOW_POLL_MS: u32 = 500;
+
+/// A held-back mouse button waits at most this long for its device report
+/// (only reached if raw input fails); then it counts as "no named device".
+const DEVICE_WAIT: Duration = Duration::from_millis(30);
+/// A device report that came before its hook event is kept this long.
+const EARLY_REPORT: Duration = Duration::from_millis(20);
+
+/// A mouse event held back until its device is known.
+struct Deferred {
+    input: Input,
+    phase: Phase,
+    /// The event as the hook saw it, to send on unchanged.
+    msg: u32,
+    mouse_data: u32,
+    /// `RI_MOUSE_*` flag of the raw report that belongs to it.
+    flag: u16,
+    /// Whether the binding depends on the device. Others only queue to
+    /// keep their order.
+    needs_device: bool,
+    /// Filled in when the report arrives: Some(None) = not a named device.
+    device: Option<Option<DeviceIndex>>,
+    at: Instant,
+}
 
 /// Engine thread id, for posting it messages.
 static ENGINE_TID: AtomicU32 = AtomicU32::new(0);
@@ -124,6 +156,7 @@ struct Shared {
     capture: AtomicBool,
     recording: AtomicBool,
     record: Mutex<Option<Recording>>,
+    stick_speed: AtomicU32,
 }
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
@@ -154,6 +187,11 @@ thread_local! {
     /// Thread timer ids (0 = not running).
     static TAP_TIMER: Cell<usize> = const { Cell::new(0) };
     static POLL_TIMER: Cell<usize> = const { Cell::new(0) };
+    static DEVICE_TIMER: Cell<usize> = const { Cell::new(0) };
+    /// Mouse events waiting for their device, oldest first.
+    static DEFERRED: RefCell<VecDeque<Deferred>> = const { RefCell::new(VecDeque::new()) };
+    /// Device reports no held-back event claimed yet: (flags, device, when).
+    static EARLY: RefCell<VecDeque<(u16, Option<DeviceIndex>, Instant)>> = const { RefCell::new(VecDeque::new()) };
 }
 
 pub struct Engine;
@@ -183,7 +221,11 @@ impl Engine {
             capture: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             record: Mutex::new(None),
+            stick_speed: AtomicU32::new(compiled.stick_speed),
         });
+        let sh = shared();
+        win_devices::set_devices(compiled.devices);
+        win_devices::start(sh.on_event.clone(), sh.accept_injected, MAGIC);
 
         std::thread::Builder::new()
             .name("remap-player".into())
@@ -217,7 +259,14 @@ impl Engine {
         if let Ok(mut h) = sh.hotkeys.write() {
             *h = Arc::new(compiled.hotkeys);
         }
+        sh.stick_speed.store(compiled.stick_speed, Ordering::SeqCst);
+        win_devices::set_devices(compiled.devices);
         profile_changed_elsewhere();
+    }
+
+    pub fn capture_device(&self, on: bool) {
+        win_devices::set_capture(on);
+        post_engine(WM_UPDATE_HOOKS);
     }
 
     pub fn force_profile(&self, index: Option<usize>) {
@@ -337,6 +386,26 @@ fn engine_thread() {
                         on_foreground(GetForegroundWindow(), true);
                         continue;
                     }
+                    WM_TIMER if msg.wParam.0 == DEVICE_TIMER.get() && msg.wParam.0 != 0 => {
+                        run_deferred(Instant::now());
+                        continue;
+                    }
+                    WM_RAW_BUTTON => {
+                        on_device_report(msg.wParam.0 as u16, device_of(msg.lParam));
+                        continue;
+                    }
+                    WM_PAD => {
+                        let i = msg.wParam.0 & 0xFF;
+                        if let Some(&b) = PadButton::ALL.get(i) {
+                            let phase = if msg.wParam.0 & 0x100 != 0 {
+                                Phase::Up
+                            } else {
+                                Phase::Down
+                            };
+                            handle(Input::Pad(b), phase, device_of(msg.lParam));
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -348,27 +417,39 @@ fn engine_thread() {
 
 /// Post a message to the engine thread (from any thread).
 fn post_engine(message: u32) {
+    post_engine_with(message, WPARAM(0), LPARAM(0));
+}
+
+pub(super) fn post_engine_with(message: u32, wparam: WPARAM, lparam: LPARAM) {
     let tid = ENGINE_TID.load(Ordering::SeqCst);
     if tid != 0 {
         unsafe {
-            let _ = PostThreadMessageW(tid, message, WPARAM(0), LPARAM(0));
+            let _ = PostThreadMessageW(tid, message, wparam, lparam);
         }
     }
+}
+
+/// Device index from a `WM_RAW_BUTTON` / `WM_PAD` lParam (index + 1, 0 none).
+fn device_of(lparam: LPARAM) -> Option<DeviceIndex> {
+    (lparam.0 > 0).then(|| (lparam.0 - 1) as DeviceIndex)
 }
 
 /// Install the mouse hook only while something needs it: the active profile
 /// remaps a mouse button or the wheel, or a macro is being recorded.
 /// Otherwise mouse movement and clicks never pass through this app at all.
+/// Also starts or stops device reports and controller polling to match.
 /// Engine thread only.
 fn update_mouse_hook() {
     let sh = shared();
-    let wanted = sh.recording.load(Ordering::SeqCst)
-        || sh
-            .active
-            .read()
-            .ok()
-            .and_then(|a| a.clone())
-            .is_some_and(|l| l.uses_mouse());
+    let active = sh.active.read().ok().and_then(|a| a.clone());
+    let wanted = sh.recording.load(Ordering::SeqCst) || active.as_ref().is_some_and(|l| l.uses_mouse());
+    win_devices::update(
+        active.as_ref().is_some_and(|l| l.mouse_device_bindings()),
+        active.as_ref().is_some_and(|l| l.uses_pad()),
+        active.as_ref().map(|l| l.stick_pointer).unwrap_or_default(),
+        sh.stick_speed.load(Ordering::SeqCst),
+    );
+    let busy = DISPATCH.with(|d| d.borrow().holds_mouse()) || DEFERRED.with(|q| !q.borrow().is_empty());
     MOUSE_HOOK.with(|hook| match (wanted, hook.get()) {
         (true, None) => {
             PENDING_UNHOOK.with(|p| p.set(false));
@@ -385,7 +466,7 @@ fn update_mouse_hook() {
         (false, Some(h)) => {
             // A remapped button still held needs its release seen, or the
             // key it sends would stay down: wait for it.
-            if DISPATCH.with(|d| d.borrow().holds_mouse()) {
+            if busy {
                 PENDING_UNHOOK.with(|p| p.set(true));
             } else {
                 PENDING_UNHOOK.with(|p| p.set(false));
@@ -445,8 +526,12 @@ fn arm_tap_timer() {
 fn on_tap_timer() {
     let sh = shared();
     let mut sink = HookSink::new(sh);
-    DISPATCH.with(|d| d.borrow_mut().tick(Instant::now(), &mut sink));
-    sink.flush();
+    DISPATCH.with(|d| {
+        if let Ok(mut d) = d.try_borrow_mut() {
+            d.tick(Instant::now(), &mut sink);
+        }
+    });
+    sink.send_all();
     arm_tap_timer();
 }
 
@@ -559,7 +644,7 @@ fn on_foreground(hwnd: HWND, poll: bool) {
                     let vk = if vk == crate::keys::VK_NUMPAD_ENTER { 0x0D } else { vk };
                     (unsafe { GetAsyncKeyState(vk as i32) }) < 0
                 }
-                Input::Mouse(_) => true,
+                Input::Mouse(_) | Input::Pad(_) => true,
             })
         });
     }
@@ -695,7 +780,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         });
                     }
                 }
-                let swallow = handle(input, phase);
+                let swallow = handle_mouse(input, phase, msg, info.mouseData);
                 if phase == Phase::Up
                     && PENDING_UNHOOK.with(|p| p.get())
                     && !DISPATCH.with(|d| d.borrow().holds_mouse())
@@ -769,7 +854,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
             let phase = if down { Phase::Down } else { Phase::Up };
-            if handle(Input::Key(vk), phase) {
+            if handle(Input::Key(vk), phase, None) {
                 return LRESULT(1);
             }
         }
@@ -823,7 +908,7 @@ fn capture_key(vk: u16, down: bool) -> bool {
 }
 
 /// Returns true if the original input should be swallowed.
-fn handle(input: Input, phase: Phase) -> bool {
+fn handle(input: Input, phase: Phase, device: Option<DeviceIndex>) -> bool {
     let sh = shared();
     // try_read: never block inside a low-level hook. If a writer holds the
     // lock (a profile switch this instant) the event passes through.
@@ -834,50 +919,258 @@ fn handle(input: Input, phase: Phase) -> bool {
         enabled: sh.enabled.load(Ordering::Relaxed),
         hotkeys: &hotkeys,
         now: Instant::now(),
+        device,
     };
     let mut sink = HookSink::new(sh);
-    let swallow = DISPATCH.with(|d| d.borrow_mut().handle(input, phase, &ctx, &mut sink));
-    sink.flush();
+    // The dispatcher is never borrowed while output is sent (see HookSink),
+    // so this always succeeds; if it ever didn't, pass the event on rather
+    // than crash inside a hook.
+    let swallow = DISPATCH.with(|d| match d.try_borrow_mut() {
+        Ok(mut d) => d.handle(input, phase, &ctx, &mut sink),
+        Err(_) => {
+            crate::log!("engine: re-entrant event passed on");
+            false
+        }
+    });
+    sink.send_all();
     arm_tap_timer();
     swallow
 }
 
+/// `RI_MOUSE_*` raw report flag for a hook event.
+fn raw_flag(input: Input, phase: Phase) -> u16 {
+    let Input::Mouse(b) = input else { return 0 };
+    let up = phase == Phase::Up;
+    match b {
+        MouseButton::Left => {
+            if up {
+                0x0002
+            } else {
+                0x0001
+            }
+        }
+        MouseButton::Right => {
+            if up {
+                0x0008
+            } else {
+                0x0004
+            }
+        }
+        MouseButton::Middle => {
+            if up {
+                0x0020
+            } else {
+                0x0010
+            }
+        }
+        MouseButton::Back => {
+            if up {
+                0x0080
+            } else {
+                0x0040
+            }
+        }
+        MouseButton::Forward => {
+            if up {
+                0x0200
+            } else {
+                0x0100
+            }
+        }
+        MouseButton::WheelUp | MouseButton::WheelDown => 0x0400,
+        MouseButton::WheelLeft | MouseButton::WheelRight => 0x0800,
+    }
+}
+
+/// A mouse event from the hook. Buttons whose binding depends on the device
+/// are held back until the device is known; while any are waiting, other
+/// buttons queue behind them so the order is kept.
+fn handle_mouse(input: Input, phase: Phase, msg: u32, mouse_data: u32) -> bool {
+    let sh = shared();
+    let needs_device = win_devices::reporting()
+        && sh.enabled.load(Ordering::Relaxed)
+        && sh
+            .active
+            .try_read()
+            .ok()
+            .and_then(|a| a.clone())
+            .is_some_and(|l| l.device_specific(&input));
+    let queued = DEFERRED.with(|q| !q.borrow().is_empty());
+    if !needs_device && !queued {
+        return handle(input, phase, None);
+    }
+    let flag = raw_flag(input, phase);
+    let now = Instant::now();
+    let mut device = None;
+    if needs_device {
+        // The report may have come first.
+        EARLY.with(|e| {
+            let mut e = e.borrow_mut();
+            e.retain(|(_, _, at)| now.duration_since(*at) < EARLY_REPORT);
+            if let Some(r) = e.iter_mut().find(|(flags, _, _)| flags & flag != 0) {
+                r.0 &= !flag;
+                device = Some(r.1);
+            }
+            e.retain(|(flags, _, _)| *flags != 0);
+        });
+        if !queued {
+            if let Some(d) = device {
+                return handle(input, phase, d);
+            }
+        }
+    }
+    DEFERRED.with(|q| {
+        q.borrow_mut().push_back(Deferred {
+            input,
+            phase,
+            msg,
+            mouse_data,
+            flag,
+            needs_device,
+            device,
+            at: now,
+        })
+    });
+    arm_device_timer();
+    true
+}
+
+/// The raw input thread reports a mouse's button flags and device: give
+/// them to the held-back events waiting for them, oldest first.
+fn on_device_report(mut flags: u16, device: Option<DeviceIndex>) {
+    DEFERRED.with(|q| {
+        for d in q.borrow_mut().iter_mut() {
+            if d.needs_device && d.device.is_none() && flags & d.flag != 0 {
+                d.device = Some(device);
+                flags &= !d.flag;
+            }
+        }
+    });
+    if flags != 0 {
+        EARLY.with(|e| {
+            let mut e = e.borrow_mut();
+            if e.len() >= 32 {
+                e.pop_front();
+            }
+            e.push_back((flags, device, Instant::now()));
+        });
+    }
+    run_deferred(Instant::now());
+}
+
+/// Dispatch held-back events from the front of the queue as far as their
+/// device is known (or they waited too long), sending on the ones nothing
+/// is bound to.
+fn run_deferred(now: Instant) {
+    loop {
+        let next = DEFERRED.with(|q| {
+            let mut q = q.borrow_mut();
+            let ready = q
+                .front()
+                .is_some_and(|d| !d.needs_device || d.device.is_some() || now.duration_since(d.at) >= DEVICE_WAIT);
+            if ready {
+                q.pop_front()
+            } else {
+                None
+            }
+        });
+        let Some(d) = next else { break };
+        if !handle(d.input, d.phase, d.device.flatten()) {
+            send(&[original_mouse_input(d.msg, d.mouse_data)]);
+        }
+    }
+    arm_device_timer();
+    if PENDING_UNHOOK.with(|p| p.get()) && DEFERRED.with(|q| q.borrow().is_empty()) {
+        post_engine(WM_UPDATE_HOOKS);
+    }
+}
+
+/// Keep the device wait timer running while events are held back.
+fn arm_device_timer() {
+    let waiting = DEFERRED.with(|q| !q.borrow().is_empty());
+    let id = DEVICE_TIMER.get();
+    unsafe {
+        if waiting && id == 0 {
+            DEVICE_TIMER.set(SetTimer(None, 0, DEVICE_WAIT.as_millis() as u32, None));
+        } else if !waiting && id != 0 {
+            let _ = KillTimer(None, id);
+            DEVICE_TIMER.set(0);
+        }
+    }
+}
+
+/// A mouse event as the hook saw it, to send on after holding it back.
+fn original_mouse_input(msg: u32, mouse_data: u32) -> INPUT {
+    let hi = mouse_data >> 16;
+    let (flags, data) = match msg {
+        WM_LBUTTONDOWN => (MOUSEEVENTF_LEFTDOWN, 0),
+        WM_LBUTTONUP => (MOUSEEVENTF_LEFTUP, 0),
+        WM_RBUTTONDOWN => (MOUSEEVENTF_RIGHTDOWN, 0),
+        WM_RBUTTONUP => (MOUSEEVENTF_RIGHTUP, 0),
+        WM_MBUTTONDOWN => (MOUSEEVENTF_MIDDLEDOWN, 0),
+        WM_MBUTTONUP => (MOUSEEVENTF_MIDDLEUP, 0),
+        WM_XBUTTONDOWN => (MOUSEEVENTF_XDOWN, hi),
+        WM_XBUTTONUP => (MOUSEEVENTF_XUP, hi),
+        WM_MOUSEHWHEEL => (MOUSEEVENTF_HWHEEL, hi as u16 as i16 as i32 as u32),
+        _ => (MOUSEEVENTF_WHEEL, hi as u16 as i16 as i32 as u32),
+    };
+    mouse_input(flags, data)
+}
+
+/// Move the pointer by (dx, dy) like a mouse would (controller stick).
+pub(super) fn send_move(dx: i32, dy: i32) {
+    send(&[move_input(dx, dy, false)]);
+}
+
+/// Collects the dispatcher's output and sends it in one go with `send_all`,
+/// once the dispatcher is no longer borrowed: `SendInput` from this thread
+/// can run this thread's own hooks re-entrantly (with other input that was
+/// waiting for them), and those need the dispatcher.
 struct HookSink<'a> {
-    buf: [INPUT; 16],
+    buf: [INPUT; 32],
     len: usize,
+    /// Only used if an event ever produces more than `buf` holds.
+    overflow: Vec<INPUT>,
     sh: &'a Shared,
 }
 
 impl<'a> HookSink<'a> {
     fn new(sh: &'a Shared) -> Self {
         HookSink {
-            buf: [INPUT::default(); 16],
+            buf: [INPUT::default(); 32],
             len: 0,
+            overflow: Vec::new(),
             sh,
         }
+    }
+
+    fn send_all(&mut self) {
+        if self.overflow.is_empty() {
+            send(&self.buf[..self.len]);
+        } else {
+            let mut all = self.buf[..self.len].to_vec();
+            all.append(&mut self.overflow);
+            send(&all);
+        }
+        self.len = 0;
     }
 }
 
 impl Sink for HookSink<'_> {
     fn out(&mut self, out: Out) {
-        if self.len >= self.buf.len() - 2 {
-            self.flush();
-        }
         let mut push = |i: INPUT| {
-            if self.len < self.buf.len() {
+            if self.len < self.buf.len() && self.overflow.is_empty() {
                 self.buf[self.len] = i;
                 self.len += 1;
+            } else {
+                self.overflow.push(i);
             }
         };
         out_to_inputs(&out, &mut push);
     }
 
-    fn flush(&mut self) {
-        if self.len > 0 {
-            send(&self.buf[..self.len]);
-            self.len = 0;
-        }
-    }
+    /// Output is kept in order and sent by `send_all`.
+    fn flush(&mut self) {}
 
     fn worker(&mut self, cmd: Cmd) {
         let _ = self.sh.worker.send(cmd);
@@ -889,6 +1182,12 @@ impl Sink for HookSink<'_> {
 
     fn notice(&mut self, text: String) {
         (self.sh.on_event)(EngineEvent::Notice(text));
+    }
+
+    fn pointer(&mut self) -> Option<(i32, i32)> {
+        let mut p = POINT::default();
+        unsafe { GetCursorPos(&mut p) }.ok()?;
+        Some((p.x, p.y))
     }
 }
 
