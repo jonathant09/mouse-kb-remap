@@ -1,6 +1,6 @@
 [package]
 name = "mouse-kb-remap"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Lightweight, brand-agnostic mouse & keyboard remapper with per-app profiles, macros and turbo"
 license = "MIT"

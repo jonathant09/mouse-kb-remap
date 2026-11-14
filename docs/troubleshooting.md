@@ -79,7 +79,9 @@ plain remap). Buttons without per-device bindings are not affected.
   accept the app's request for full reports.
 - **The original Steam Controller (2015)** isn't read directly; with Steam running, its
   desktop layout can send keys the app remaps. **Switch 2** controllers aren't supported yet.
-- A game still sees the original buttons as well; the app can't hide them.
+- A game still sees the original buttons as well. To change what a game sees, remap the
+  controller onto the [virtual controller](user-guide.md#virtual-controller) and hide the
+  real one with HidHide.
 
 ## Controller buttons count twice
 
@@ -87,6 +89,45 @@ Something else presents the same controller as an Xbox controller too: DS4Window
 BetterJoy, DSX, or Steam Input. Steam's copies are skipped by default; for the others, turn
 off one of the two sources in *Settings → Controllers* (or hide the real controller in that
 tool's settings, e.g. HidHide for DS4Windows, and keep *Xbox-style controllers* on).
+
+## The virtual controller does nothing in a game
+
+- **Is it plugged in?** Select an input with the Controller action: the box under the list
+  says *plugged in, as controller N*. It's plugged in only while the active profile has a
+  Controller binding (or a turbo of a controller button), so check the status bar shows that
+  profile while the game is focused.
+- **Driver missing:** use *Install controller driver*, or install ViGEmBus yourself. If the
+  installer finished but the app still says it's missing, restart Windows.
+- **The game reads only controller 1** and your real controller is controller 1: hide the
+  real one with HidHide (see [Remapping a real controller](user-guide.md#remapping-a-real-controller)),
+  or connect it after the virtual one is plugged in.
+- **The game ignores it:** some games, and some anti-cheats, refuse virtual controllers.
+  Nothing on the app's side can change that.
+- **Steam** may take over the virtual controller like any Xbox controller (Steam Input):
+  set the game's *Steam Input* to off if the controller acts strangely in a Steam game.
+
+## "Get an app to open this 'ms-gamebar' link" when the virtual controller appears
+
+Windows tries to open the Xbox Game Bar a few seconds after any Xbox controller connects,
+the virtual one included. If the Game Bar was removed from Windows, it asks for an app to
+open the link instead. It isn't the app's doing and happens with a real Xbox controller
+too. Fixes: install *Xbox Game Bar* again from the Microsoft Store (it then stays out of
+the way unless you open it), or keep the virtual controller plugged in longer by using it
+from one profile that stays active (it's only plugged in when a profile uses it).
+
+## Remapped controller buttons still do their old thing in a game
+
+The game is also reading your real controller. Hide it with HidHide and allow
+`mouse-kb-remap.exe` there, so only the virtual controller (your controller with its
+remaps) reaches games. See [Remapping a real controller](user-guide.md#remapping-a-real-controller).
+
+## Installing the controller driver fails
+
+The message says why. *The admin prompt was declined* or *the installer was cancelled*:
+nothing was installed, try again. *The download isn't the expected installer*: the file
+from GitHub didn't match the checksum built into the app (a broken download or a changed
+file), so it wasn't run. You can always install ViGEmBus by hand from
+[its release page](https://github.com/nefarius/ViGEmBus/releases).
 
 ## Gyro or touchpad does nothing, or the gyro drifts
 
@@ -178,8 +219,9 @@ open the old copy from its tray icon and quit it there, then start the new one.
 ## Anti-cheat and game rules
 
 mouse-kb-remap uses standard, documented Windows APIs (low-level hooks and `SendInput`),
-the same mechanism as AutoHotkey and X-Mouse Button Control. It installs no driver and
-touches no game memory.
+the same mechanism as AutoHotkey and X-Mouse Button Control. It touches no game memory and
+installs no driver of its own; the virtual controller uses the ViGEmBus driver, installed
+only when you ask, which some anti-cheats distrust.
 
 Still, many games forbid macros, turbo or remapping software in their terms of service,
 and some anti-cheats flag or ignore synthetic input. One-to-one remaps (side button → key)

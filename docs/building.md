@@ -21,9 +21,17 @@ cargo run -- --quit          # ask the running copy to quit
 cargo test                   # unit tests (config, keys, dispatcher, scheduler, …)
 cargo test list_devices -- --ignored --nocapture       # the mice and XInput slots Windows reports here
 cargo test list_controllers -- --ignored --nocapture   # the controllers the app would read over HID
+cargo test vpad_round_trip -- --ignored --nocapture    # plug in a virtual controller, read it back (needs ViGEmBus)
+cargo test download_matches -- --ignored               # download the ViGEmBus installer and check its checksum
 cargo clippy --all-targets   # lints (CI fails on warnings)
 cargo fmt                    # formatting (max width 120, see rustfmt.toml)
 ```
+
+The virtual controller can be tested end to end without a real controller:
+`vpad_stand_in_controller` (ignored test) plugs in a second virtual controller that holds
+the buttons in `VPAD_TEST_BUTTONS` (XInput flags, hex) for `VPAD_TEST_SECS`, standing in
+for a real one, so copying and remapping it can be read back through XInput. Run test
+copies with `MOUSE_KB_REMAP_CONFIG` as usual.
 
 Debug builds show a console window so log output is visible. Release builds hide it
 (`windows_subsystem = "windows"` in `main.rs`); everything logged also goes to

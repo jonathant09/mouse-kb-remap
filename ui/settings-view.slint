@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
 import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch, ValueField } from "widgets.slint";
-import { CaptureBox } from "controls.slint";
+import { CaptureBox, VpadStatus } from "controls.slint";
 
 component SwitchRow inherits HorizontalLayout {
     in property <string> text;
@@ -243,6 +243,22 @@ export component SettingsView inherits Rectangle {
                     hint: "Without Steam running, these move the mouse with the trackpads and click with the triggers by themselves. Turn this on when the app should be the only thing reading them.";
                     checked: Store.pad-lizard;
                     toggled(on) => { Store.set-pad-flag("lizard", on); }
+                }
+            }
+
+            if Store.vpad-supported: Card {
+                title: "VIRTUAL CONTROLLER";
+                max-width: 640px;
+                Hint { text: "With the Controller action, keys, mouse buttons and controller buttons press buttons, triggers and sticks of a virtual Xbox controller, so games that want a controller can be played with a keyboard and mouse, and a controller can be remapped for games. It's plugged in only while the active profile uses it. Windows needs the free ViGEmBus driver for it."; }
+                VpadStatus { }
+                SwitchRow {
+                    text: "Copy the real controller to the virtual one";
+                    hint: "What your controller does that the profile doesn't remap goes to the virtual controller too, so it works as your remapped controller. Games also still see the real controller: hide it from them with HidHide (by the same author as ViGEmBus) and allow mouse-kb-remap in HidHide, or remapped buttons do both things.";
+                    checked: Store.pad-copy;
+                    toggled(on) => { Store.set-pad-flag("copy", on); }
+                }
+                Callout {
+                    text: "ViGEmBus is no longer developed (its last version is from 2023) but still works on Windows 10 and 11. Some games' anti-cheat refuses virtual controllers, or treats them as cheating: check before using one in competitive online games.";
                 }
             }
 

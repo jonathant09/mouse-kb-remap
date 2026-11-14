@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Store, BindingRow } from "store.slint";
 import { Button, Callout, ChoiceGrid, Divider, Hint, SectionLabel, Segmented, TextArea, ValueField } from "widgets.slint";
-import { CaptureBox, FormRow, KeyPicker, ModifierChips } from "controls.slint";
+import { CaptureBox, FormRow, KeyPicker, ModifierChips, VpadStatus } from "controls.slint";
 
 component KeyEditor inherits VerticalLayout {
     spacing: 8px;
@@ -70,19 +70,27 @@ component TurboEditor inherits VerticalLayout {
     spacing: 8px;
     SectionLabel { text: "PRESSES"; }
     Segmented {
-        items: ["Key", "Mouse button"];
-        current: Store.turbo-is-mouse ? 1 : 0;
-        selected(i) => { Store.set-turbo-output(i == 1); }
+        items: Store.vpad-supported ? ["Key", "Mouse button", "Controller"] : ["Key", "Mouse button"];
+        current: Store.turbo-kind;
+        selected(i) => { Store.set-turbo-output(i); }
     }
-    if !Store.turbo-is-mouse: CaptureBox { target: "turbo"; value: Store.turbo-key; }
-    if !Store.turbo-is-mouse: ModifierChips { target: "turbo"; mods: Store.turbo-mods; }
-    if !Store.turbo-is-mouse: KeyPicker { target: "turbo"; }
-    if Store.turbo-is-mouse: ChoiceGrid {
+    if Store.turbo-kind == 0: CaptureBox { target: "turbo"; value: Store.turbo-key; }
+    if Store.turbo-kind == 0: ModifierChips { target: "turbo"; mods: Store.turbo-mods; }
+    if Store.turbo-kind == 0: KeyPicker { target: "turbo"; }
+    if Store.turbo-kind == 1: ChoiceGrid {
         columns: 3;
         items: Store.mouse-names;
         current: Store.turbo-mouse;
         selected(i) => { Store.set-turbo-mouse(i); }
     }
+    if Store.turbo-kind == 2: ChoiceGrid {
+        columns: 3;
+        cell-height: 24px;
+        items: Store.pad-output-names;
+        current: Store.turbo-pad;
+        selected(i) => { Store.set-turbo-pad(i); }
+    }
+    if Store.turbo-kind == 2: VpadStatus { }
     Rectangle { height: 2px; }
     SectionLabel { text: "TIMING"; }
     FormRow {
@@ -110,6 +118,20 @@ component TurboEditor inherits VerticalLayout {
     Callout {
         text: "Turbo and macros are against the rules in some online games. Check before using them in competitive play.";
     }
+}
+
+component PadOutputEditor inherits VerticalLayout {
+    spacing: 8px;
+    Hint { text: "Presses a button, trigger or stick direction of a virtual Xbox controller for as long as the input is held. Games see it as a real controller."; }
+    ChoiceGrid {
+        columns: 3;
+        cell-height: 24px;
+        items: Store.pad-output-names;
+        current: Store.pad-output-current;
+        selected(i) => { Store.set-pad-output(i); }
+    }
+    VpadStatus { }
+    Hint { text: "Sticks and triggers go all the way. Settings → Virtual controller has more, including copying a real controller to it."; }
 }
 
 component TextEditor inherits VerticalLayout {
@@ -499,7 +521,8 @@ export component Inspector inherits Rectangle {
                         }
                         Hint { text: "\"While held\" is the usual way to aim: hold the button, tilt, let go to stop."; }
                     }
-                    if Store.selected-kind == 14: Hint { text: "This input is blocked while the profile is active."; }
+                    if Store.selected-kind == 14: PadOutputEditor { }
+                    if Store.selected-kind == 15: Hint { text: "This input is blocked while the profile is active."; }
 
                     if !Store.selected-is-combo && Store.slot == 0: VerticalLayout {
                         spacing: 10px;

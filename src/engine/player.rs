@@ -6,7 +6,7 @@
 //! without threads or an OS; `run_worker` is the thread loop around it.
 
 use super::Input;
-use crate::config::{MouseButton, SystemCommand};
+use crate::config::{MouseButton, PadButton, SystemCommand};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -35,6 +35,9 @@ pub enum Step {
         absolute: bool,
     },
     System(SystemCommand),
+    /// Press or release a virtual controller output.
+    PadDown(PadButton),
+    PadUp(PadButton),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +108,9 @@ pub enum Cmd {
         vk: u16,
         mods: u8,
     },
+    /// The same for a virtual controller output, held long enough for games
+    /// that read the controller once a frame.
+    PadTap(PadButton),
     /// Stop everything (profile switch, config change, pause, quit).
     StopAll,
 }
@@ -133,6 +139,11 @@ pub enum Out {
     System(SystemCommand),
     /// Something to show on screen ("Turbo on").
     Notice(String),
+    /// Press or release a virtual controller output.
+    Pad {
+        button: PadButton,
+        down: bool,
+    },
 }
 
 /// Small, fast pseudo-random numbers for delay jitter (xorshift64*).
@@ -173,6 +184,9 @@ impl Default for Rng {
 
 /// How long a wheel → key tap is held.
 pub const TAP_HOLD_MS: u32 = 15;
+/// How long a tap holds a virtual controller button: games read controllers
+/// once a frame, so this is longer than a key tap.
+pub const PAD_TAP_MS: u32 = 50;
 
 /// If playback falls further behind than this (system busy), restart timing
 /// from now instead of firing a burst to catch up.
@@ -188,6 +202,7 @@ struct Player {
     single: bool,
     keys_down: Vec<u16>,
     buttons_down: Vec<MouseButton>,
+    pads_down: Vec<PadButton>,
 }
 
 impl Player {
@@ -201,6 +216,7 @@ impl Player {
             single,
             keys_down: Vec::new(),
             buttons_down: Vec::new(),
+            pads_down: Vec::new(),
         }
     }
 
@@ -222,6 +238,9 @@ impl Player {
         }
         for button in self.buttons_down.drain(..).rev() {
             out.push(Out::Button { button, down: false });
+        }
+        for button in self.pads_down.drain(..).rev() {
+            out.push(Out::Pad { button, down: false });
         }
     }
 
@@ -294,6 +313,16 @@ impl Player {
                 Step::Launch(spec) => out.push(Out::Launch(spec)),
                 Step::Move { x, y, absolute } => out.push(Out::Move { x, y, absolute }),
                 Step::System(c) => out.push(Out::System(c)),
+                Step::PadDown(button) => {
+                    if !self.pads_down.contains(&button) {
+                        self.pads_down.push(button);
+                    }
+                    out.push(Out::Pad { button, down: true });
+                }
+                Step::PadUp(button) => {
+                    self.pads_down.retain(|b| *b != button);
+                    out.push(Out::Pad { button, down: false });
+                }
             }
         }
         true
@@ -366,6 +395,11 @@ impl Scheduler {
                 let mut steps: Vec<Step> = mods.iter().map(|&m| Step::KeyDown(m)).collect();
                 steps.extend([Step::KeyDown(vk), Step::Delay(TAP_HOLD_MS), Step::KeyUp(vk)]);
                 steps.extend(mods.iter().rev().map(|&m| Step::KeyUp(m)));
+                let plan = Arc::new(Plan::new(steps, Mode::Once, 0, 0));
+                self.players.push(Player::new(None, plan, now, true));
+            }
+            Cmd::PadTap(b) => {
+                let steps = vec![Step::PadDown(b), Step::Delay(PAD_TAP_MS), Step::PadUp(b)];
                 let plan = Arc::new(Plan::new(steps, Mode::Once, 0, 0));
                 self.players.push(Player::new(None, plan, now, true));
             }

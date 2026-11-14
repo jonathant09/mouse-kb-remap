@@ -30,6 +30,8 @@ mod win_devices;
 #[cfg(windows)]
 mod win_hid;
 #[cfg(windows)]
+mod win_vpad;
+#[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 use windows as imp;
@@ -98,6 +100,24 @@ pub enum EngineEvent {
         /// Input id, e.g. `pad:button7`.
         input: String,
     },
+    /// The virtual controller was plugged in or out, or can't be.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Vpad(VpadState),
+}
+
+/// The virtual controller (Windows, ViGEmBus).
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum VpadState {
+    /// Not plugged in: the active profile doesn't send controller output.
+    #[default]
+    Unplugged,
+    /// Plugged in, as XInput controller 1-4 if known.
+    Plugged { slot: Option<u8> },
+    /// Wanted, but the ViGEmBus driver isn't installed.
+    NoDriver,
+    /// Wanted, but plugging it in failed.
+    Failed(String),
 }
 
 /// Index into `Compiled::devices` (and `Config::devices`).
@@ -148,6 +168,28 @@ pub enum Target {
     Gyro {
         toggle: bool,
     },
+    /// Hold a button, trigger or stick direction of the virtual controller.
+    Pad(PadButton),
+}
+
+impl Target {
+    /// Whether this sends virtual controller output (also from a tap / hold
+    /// or gesture part, or a turbo of a controller button).
+    pub fn uses_vpad(&self) -> bool {
+        match self {
+            Target::Pad(_) => true,
+            Target::Play(plan) => plan.steps.iter().any(|s| matches!(s, Step::PadDown(_))),
+            Target::TapHold(th) => [&th.tap, &th.hold, &th.double]
+                .iter()
+                .any(|p| p.as_ref().is_some_and(Target::uses_vpad)),
+            Target::Gesture(g) => g
+                .swipes
+                .iter()
+                .chain(std::iter::once(&g.tap))
+                .any(|p| p.as_ref().is_some_and(Target::uses_vpad)),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -234,6 +276,8 @@ pub struct Layers {
     pub touch_pointer: bool,
     /// Some input is bound to the Gyro action.
     pub gyro_bound: bool,
+    /// Some binding sends virtual controller output.
+    pub uses_vpad: bool,
 }
 
 impl Layers {
@@ -266,6 +310,36 @@ impl Layers {
             || self.touch_pointer
             || self.gyro_bound
             || self.inputs().any(|i| matches!(i, Input::Pad(_)))
+    }
+
+    /// Controller inputs the virtual controller shouldn't copy from a real
+    /// one (`pad::bit` bits): the ones with a binding on any layer, the
+    /// stick that moves the pointer, and Guide (Windows already opens the
+    /// Game Bar for the real one).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn pad_excluded(&self) -> u64 {
+        let mut mask = pad::bit(PadButton::Guide);
+        for i in self.inputs() {
+            if let Input::Pad(b) = i {
+                mask |= pad::bit(*b);
+            }
+        }
+        let stick = match self.stick_pointer {
+            StickPointer::Left => [
+                PadButton::LsUp,
+                PadButton::LsDown,
+                PadButton::LsLeft,
+                PadButton::LsRight,
+            ],
+            StickPointer::Right => [
+                PadButton::RsUp,
+                PadButton::RsDown,
+                PadButton::RsLeft,
+                PadButton::RsRight,
+            ],
+            StickPointer::Off => return mask,
+        };
+        stick.iter().fold(mask, |m, b| m | pad::bit(*b))
     }
 
     /// Whether `input` does anything on any layer.
@@ -489,6 +563,12 @@ fn press_steps(output: &Output, hold_ms: u32) -> Option<Vec<Step>> {
             steps.push(Step::Delay(hold_ms));
             steps.push(Step::ButtonUp(*button));
         }
+        Output::Pad { button } if button.is_output() => {
+            steps.push(Step::PadDown(*button));
+            steps.push(Step::Delay(hold_ms));
+            steps.push(Step::PadUp(*button));
+        }
+        Output::Pad { .. } => return None,
     }
     Some(steps)
 }
@@ -631,6 +711,8 @@ fn parse_action(action: &Action, cfg: &Config) -> Option<Target> {
         }
         Action::System { command } => system_target(*command),
         Action::Gyro { toggle } => Target::Gyro { toggle: *toggle },
+        Action::Pad { button } if button.is_output() => Target::Pad(*button),
+        Action::Pad { .. } => return None,
         Action::TapHold {
             tap,
             hold,
@@ -800,6 +882,13 @@ pub fn compile(cfg: &Config) -> Compiled {
         layers.gyro_bound = layers.maps.iter().flat_map(|m| m.values()).any(is_gyro)
             || layers.device_maps.iter().flat_map(|m| m.values()).any(is_gyro)
             || layers.combos.iter().flatten().any(|c| is_gyro(&c.target));
+        layers.uses_vpad = layers.maps.iter().flat_map(|m| m.values()).any(Target::uses_vpad)
+            || layers
+                .device_maps
+                .iter()
+                .flat_map(|m| m.values())
+                .any(Target::uses_vpad)
+            || layers.combos.iter().flatten().any(|c| c.target.uses_vpad());
         layers
     };
     let mut profiles: Vec<CompiledProfile> = cfg
@@ -867,6 +956,40 @@ pub fn recording_to_steps(events: &[(std::time::Duration, RecEvent)]) -> Vec<Mac
         steps.push(step);
     }
     steps
+}
+
+/// Whether this system can have a virtual controller (Windows, ViGEmBus).
+pub const VPAD_SUPPORTED: bool = cfg!(windows);
+
+/// Whether the virtual controller's driver (ViGEmBus) is installed.
+pub fn vpad_driver_present() -> bool {
+    #[cfg(windows)]
+    {
+        win_vpad::driver_present()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Look for the virtual controller's driver again (it was just installed).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn vpad_retry() {
+    #[cfg(windows)]
+    win_vpad::retry();
+}
+
+/// The virtual controller now.
+pub fn vpad_status() -> VpadState {
+    #[cfg(windows)]
+    {
+        win_vpad::status()
+    }
+    #[cfg(not(windows))]
+    {
+        VpadState::Unplugged
+    }
 }
 
 pub struct Engine {
@@ -1291,5 +1414,71 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn controller_output_compiles_and_saves() {
+        let mut cfg = Config::default();
+        cfg.profiles[0]
+            .bindings
+            .insert("key:Space".into(), Action::Pad { button: PadButton::A });
+        // Not something the virtual controller has: ignored.
+        cfg.profiles[0].bindings.insert(
+            "key:Q".into(),
+            Action::Pad {
+                button: PadButton::Touchpad,
+            },
+        );
+        cfg.profiles[0].bindings.insert(
+            "pad:lb".into(),
+            Action::Turbo {
+                output: Output::Pad { button: PadButton::Rt },
+                interval_ms: 100,
+                hold_ms: 30,
+                delay_ms: 0,
+                toggle: false,
+            },
+        );
+        cfg.profiles[0].stick_pointer = Some(StickPointer::Right);
+        let compiled = compile(&cfg);
+        let layers = &compiled.profiles[0].layers;
+        assert!(layers.uses_vpad);
+        assert!(matches!(
+            layers.maps[0].get(&Input::Key(0x20)),
+            Some(Target::Pad(PadButton::A))
+        ));
+        assert!(!layers.maps[0].contains_key(&Input::Key(0x51)));
+        let Some(Target::Play(plan)) = layers.maps[0].get(&Input::Pad(PadButton::Lb)) else {
+            panic!("expected a turbo plan");
+        };
+        assert_eq!(
+            plan.steps[..3],
+            [
+                Step::PadDown(PadButton::Rt),
+                Step::Delay(30),
+                Step::PadUp(PadButton::Rt)
+            ]
+        );
+        // Copying a real controller leaves out remapped inputs, the pointer
+        // stick and Guide.
+        let excluded = layers.pad_excluded();
+        for b in [PadButton::Lb, PadButton::Guide, PadButton::RsUp, PadButton::RsLeft] {
+            assert!(excluded & pad::bit(b) != 0, "{b:?}");
+        }
+        for b in [PadButton::A, PadButton::Rb, PadButton::LsUp] {
+            assert!(excluded & pad::bit(b) == 0, "{b:?}");
+        }
+        // Saved by id, and read back.
+        let json = serde_json::to_string(&cfg.profiles[0].bindings).unwrap();
+        assert!(json.contains(r#"{"type":"pad","button":"a"}"#), "{json}");
+        let back: crate::config::BindingMap = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cfg.profiles[0].bindings);
+        assert!(
+            serde_json::from_str::<crate::config::BindingMap>(r#"{"key:A":{"type":"pad","button":"nope"}}"#).is_err()
+        );
+
+        let mut other = Config::default();
+        other.profiles[0].bindings.insert("key:A".into(), key("B"));
+        assert!(!compile(&other).profiles[0].layers.uses_vpad);
     }
 }

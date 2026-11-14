@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+- **Virtual controller** (Windows). The new *Controller* action presses a button, trigger or
+  stick direction of a virtual Xbox controller that games see as a real one: play games
+  that want a controller with the keyboard and mouse (WASD on the left stick, clicks on the
+  triggers), add buttons from the keyboard or mouse, or remap a controller for games. It
+  works in tap / hold, gestures, combos, layers and per device, and *Turbo* can rapid-fire a
+  controller button. Taps are held for 50 ms so games don't miss them.
+- **Remap a controller for games.** *Copy the real controller to the virtual one* (on by
+  default) passes on what your controller does that the profile doesn't remap, so the
+  virtual controller is your controller with its remaps. Games still see the real one too:
+  hide it with HidHide (the user guide explains how).
+- **Off unless used.** The virtual controller is plugged in only while the active profile
+  uses it, and unplugged ten seconds after it stops (or when the app quits).
+- **One-click driver install.** Virtual controllers need the free ViGEmBus driver. When it's
+  missing, *Install controller driver* downloads the official installer (ViGEmBus 1.22.0),
+  checks it against a checksum built into the app and runs it after Windows' admin prompt;
+  never silently. ViGEmBus is no longer developed but works on Windows 10 and 11; some
+  anti-cheats refuse virtual controllers (the app says so).
+- New *Settings → Virtual controller* card: driver state, the install button and copying.
+- Config format version 5 (older files load unchanged; 0.4 can't read a file that uses the
+  Controller action).
+
 ## 0.4.0
 
 - **Game controllers.** A new *Controller* tab maps every button, trigger, d-pad direction and

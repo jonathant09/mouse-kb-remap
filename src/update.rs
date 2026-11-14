@@ -121,7 +121,7 @@ pub fn check() -> Result<Option<Release>, String> {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -233,7 +233,7 @@ pub fn install(_release: &Release, _hidden: bool, _progress: &dyn Fn(u64, u64)) 
 }
 
 #[cfg(windows)]
-mod http {
+pub(crate) mod http {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::{
         WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
@@ -374,7 +374,7 @@ mod http {
 }
 
 #[cfg(not(windows))]
-mod http {
+pub(crate) mod http {
     pub fn get(_url: &str, _limit: usize, _progress: &dyn Fn(u64, u64)) -> Result<Vec<u8>, String> {
         Err("checking for updates isn't available on this system yet".into())
     }

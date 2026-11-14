@@ -7,8 +7,9 @@ use std::path::PathBuf;
 /// Current on-disk format. v2 added macros, turbo, combos and the shift layer;
 /// v3 added layers 2-3, tap / hold, combos as triggers, system actions,
 /// hotkeys and app rules; v4 added controllers, gestures and per-device
-/// bindings. Older files load unchanged.
-pub const CONFIG_VERSION: u32 = 4;
+/// bindings; v5 the virtual controller (Controller action, turbo of a
+/// controller button). Older files load unchanged.
+pub const CONFIG_VERSION: u32 = 5;
 
 /// Binding layers per profile: base, shift (layer 1), layer 2, layer 3.
 pub const LAYER_COUNT: usize = 4;
@@ -210,6 +211,50 @@ impl PadButton {
     /// Highest numbered button.
     pub const MAX_NUMBERED: u8 = 32;
 
+    /// What the virtual (Xbox 360) controller can press: the Xbox buttons,
+    /// triggers and stick directions.
+    pub const OUTPUTS: [PadButton; 25] = [
+        PadButton::A,
+        PadButton::B,
+        PadButton::X,
+        PadButton::Y,
+        PadButton::Lb,
+        PadButton::Rb,
+        PadButton::Lt,
+        PadButton::Rt,
+        PadButton::Back,
+        PadButton::Start,
+        PadButton::Ls,
+        PadButton::Rs,
+        PadButton::Up,
+        PadButton::Down,
+        PadButton::Left,
+        PadButton::Right,
+        PadButton::LsUp,
+        PadButton::LsDown,
+        PadButton::LsLeft,
+        PadButton::LsRight,
+        PadButton::RsUp,
+        PadButton::RsDown,
+        PadButton::RsLeft,
+        PadButton::RsRight,
+        PadButton::Guide,
+    ];
+
+    pub fn is_output(self) -> bool {
+        Self::OUTPUTS.contains(&self)
+    }
+
+    /// Name of a virtual controller output ("Controller A").
+    pub fn output_name(self) -> String {
+        match self {
+            PadButton::Back => "Controller Back".into(),
+            PadButton::Start => "Controller Start".into(),
+            PadButton::Guide => "Controller Guide".into(),
+            b => format!("Controller {}", b.name()),
+        }
+    }
+
     pub fn id(self) -> String {
         let s = match self {
             PadButton::A => "a",
@@ -324,6 +369,20 @@ impl PadButton {
             PadButton::Button(_) => "Button of a controller without a known layout",
             _ => "Controller button",
         }
+    }
+}
+
+/// Saved by id (`"a"`, `"ls_up"`, `"button7"`).
+impl Serialize for PadButton {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.id())
+    }
+}
+
+impl<'de> Deserialize<'de> for PadButton {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let id = String::deserialize(d)?;
+        PadButton::from_id(&id).ok_or_else(|| serde::de::Error::custom(format!("unknown controller input {id:?}")))
     }
 }
 
@@ -467,6 +526,10 @@ pub enum Output {
     Mouse {
         button: MouseButton,
     },
+    /// A button of the virtual controller.
+    Pad {
+        button: PadButton,
+    },
 }
 
 impl Output {
@@ -474,6 +537,7 @@ impl Output {
         match self {
             Output::Key { key, mods } => combo_label(key, mods),
             Output::Mouse { button } => button.name().to_string(),
+            Output::Pad { button } => button.output_name(),
         }
     }
 }
@@ -701,6 +765,9 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "is_false")]
         toggle: bool,
     },
+    /// Press a button, trigger or stick direction of the virtual controller
+    /// (Windows, ViGEmBus) for as long as the input is held.
+    Pad { button: PadButton },
 }
 
 impl Action {
@@ -816,6 +883,7 @@ impl Action {
             }
             Action::System { command } => command.name().to_string(),
             Action::Gyro { toggle } => format!("Gyro mouse ({})", if *toggle { "toggle" } else { "hold" }),
+            Action::Pad { button } => button.output_name(),
             Action::Gesture {
                 tap,
                 up,
@@ -880,8 +948,38 @@ impl Action {
             Action::System { .. } => "Sys".to_string(),
             Action::Gesture { .. } => "Gst".to_string(),
             Action::Gyro { .. } => "Gyr".to_string(),
+            Action::Pad { button } => format!("Pad {}", short_output(*button)),
         }
     }
+}
+
+/// Compact Xbox name of a virtual controller output, for keycaps.
+pub fn short_output(b: PadButton) -> String {
+    let s = match b {
+        PadButton::Lb => "LB",
+        PadButton::Rb => "RB",
+        PadButton::Lt => "LT",
+        PadButton::Rt => "RT",
+        PadButton::Back => "Back",
+        PadButton::Start => "Start",
+        PadButton::Ls => "LS",
+        PadButton::Rs => "RS",
+        PadButton::Up => "D↑",
+        PadButton::Down => "D↓",
+        PadButton::Left => "D←",
+        PadButton::Right => "D→",
+        PadButton::LsUp => "L↑",
+        PadButton::LsDown => "L↓",
+        PadButton::LsLeft => "L←",
+        PadButton::LsRight => "L→",
+        PadButton::RsUp => "R↑",
+        PadButton::RsDown => "R↓",
+        PadButton::RsLeft => "R←",
+        PadButton::RsRight => "R→",
+        PadButton::Guide => "Guide",
+        b => return b.name(),
+    };
+    s.to_string()
 }
 
 pub fn per_second(interval_ms: u32) -> String {
@@ -1331,6 +1429,9 @@ pub struct PadSettings {
     /// Turn off the Steam Deck's / Steam Controller's own mouse and keyboard
     /// mode while the app reads it.
     pub steam_lizard_off: bool,
+    /// Pass what a real controller does that the profile doesn't remap on to
+    /// the virtual controller, so a remapped controller works in games.
+    pub copy_to_virtual: bool,
 }
 
 impl Default for PadSettings {
@@ -1345,6 +1446,7 @@ impl Default for PadSettings {
             direct: true,
             skip_steam_virtual: true,
             steam_lizard_off: false,
+            copy_to_virtual: true,
         }
     }
 }

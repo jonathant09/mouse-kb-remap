@@ -57,10 +57,11 @@ const K_TAPHOLD: i32 = 10;
 const K_SYSTEM: i32 = 11;
 const K_GESTURE: i32 = 12;
 const K_GYRO: i32 = 13;
-const K_OFF: i32 = 14;
+const K_PAD: i32 = 14;
+const K_OFF: i32 = 15;
 
 /// Choices for a binding, in kind order.
-const KIND_NAMES: [&str; 15] = [
+const KIND_NAMES: [&str; 16] = [
     "Default",
     "Key",
     "Mouse",
@@ -75,11 +76,12 @@ const KIND_NAMES: [&str; 15] = [
     "System",
     "Gesture",
     "Gyro",
+    "Controller",
     "Off",
 ];
 
 /// Choices for a part of a tap / hold binding, and their kinds.
-const SLOT_NAMES: [&str; 12] = [
+const SLOT_NAMES: [&str; 13] = [
     "Nothing",
     "Key",
     "Mouse",
@@ -92,9 +94,10 @@ const SLOT_NAMES: [&str; 12] = [
     "Sensitivity",
     "System",
     "Gyro",
+    "Controller",
 ];
-const SLOT_KINDS: [i32; 12] = [
-    K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM, K_GYRO,
+const SLOT_KINDS: [i32; 13] = [
+    K_DEFAULT, K_KEY, K_MOUSE, K_MACRO, K_TURBO, K_TEXT, K_LAUNCH, K_MEDIA, K_LAYER, K_SENS, K_SYSTEM, K_GYRO, K_PAD,
 ];
 const SLOT_TITLES: [&str; 4] = ["", "On tap", "On hold", "On double tap"];
 const GESTURE_TITLES: [&str; 6] = [
@@ -208,6 +211,12 @@ struct State {
     update_busy: bool,
     update_checked: Option<Instant>,
     window_visible: bool,
+    /// The virtual controller, its driver, and installing it.
+    vpad: engine::VpadState,
+    vpad_driver: bool,
+    vpad_installing: bool,
+    /// How installing the driver went (shown until the next try).
+    vpad_message: String,
 }
 
 impl State {
@@ -438,6 +447,10 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
             update_busy: false,
             update_checked: None,
             window_visible: false,
+            vpad: engine::vpad_status(),
+            vpad_driver: engine::vpad_driver_present(),
+            vpad_installing: false,
+            vpad_message: String::new(),
         }),
         engine,
         timers: RefCell::new(Vec::new()),
@@ -620,6 +633,7 @@ fn kind_of(action: &Action) -> i32 {
         Action::System { .. } => K_SYSTEM,
         Action::Gesture { .. } => K_GESTURE,
         Action::Gyro { .. } => K_GYRO,
+        Action::Pad { .. } => K_PAD,
         Action::Disabled => K_OFF,
     }
 }
@@ -783,6 +797,70 @@ fn pad_glyph(b: PadButton, style: PadLabels) -> &'static str {
 /// Short names for the controller drawing, in the chosen button style.
 /// Positions stay the same: Xbox A, PlayStation Cross and Nintendo B are all
 /// the bottom face button.
+/// A virtual controller output in the picker: directions as arrows, so
+/// they fit three to a row ("Right stick ↓").
+fn output_grid_name(b: PadButton) -> String {
+    let name = b.name();
+    for (word, arrow) in [(" up", " ↑"), (" down", " ↓"), (" left", " ←"), (" right", " →")] {
+        if let Some(rest) = name.strip_suffix(word) {
+            return format!("{rest}{arrow}");
+        }
+    }
+    name
+}
+
+/// Position of a virtual controller output in `PadButton::OUTPUTS`.
+fn output_index(b: PadButton) -> i32 {
+    PadButton::OUTPUTS.iter().position(|o| *o == b).map_or(-1, |i| i as i32)
+}
+
+/// The virtual controller box: (`Store.vpad-state`, text).
+fn vpad_display(st: &State) -> (i32, String) {
+    let note = if st.vpad_message.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", st.vpad_message)
+    };
+    if !engine::VPAD_SUPPORTED {
+        return (3, "The virtual controller is only available on Windows for now.".into());
+    }
+    if st.vpad_installing {
+        return (
+            4,
+            format!(
+                "Installing {}: allow it in Windows' admin prompt, then follow the installer's steps.",
+                crate::driver::NAME
+            ),
+        );
+    }
+    if !st.vpad_driver {
+        return (
+            0,
+            format!(
+                "Needs the free ViGEmBus driver, which isn't installed.{note} The app downloads the official \
+                 installer ({}, signed by Nefarius Software Solutions), checks that it's exactly the expected \
+                 file and runs it after Windows' admin prompt. From {}.",
+                crate::driver::NAME,
+                crate::driver::PROJECT_URL
+            ),
+        );
+    }
+    match &st.vpad {
+        engine::VpadState::Plugged { slot } => (
+            2,
+            match slot {
+                Some(n) => format!("Virtual controller plugged in, as controller {n}.{note}"),
+                None => format!("Virtual controller plugged in.{note}"),
+            },
+        ),
+        engine::VpadState::Failed(e) => (3, format!("The virtual controller couldn't be plugged in: {e}.")),
+        _ => (
+            1,
+            format!("ViGEmBus is installed.{note} The virtual controller is plugged in while a profile that uses it is active."),
+        ),
+    }
+}
+
 fn short_pad_label(b: PadButton, style: PadLabels) -> String {
     use PadLabels::{Nintendo, PlayStation};
     let s = match (b, style) {
@@ -1281,6 +1359,14 @@ impl App {
             EngineEvent::Command(cmd) => self.command(cmd),
             EngineEvent::Notice(text) => self.osd(&text),
             EngineEvent::DeviceCaptured { id, name } => self.device_captured(id, name),
+            EngineEvent::Vpad(state) => self.nav(|_, st| {
+                match state {
+                    engine::VpadState::Plugged { .. } => st.vpad_driver = true,
+                    engine::VpadState::NoDriver => st.vpad_driver = false,
+                    _ => {}
+                }
+                st.vpad = state;
+            }),
             EngineEvent::PadDetected { input } => {
                 if let Some(ui) = self.ui() {
                     let s = ui.global::<Store>();
@@ -1814,6 +1900,38 @@ impl App {
         });
     }
 
+    /// "Install controller driver": download, check and run the ViGEmBus
+    /// installer on a background thread (it waits for the installer).
+    fn install_vpad_driver(&self) {
+        {
+            let mut st = self.st.borrow_mut();
+            if st.vpad_installing || !engine::VPAD_SUPPORTED {
+                return;
+            }
+            st.vpad_installing = true;
+            st.vpad_message.clear();
+        }
+        self.nav(|_, _| {});
+        std::thread::spawn(|| {
+            let result = crate::driver::install(&|_, _| {});
+            if let Err(e) = &result {
+                crate::log!("driver: not installed: {e}");
+            }
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| {
+                    app.nav(|_, st| {
+                        st.vpad_installing = false;
+                        st.vpad_driver = engine::vpad_driver_present();
+                        st.vpad_message = match result {
+                            Ok(()) => "Driver installed.".into(),
+                            Err(e) => format!("Couldn't install it: {e}."),
+                        };
+                    })
+                })
+            });
+        });
+    }
+
     /// Read the startup entry in the background (schtasks is slow) and note
     /// whether it opens this copy.
     fn check_autostart(&self) {
@@ -2072,6 +2190,21 @@ impl App {
         s.set_pad_direct(p.direct);
         s.set_pad_skip_steam(p.skip_steam_virtual);
         s.set_pad_lizard(p.steam_lizard_off);
+        s.set_pad_copy(p.copy_to_virtual);
+        s.set_vpad_supported(engine::VPAD_SUPPORTED);
+        let (state, text) = vpad_display(&st);
+        s.set_vpad_state(state);
+        s.set_vpad_text(text.into());
+        s.set_pad_output_names(model(
+            PadButton::OUTPUTS
+                .iter()
+                .map(|b| SharedString::from(output_grid_name(*b)))
+                .collect(),
+        ));
+        s.set_pad_output_current(match st.action() {
+            Some(Action::Pad { button }) => output_index(*button),
+            _ => -1,
+        });
 
         // Keyboard
         s.set_keys(model(
@@ -2336,16 +2469,23 @@ impl App {
         {
             match output {
                 Output::Key { key, mods } => {
-                    s.set_turbo_is_mouse(false);
+                    s.set_turbo_kind(0);
                     s.set_turbo_key(combo_label(key, mods).into());
                     s.set_turbo_mods(Modifier::to_bits(mods) as i32);
                     s.set_turbo_mouse(-1);
                 }
                 Output::Mouse { button } => {
-                    s.set_turbo_is_mouse(true);
+                    s.set_turbo_kind(1);
                     s.set_turbo_key("".into());
                     s.set_turbo_mods(0);
                     s.set_turbo_mouse(MouseButton::ALL.iter().position(|b| b == button).unwrap_or(0) as i32);
+                }
+                Output::Pad { button } => {
+                    s.set_turbo_kind(2);
+                    s.set_turbo_key("".into());
+                    s.set_turbo_mods(0);
+                    s.set_turbo_mouse(-1);
+                    s.set_turbo_pad(output_index(*button));
                 }
             }
             s.set_turbo_interval(interval_ms.to_string().into());
@@ -2842,6 +2982,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             "xinput" => p.xinput = on,
             "direct" => p.direct = on,
             "skip_steam" => p.skip_steam_virtual = on,
+            "copy" => p.copy_to_virtual = on,
             _ => p.steam_lizard_off = on,
         }
     });
@@ -3046,15 +3187,27 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         }
     });
     on!(on_new_macro_for_binding, | | app |a: &Rc<App>| a.new_macro(true));
-    on!(on_set_turbo_output, |mouse| edit |st: &mut State| {
+    on!(on_set_turbo_output, |kind| edit |st: &mut State| {
         if let Some(Action::Turbo { output, .. }) = st.action_mut() {
-            match (mouse, &output) {
-                (true, Output::Key { .. }) => *output = Output::Mouse { button: MouseButton::Left },
-                (false, Output::Mouse { .. }) => *output = Output::Key { key: "Space".into(), mods: vec![] },
-                _ => {}
+            match (kind, &output) {
+                (0, Output::Key { .. }) | (1, Output::Mouse { .. }) | (2, Output::Pad { .. }) => {}
+                (1, _) => *output = Output::Mouse { button: MouseButton::Left },
+                (2, _) => *output = Output::Pad { button: PadButton::A },
+                _ => *output = Output::Key { key: "Space".into(), mods: vec![] },
             }
         }
     });
+    on!(on_set_turbo_pad, |i| edit |st: &mut State| {
+        if let (Some(Action::Turbo { output, .. }), Some(b)) = (st.action_mut(), PadButton::OUTPUTS.get(i as usize)) {
+            *output = Output::Pad { button: *b };
+        }
+    });
+    on!(on_set_pad_output, |i| edit |st: &mut State| {
+        if let Some(button) = PadButton::OUTPUTS.get(i as usize) {
+            st.set_action(Action::Pad { button: *button });
+        }
+    });
+    on!(on_install_vpad_driver, | | app |a: &Rc<App>| a.install_vpad_driver());
     on!(on_set_turbo_mouse, |i| edit |st: &mut State| {
         if let (Some(Action::Turbo { output, .. }), Some(b)) = (st.action_mut(), MouseButton::ALL.get(i as usize)) {
             *output = Output::Mouse { button: *b };

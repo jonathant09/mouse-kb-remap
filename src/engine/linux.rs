@@ -1178,6 +1178,8 @@ fn out_to_events(out: &Out, events: &mut Vec<InputEvent>) {
         }
         Out::Move { absolute: true, .. } => crate::log!("macro: \"move to\" isn't supported on Linux yet"),
         Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
+        // No virtual controller on Linux yet.
+        Out::Pad { .. } => {}
     }
 }
 

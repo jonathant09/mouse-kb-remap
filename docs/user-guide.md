@@ -88,6 +88,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 | **System** | Lock the PC, mute the microphone, switch audio output, act on the focused window, switch profile ([System actions](#system-actions)) |
 | **Gesture** | Hold and move the mouse up, down, left or right, then let go: a different action per direction ([Gestures](#gestures)) |
 | **Gyro** | Hold (or toggle) to move the pointer by tilting a controller ([Moving the pointer](#moving-the-pointer)) |
+| **Controller** | Presses a button, trigger or stick direction of a virtual Xbox controller, for games that want a controller (Windows) ([Virtual controller](#virtual-controller)) |
 | **Off** | The input is swallowed and does nothing |
 
 Remapped inputs are outlined in the accent color. On the keyboard, the new key is printed in
@@ -231,9 +232,9 @@ Gyro and touchpad speed, and which way the gyro moves, are in *Settings → Cont
 ### Steam, DS4Windows and games
 
 - The app reads controllers **shared**: games and Steam keep reading them too. That also
-  means remapping can't hide a controller's buttons from a game: remap buttons the game
-  doesn't use, or use the controller to drive other apps (a media PC, a browser, a second
-  screen while gaming).
+  means remapping alone can't hide a controller's buttons from a game: remap buttons the
+  game doesn't use, use the controller to drive other apps, or remap it onto the
+  [virtual controller](#virtual-controller) and hide the real one with HidHide.
 - **Steam Input** adds an Xbox-style copy of a controller while it's on. *Skip Steam's
   virtual controllers* (on by default) keeps the app on the real one, so nothing counts
   twice.
@@ -248,7 +249,72 @@ Gyro and touchpad speed, and which way the gyro moves, are in *Settings → Cont
   program asks for them (Steam does). The app asks only when a profile uses the gyro or
   touchpad; games that read the controller through DirectInput may lose it until it
   reconnects.
-- The app reads controllers only while the active profile uses one.
+- The app reads controllers only while the active profile uses one (or copies one to the
+  [virtual controller](#virtual-controller)).
+
+## Virtual controller
+
+On Windows, the **Controller** action presses a button, trigger or stick direction of a
+virtual Xbox 360 controller for as long as the input is held. Games see it as a real
+controller, so you can:
+
+- **play a game that wants a controller with the keyboard and mouse**: WASD on the left
+  stick, Space on A, the mouse buttons on the triggers;
+- **remap a controller for games**: back paddles on A and B, swap buttons, a turbo of a
+  button (*Turbo → Controller*);
+- **add buttons a controller doesn't have**, from the keyboard or a mouse with side buttons.
+
+It works anywhere an action does: in tap / hold and gesture parts, combos, layers and per
+device. Stick directions and triggers go all the way; two directions of one stick held
+together go diagonally. A tap holds the button for 50 ms so games, which read controllers
+once a frame, don't miss it.
+
+### The driver
+
+Windows needs the free **ViGEmBus** driver for virtual controllers (the one DS4Windows,
+BetterJoy and Steam tools use). When it's missing, the Controller action and
+*Settings → Virtual controller* show **Install controller driver**. It:
+
+1. downloads the official installer (ViGEmBus 1.22.0) from its GitHub release;
+2. checks it's exactly the expected file (size and SHA-256 built into the app, so nothing
+   else is ever run);
+3. runs it after Windows' admin prompt; the installer opens its own window, where you click
+   through it. Nothing is installed silently.
+
+You can also install it yourself from
+[github.com/nefarius/ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) and uninstall
+it from Windows' *Installed apps*.
+
+ViGEmBus is no longer developed (its last version is from 2023) but works on Windows 10 and
+11. Some games' anti-cheat refuses virtual controllers or treats them as cheating: check
+before using one in competitive online games.
+
+### When it's plugged in
+
+Only while the active profile uses it: switch to a profile with a Controller binding and
+the controller appears (Windows makes its "device connected" sound); switch to one without
+and it's unplugged ten seconds later (so a quick alt-tab doesn't disconnect it in the
+game). It stays while the app's own window is open, and goes when the app quits. The
+box under the action shows its state and which controller number (1-4) it is.
+
+### Remapping a real controller
+
+With *Copy the real controller to the virtual one* (Settings → Virtual controller, on by
+default), what your controller does that the profile doesn't remap is passed on to the
+virtual controller as well, so the virtual one is your controller with the remaps applied:
+a remapped button sends only its new action, a stick direction bound to something stops
+moving the virtual stick that way, and the stick that moves the pointer isn't copied.
+Guide is never copied (Windows already opens the Game Bar for the real one). While
+remapping is paused, everything is copied as it is.
+
+The game still sees your real controller too, though, so a remapped button would do both
+things. Hide the real controller from games with **HidHide** (free, by the same author as
+ViGEmBus, [github.com/nefarius/HidHide](https://github.com/nefarius/HidHide)): add the
+controller to its list, and add `mouse-kb-remap.exe` to its allowed applications so the app
+can still read it. Without HidHide, remap buttons the game doesn't use, or turn copying off
+and use the virtual controller for keyboard and mouse only.
+
+The virtual controller isn't available on Linux yet.
 
 ## Devices
 
@@ -328,6 +394,8 @@ Starting the app a second time opens the running copy instead.
 | **Window** | Keep running in the tray when the window is closed |
 | **Hotkeys** | Keys that control the app itself ([below](#hotkeys)) |
 | **Devices** | Mice and controllers with names, for bindings of their own ([Devices](#devices)) |
+| **Controllers** | Button names, gyro and touchpad speed, which controllers are read, Steam options |
+| **Virtual controller** | Its driver (with the install button), and copying the real controller to it ([Virtual controller](#virtual-controller)) |
 | **Notifications** | On-screen notifications, off unless you turn them on ([below](#notifications)) |
 | **Updates** | Check for a new version, install it, check automatically ([below](#updates)) |
 | **Command line** | The flags for scripts ([below](#command-line)) |

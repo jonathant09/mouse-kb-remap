@@ -80,7 +80,7 @@ typo never loses your profiles.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `version` | number | `4` | Format version. Version 1–3 files load unchanged. |
+| `version` | number | `5` | Format version. Version 1–4 files load unchanged; 0.4 and older can't read a file that uses the virtual controller. |
 | `theme` | `"dark"` / `"light"` | `"dark"` | UI theme |
 | `enabled` | bool | `true` | Master switch (the status-bar toggle) |
 | `close_to_tray` | bool | `true` | Closing the window keeps the app in the tray |
@@ -92,7 +92,7 @@ typo never loses your profiles.
 | `macros` | array | `[]` | Macro library, referenced by name |
 | `devices` | array | `[]` | Named mice and controllers: `{ "name": "Trackball", "id": … }` (below) |
 | `stick_speed` | number | `10` | Pointer speed (1–20) when a controller stick moves the pointer |
-| `pad` | object | | Controller settings: `gyro_speed`, `touch_speed` (1–20, default 10), `gyro_invert_x`, `gyro_invert_y`, `labels` (`"xbox"`, `"play_station"`, `"nintendo"`), `xinput`, `direct`, `skip_steam_virtual` (all three on by default), `steam_lizard_off` (off) |
+| `pad` | object | | Controller settings: `gyro_speed`, `touch_speed` (1–20, default 10), `gyro_invert_x`, `gyro_invert_y`, `labels` (`"xbox"`, `"play_station"`, `"nintendo"`), `xinput`, `direct`, `skip_steam_virtual` (all three on by default), `steam_lizard_off` (off), `copy_to_virtual` (on: pass a real controller's unremapped inputs on to the virtual controller) |
 
 ## Profile
 
@@ -175,7 +175,7 @@ Use *Settings → Devices → Add a device* rather than writing ids by hand.
 | `{ "type": "key", "key": "C", "mods": ["ctrl", "shift"] }` | Send a key, with modifiers held around it (`mods` optional: `ctrl`, `shift`, `alt`, `win`). Held for as long as the input is held. |
 | `{ "type": "mouse", "button": "left" }` | Send a mouse button or scroll step. Buttons: `left`, `right`, `middle`, `back`, `forward`, `wheel_up`, `wheel_down`, `wheel_left`, `wheel_right`. |
 | `{ "type": "macro", "macro": "Name", "mode": "once", "count": 1, "gap_ms": 0 }` | Play a macro. `mode`: `once`, `repeat` (plays `count` times), `while_held`, `toggle`. `gap_ms`: pause between repeats. |
-| `{ "type": "turbo", "output": {…}, "interval_ms": 50, "hold_ms": 20, "delay_ms": 0, "toggle": false }` | Repeat `output` (`{ "type": "key", "key": …, "mods": […] }` or `{ "type": "mouse", "button": … }`). `interval_ms` ≥ 5: press to press. `hold_ms`: press length. `delay_ms`: wait after the first press before repeating. `toggle`: press to start / stop instead of while held. |
+| `{ "type": "turbo", "output": {…}, "interval_ms": 50, "hold_ms": 20, "delay_ms": 0, "toggle": false }` | Repeat `output` (`{ "type": "key", "key": …, "mods": […] }`, `{ "type": "mouse", "button": … }` or `{ "type": "pad", "button": … }`, a virtual controller button). `interval_ms` ≥ 5: press to press. `hold_ms`: press length. `delay_ms`: wait after the first press before repeating. `toggle`: press to start / stop instead of while held. |
 | `{ "type": "text", "text": "gg wp", "delay_ms": 5 }` | Type text, `delay_ms` between characters |
 | `{ "type": "launch", "path": "C:\\Tools\\app.exe", "args": "" }` | Start a program, or open a file, folder or URL |
 | `{ "type": "layer", "layer": 2, "toggle": false }` | Use layer 1 (shift), 2 or 3 while held, or (`toggle`) switch it on and off |
@@ -185,6 +185,7 @@ Use *Settings → Devices → Add a device* rather than writing ids by hand.
 | `{ "type": "system", "command": "mute_mic" }` | `lock_pc`, `mute_mic`, `next_audio_output`, `minimize_window`, `maximize_window` (toggles), `always_on_top` (toggles), `next_monitor`, `close_window`, `next_profile`, `auto_profile` |
 | `{ "type": "gesture", "tap": {…}, "up": {…}, "down": {…}, "left": {…}, "right": {…}, "distance": 40 }` | Hold, move the pointer at least `distance` pixels and let go: the part for the direction moved most. `tap`: let go without moving that far. Each part is optional and is any action except a `tap_hold` or `gesture`. |
 | `{ "type": "gyro", "toggle": false }` | Controller gyro moves the pointer while held, or (`toggle`) switch it on and off |
+| `{ "type": "pad", "button": "a" }` | Hold a button of the virtual Xbox controller (Windows, needs ViGEmBus) for as long as the input is held. `button`: the controller ids above without `pad:`, Xbox inputs only: `a`, `b`, `x`, `y`, `lb`, `rb`, `lt`, `rt` (fully pressed), `back`, `start`, `ls`, `rs`, `up`, `down`, `left`, `right`, `ls_up` … `rs_right` (stick pushed all the way), `guide`. |
 | `{ "type": "disabled" }` | Swallow the input |
 
 ## Macros

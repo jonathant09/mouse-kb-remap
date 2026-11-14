@@ -460,6 +460,10 @@ impl Dispatcher {
                 sink.gyro(self.gyro_on());
             }
             Target::Gyro { toggle: true } => self.toggle_gyro(sink),
+            Target::Pad(button) => {
+                sink.out(Out::Pad { button, down: true });
+                sink.flush();
+            }
         }
     }
 
@@ -499,6 +503,10 @@ impl Dispatcher {
             Target::Gyro { toggle: false } => {
                 self.gyro_hold = self.gyro_hold.saturating_sub(1);
                 sink.gyro(self.gyro_on());
+            }
+            Target::Pad(button) => {
+                sink.out(Out::Pad { button, down: false });
+                sink.flush();
             }
             Target::Play(_) | Target::Sensitivity(_) => sink.worker(Cmd::Release(input)),
             Target::Gesture(ref spec) => {
@@ -557,6 +565,7 @@ impl Dispatcher {
                     self.tap(input, &t, sink, immediate);
                 }
             }
+            Target::Pad(b) => sink.worker(Cmd::PadTap(b)),
             Target::Gyro { toggle: true } => self.toggle_gyro(sink),
             Target::Disabled
             | Target::Layer { .. }
@@ -649,6 +658,7 @@ mod tests {
                 Cmd::Release(_) => "release".into(),
                 Cmd::Tap { vk, .. } => format!("tap {vk}"),
                 Cmd::StopAll => "stop".into(),
+                Cmd::PadTap(b) => format!("pad tap {}", b.id()),
             });
         }
         fn command(&mut self, cmd: AppCommand) {
@@ -1238,6 +1248,49 @@ mod tests {
         // Ctrl no longer counts as held; the remapped key stays.
         assert_eq!(t.d.down, vec![IN]);
         assert_eq!(t.d.mods_held(None), 0);
+    }
+
+    #[test]
+    fn controller_output_is_held_with_the_input() {
+        use crate::config::PadButton;
+        let pad = |b: PadButton, down: bool| Out::Pad { button: b, down };
+        let lb = Input::Pad(PadButton::Lb);
+        let mut t = T::new(layers(
+            vec![
+                (IN, Target::Pad(PadButton::A)),
+                (lb, Target::Pad(PadButton::RsUp)),
+                (
+                    CAPS,
+                    tap_hold(Some(Target::Pad(PadButton::B)), Some(Target::Pad(PadButton::Lt)), None),
+                ),
+            ],
+            vec![],
+        ));
+        assert!(t.down(IN));
+        assert!(t.down(lb));
+        assert!(t.up(IN));
+        assert!(t.up(lb));
+        assert_eq!(
+            t.s.out,
+            vec![
+                pad(PadButton::A, true),
+                pad(PadButton::RsUp, true),
+                pad(PadButton::A, false),
+                pad(PadButton::RsUp, false)
+            ]
+        );
+        t.s.out.clear();
+        // A tap goes through the worker, which holds it for a few frames.
+        t.down(CAPS);
+        t.wait(50);
+        t.up(CAPS);
+        assert_eq!(t.s.cmds, vec!["pad tap b"]);
+        // A hold presses until released.
+        t.down(CAPS);
+        t.wait(300);
+        assert_eq!(t.s.out, vec![pad(PadButton::Lt, true)]);
+        t.up(CAPS);
+        assert_eq!(t.s.out.last(), Some(&pad(PadButton::Lt, false)));
     }
 
     #[test]

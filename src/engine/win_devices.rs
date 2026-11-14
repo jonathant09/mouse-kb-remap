@@ -82,6 +82,9 @@ static DEVICES: RwLock<Vec<Device>> = RwLock::new(Vec::new());
 struct PadConfig {
     pointer: PointerSettings,
     settings: PadSettings,
+    /// Copy real controllers to the virtual one, leaving out these inputs
+    /// (`pad::bit` bits).
+    mirror: Option<u64>,
 }
 
 static PAD_CONFIG: Mutex<Option<PadConfig>> = Mutex::new(None);
@@ -125,13 +128,25 @@ pub fn set_devices(devices: Vec<Device>) {
 }
 
 /// What the active profile needs: device reports for mouse buttons,
-/// controllers (and how they move the pointer).
-pub fn update(raw: bool, pad: bool, motion: bool, pointer: PointerSettings, settings: PadSettings) {
+/// controllers (and how they move the pointer, and whether they're copied
+/// to the virtual controller).
+pub fn update(
+    raw: bool,
+    pad: bool,
+    motion: bool,
+    pointer: PointerSettings,
+    settings: PadSettings,
+    mirror: Option<u64>,
+) {
     RAW_WANTED.store(raw, Ordering::SeqCst);
     PAD_WANTED.store(pad, Ordering::SeqCst);
     MOTION.store(motion, Ordering::SeqCst);
     if let Ok(mut c) = PAD_CONFIG.lock() {
-        *c = Some(PadConfig { pointer, settings });
+        *c = Some(PadConfig {
+            pointer,
+            settings,
+            mirror,
+        });
     }
     post_raw(WM_REGISTER);
 }
@@ -415,6 +430,8 @@ fn product_name(path: &str) -> Option<String> {
 // Controllers
 // ---------------------------------------------------------------------------
 
+static NEXT_SOURCE: AtomicU32 = AtomicU32::new(1);
+
 /// One controller being read (an XInput slot or a HID device).
 pub struct Source {
     /// `Device::id`: `xinput:1`, or the HID device path.
@@ -424,6 +441,10 @@ pub struct Source {
     last: Option<Instant>,
     generation: u32,
     device: Option<DeviceIndex>,
+    /// Identifies it to the virtual controller.
+    key: u32,
+    /// It's being copied to the virtual controller.
+    mirrored: bool,
 }
 
 impl Source {
@@ -435,6 +456,8 @@ impl Source {
             last: None,
             generation: u32::MAX,
             device: None,
+            key: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
+            mirrored: false,
         }
     }
 
@@ -488,6 +511,23 @@ pub fn on_reading(src: &mut Source, r: &PadReading) {
     if PAD_WANTED.load(Ordering::SeqCst) {
         send_changes(src.device(), &changes);
     }
+    match config.mirror {
+        Some(excluded) => {
+            // Paused: pass everything on, as if nothing were remapped.
+            let excluded = if super::windows::remapping_on() {
+                excluded
+            } else {
+                super::pad::bit(PadButton::Guide)
+            };
+            super::win_vpad::mirror(src.key, Some(super::win_vpad::mirror_report(r, excluded)));
+            src.mirrored = true;
+        }
+        None if src.mirrored => {
+            super::win_vpad::mirror(src.key, None);
+            src.mirrored = false;
+        }
+        None => {}
+    }
     if moved != (0, 0) {
         super::windows::send_move(moved.0, moved.1);
     }
@@ -497,6 +537,10 @@ pub fn on_reading(src: &mut Source, r: &PadReading) {
 pub fn on_gone(src: &mut Source) {
     let changes = src.state.release_all();
     send_changes(src.device(), &changes);
+    if src.mirrored {
+        super::win_vpad::mirror(src.key, None);
+        src.mirrored = false;
+    }
 }
 
 fn send_changes(device: Option<DeviceIndex>, changes: &[(PadButton, bool)]) {
@@ -590,8 +634,17 @@ fn xinput_thread() {
             last_scan = Instant::now();
         }
         let skip_virtual = pad_config().settings.skip_steam_virtual;
+        let own = super::win_vpad::slot();
         for slot in 0..4u32 {
             let i = slot as usize;
+            // Our own virtual controller is never read as a real one.
+            if own == Some(slot) {
+                if let Some(mut src) = sources[i].take() {
+                    on_gone(&mut src);
+                    crate::log!("controller: {} is the app's own virtual controller", src.name);
+                }
+                continue;
+            }
             if sources[i].is_none() && !skipped[i] && !rescan {
                 continue;
             }
@@ -606,6 +659,14 @@ fn xinput_thread() {
             }
             if sources[i].is_none() {
                 if skipped[i] {
+                    continue;
+                }
+                // Plugging ours in: a new Xbox 360 controller may be it.
+                if super::win_vpad::finding_slot()
+                    && ex
+                        .ids(slot)
+                        .is_none_or(|ids| ids == (super::win_vpad::VENDOR, super::win_vpad::PRODUCT))
+                {
                     continue;
                 }
                 if skip_virtual && ex.ids(slot) == Some(STEAM_VIRTUAL) {

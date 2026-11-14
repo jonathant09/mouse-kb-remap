@@ -3,6 +3,7 @@
 
 mod app;
 mod config;
+mod driver;
 mod engine;
 mod ipc;
 mod keys;

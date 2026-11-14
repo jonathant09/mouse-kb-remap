@@ -128,3 +128,34 @@ export component KeyPicker inherits VerticalLayout {
         selected(i) => { Store.pick-key(root.target, i); }
     }
 }
+
+// The virtual controller's driver and state, with the install button when
+// the driver is missing.
+export component VpadStatus inherits VerticalLayout {
+    spacing: 8px;
+    Rectangle {
+        border-radius: Theme.radius;
+        background: (Store.vpad-state == 0 || Store.vpad-state == 3 ? Theme.warning : Theme.success).with-alpha(0.12);
+        border-width: 1px;
+        border-color: (Store.vpad-state == 0 || Store.vpad-state == 3 ? Theme.warning : Theme.success).with-alpha(0.35);
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            Text {
+                text: Store.vpad-text;
+                wrap: word-wrap;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+            }
+            if Store.vpad-state == 0 || Store.vpad-state == 4: HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: Store.vpad-state == 4 ? "Installing…" : "Install controller driver";
+                    primary: true;
+                    enabled: Store.vpad-state == 0;
+                    clicked => { Store.install-vpad-driver(); }
+                }
+            }
+        }
+    }
+}

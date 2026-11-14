@@ -32,6 +32,7 @@ tables, and the engine sends the UI events.
 | `src/log.rs` | `log!` macro: stderr and `mouse-kb-remap.log` |
 | `src/osd.rs` | On-screen notifications (Windows) |
 | `src/update.rs` | Release check and in-place update |
+| `src/driver.rs` | Installing the ViGEmBus driver: download, checksum, admin prompt |
 | `src/ipc.rs` | Command-line control over a named pipe |
 | `src/engine/mod.rs` | Platform-independent API (`Engine`), `Input` / `Target` / `Layers` / `ComboBinding`, `compile()`, profile picking, recording → macro steps |
 | `src/engine/dispatch.rs` | `Dispatcher`: what one input event does (layers, combos, tap / hold, hotkeys). Shared by all backends, unit-tested. |
@@ -40,6 +41,7 @@ tables, and the engine sends the UI events.
 | `src/engine/win_actions.rs` | System actions: lock, microphone, audio output, window actions |
 | `src/engine/win_devices.rs` | Raw input thread (which mouse a button came from, adding a device), XInput polling, the shared controller path (`on_reading`) |
 | `src/engine/win_hid.rs` | Controllers read directly over HID: enumeration, one reader thread each, generic report-descriptor parsing |
+| `src/engine/win_vpad.rs` | The virtual Xbox controller: ViGEmBus protocol, plugging in and out, composing reports from bindings and copied controllers |
 | `src/engine/pad_hid.rs` | Report formats of PlayStation, Switch and Steam controllers (pure functions, unit-tested) |
 | `src/engine/pad.rs` | Controller readings → pressed inputs (with hysteresis); stick, gyro and touchpad → pointer movement; shared by both backends |
 | `src/engine/linux.rs` | evdev grab per device (controllers read, not grabbed), uinput output, X11 focus tracking |
@@ -86,6 +88,8 @@ handles it:
   or `Engine::force_profile`.
 - `Notice(String)` for things worth an on-screen notification (layer and playback toggles,
   microphone, audio output).
+- `Vpad(VpadState)` when the virtual controller is plugged in or out, or can't be (no
+  driver, an error).
 
 ## The hot path
 
@@ -208,6 +212,46 @@ same state moves the pointer with relative `SendInput` moves from the stick
 so every controller turns the same way. `Target::Gyro` (the *Gyro* action) reaches the
 controller threads through `Sink::gyro`.
 
+### Virtual controller (Windows)
+
+`win_vpad.rs` drives a virtual Xbox 360 controller through the ViGEmBus driver, speaking
+its protocol directly (device interface `{96E42B22-…}`, `DeviceIoControl` with the
+control codes and structures ViGEmClient uses: check version, plug in, wait until ready,
+submit an `XUSB_REPORT`, unplug). One thread owns the driver handle; everyone else
+changes a shared `State` under a mutex and wakes it with a condition variable:
+
+- `Target::Pad` (the *Controller* action) and `Step::PadDown` / `PadUp` (turbo of a
+  controller button, tap / hold taps through `Cmd::PadTap`, held 50 ms) become
+  `Out::Pad`, which `out_to_inputs` turns into `win_vpad::press`: a press count per
+  output, so two inputs holding the same button don't release each other.
+- With *Copy the real controller* on, `win_devices::on_reading` passes every controller
+  reading through `mirror_report` (leaving out `Layers::pad_excluded()`: inputs bound on
+  any layer, the pointer stick, Guide; nothing but Guide while paused) and hands it to
+  `win_vpad::mirror`.
+- `compose` builds the report: copied controllers merged (buttons ORed, the bigger
+  deflection wins), then held outputs on top (triggers at 255, a pushed stick overrides
+  the copied one, diagonals on the circle). It's submitted only when it changed.
+
+`update_mouse_hook` sets `win_vpad::set_wanted(Layers::uses_vpad)` for the active profile
+(left as it is while our own window is focused); the thread plugs the controller in when
+wanted and unplugs it 10 s after it stops being wanted. Closing the handle (the app
+exiting) makes the driver unplug it too. Without the driver the thread looks again every
+10 s, or at once after `vpad_retry()`; its state reaches the UI as `EngineEvent::Vpad`.
+
+The driver can't say which XInput slot the controller got (its user-index request only
+answers once Windows has set the controller's LED, and didn't answer at all here), so
+`win_vpad` notes the connected slots before plugging in and takes the new one. The XInput
+thread skips that slot (dropping a source already reading it) and, while the slot isn't
+known yet, any new 045E:028E controller: reading our own output back as a real controller
+would copy it into itself. ViGEmBus's HID-compatible interface has `IG_` in its path, so
+`win_hid.rs` skips it already.
+
+`driver.rs` installs ViGEmBus on request: download the 1.22.0 installer from its GitHub
+release with `update::http`, check its size and SHA-256 against constants (it's signed by
+Nefarius Software Solutions), save it to `%TEMP%\mouse-kb-remap-driver`, `ShellExecuteEx`
+with the `runas` verb (the admin prompt), wait, check the exit code (0 / 3010) and that
+the driver answers, then `vpad_retry()`.
+
 Keys are sent as **scan codes** (`KEYEVENTF_SCANCODE`, with `KEYEVENTF_EXTENDEDKEY` when
 `MapVirtualKeyW(.., MAPVK_VK_TO_VSC_EX)` reports an `E0`/`E1` prefix). Many games read
 raw input or DirectInput and ignore virtual-key-only events. Media/browser keys, Pause and
@@ -307,7 +351,7 @@ as one.
 1. Add a variant to `config::Action` (serde tag `type`) with `label()` and `short_label()`.
 2. Map it to a `Target` in `engine::parse_action` (often a `Plan` of existing `Step`s).
 3. If it needs new output, add an `Out` variant and handle it in `windows.rs::emit_outs`
-   and `linux.rs::emit_outs`.
+   (or `out_to_inputs`) and `linux.rs` (`Out::Pad` is the latest example).
 4. Add a kind constant and name in `app.rs` (`KIND_NAMES`, and `SLOT_NAMES` / `SLOT_KINDS`
    if it can be a tap / hold or gesture part), handle it in `kind_of`, `set_kind` and
    `refresh`, and add an editor in `ui/inspector.slint` keyed on `Store.selected-kind`.

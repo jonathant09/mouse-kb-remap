@@ -229,6 +229,7 @@ impl Engine {
         let sh = shared();
         win_devices::set_devices(compiled.devices);
         win_devices::start(sh.on_event.clone(), sh.accept_injected, MAGIC);
+        super::win_vpad::start(sh.on_event.clone());
 
         std::thread::Builder::new()
             .name("remap-player".into())
@@ -465,13 +466,25 @@ fn update_mouse_hook() {
     };
     win_devices::update(
         active.as_ref().is_some_and(|l| l.mouse_device_bindings()),
-        active.as_ref().is_some_and(|l| l.uses_pad()),
+        // Copying a real controller to the virtual one needs it read too.
+        active
+            .as_ref()
+            .is_some_and(|l| l.uses_pad() || (l.uses_vpad && settings.copy_to_virtual)),
         active
             .as_ref()
             .is_some_and(|l| l.gyro_pointer || l.touch_pointer || l.gyro_bound),
         pointer,
-        settings,
+        settings.clone(),
+        active
+            .as_ref()
+            .filter(|l| l.uses_vpad && settings.copy_to_virtual)
+            .map(|l| l.pad_excluded()),
     );
+    // While our own window is focused (no active profile) the virtual
+    // controller stays as it was, so a game behind it keeps its controller.
+    if let Some(l) = active.as_ref() {
+        super::win_vpad::set_wanted(l.uses_vpad);
+    }
     let busy = DISPATCH.with(|d| d.borrow().holds_mouse()) || DEFERRED.with(|q| !q.borrow().is_empty());
     MOUSE_HOOK.with(|hook| match (wanted, hook.get()) {
         (true, None) => {
@@ -1292,6 +1305,7 @@ fn out_to_inputs(out: &Out, push: &mut impl FnMut(INPUT)) {
             }
         }
         Out::Move { x, y, absolute } => push(move_input(x, y, absolute)),
+        Out::Pad { button, down } => super::win_vpad::press(button, down),
         Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
     }
 }

@@ -80,7 +80,7 @@ export global Store {
     in property <bool> selected-supported: true;
     // Action kind: 0 default, 1 key, 2 mouse, 3 macro, 4 turbo, 5 text,
     // 6 launch, 7 media, 8 layer, 9 sensitivity, 10 tap / hold, 11 system,
-    // 12 gesture, 13 off
+    // 12 gesture, 13 gyro, 14 controller (virtual), 15 off
     in property <int> selected-kind;
     in property <string> inherited-value;
     in property <[string]> kind-items;     // choices shown (fewer inside a tap / hold)
@@ -128,7 +128,8 @@ export global Store {
     in property <string> macro-count;
     in property <string> macro-gap;
 
-    in property <bool> turbo-is-mouse;
+    in property <int> turbo-kind;          // presses: 0 key, 1 mouse button, 2 controller button
+    in property <int> turbo-pad: -1;       // index into pad-output-names
     in property <string> turbo-key;
     in property <int> turbo-mods;
     in property <int> turbo-mouse: -1;
@@ -200,6 +201,15 @@ export global Store {
     in property <bool> pad-direct;         // read other controllers directly
     in property <bool> pad-skip-steam;     // skip Steam's virtual controllers
     in property <bool> pad-lizard;         // turn off Steam devices' own mouse mode
+    in property <bool> pad-copy;           // copy real controllers to the virtual one
+
+    // ---- virtual controller (Controller action) -----------------------------------
+    in property <[string]> pad-output-names;
+    in property <int> pad-output-current: -1;
+    in property <bool> vpad-supported;     // Windows
+    // 0 driver missing, 1 ready (not plugged in), 2 plugged in, 3 failed, 4 installing
+    in property <int> vpad-state;
+    in property <string> vpad-text;
 
     // ---- status bar ----------------------------------------------------------------
     in property <string> focused-app;
@@ -241,7 +251,7 @@ export global Store {
     callback detect-pad();                 // start / stop waiting for a controller press
     callback set-gyro-toggle(bool);
     callback set-pad-number(string, string); // "gyro" / "touch", value
-    callback set-pad-flag(string, bool);   // "invert_x", "invert_y", "xinput", "direct", "skip_steam", "lizard"
+    callback set-pad-flag(string, bool);   // "invert_x", "invert_y", "xinput", "direct", "skip_steam", "lizard", "copy"
     callback set-pad-labels(int);
     callback add-device();                 // start / stop waiting for a press
     callback rename-device(int, string);
@@ -267,7 +277,10 @@ export global Store {
     callback set-macro-mode(int);
     callback set-macro-number(string, string); // field ("count"/"gap"), value
     callback new-macro-for-binding();
-    callback set-turbo-output(bool);       // true = mouse button, false = key
+    callback set-turbo-output(int);        // 0 key, 1 mouse button, 2 controller button
+    callback set-turbo-pad(int);
+    callback set-pad-output(int);
+    callback install-vpad-driver();
     callback set-turbo-mouse(int);
     callback set-turbo-number(string, string); // field ("interval"/"hold"/"delay"), value
     callback set-turbo-toggle(bool);
