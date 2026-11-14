@@ -11,49 +11,59 @@ export struct KeyCap {
     value: string,  // short label of the remap target
 }
 
+// The diagram has one design: the board as drawn at full size (1u = 50px,
+// what a maximized window shows), scaled down as a whole in smaller windows.
+// `s` is that scale (1 at full size). Text scales too, but never below a
+// readable size; a legend too long for its key gets just small enough to fit.
 component KeyView inherits Rectangle {
     in property <KeyCap> key;
     in property <bool> selected;
-    in property <length> u;
+    in property <float> s: 1;
     callback clicked;
 
+    // Long legends on 1u keys ("PrtSc", "PgUp") use the smaller size.
+    property <bool> long-legend: root.key.label.character-count > 3 && root.key.w < 1.2;
+    property <length> legend-x: (root.long-legend ? 3px : 5px) * root.s;
+    property <length> legend-size: max((root.long-legend ? 8.5px : Theme.font-sm) * root.s, 7px);
+
     // The "well" is the darker base; the cap sits slightly raised on top.
-    border-radius: 4px;
+    border-radius: 4px * root.s;
     background: root.selected ? Theme.accent : Theme.key-well;
 
     cap := Rectangle {
-        x: 1.5px;
-        y: 1px;
-        width: parent.width - 3px;
-        height: parent.height - 4px;
-        border-radius: 3px;
+        x: 1.5px * root.s;
+        y: 1px * root.s;
+        width: parent.width - 3px * root.s;
+        height: parent.height - 4px * root.s;
+        border-radius: 3px * root.s;
         background: ta.pressed ? Theme.key-well : ta.has-hover ? Theme.key-top-hover : Theme.key-top;
         border-width: root.key.mapped || root.selected ? 1px : 0px;
         border-color: Theme.accent;
         animate background { duration: 70ms; }
 
-        Text {
-            // Long legends on 1u keys ("PrtSc", "PgUp") get a smaller size so they fit.
-            // Small keys (full-size layout, small window) get smaller legends
-            // so "Esc", "F10" or "PrtSc" still fit.
-            property <bool> tight: root.u < 40px && root.key.label.character-count >= 3;
-            property <bool> compact: (root.key.label.character-count > 3 && root.key.w < 1.2) || self.tight;
-            property <bool> small: self.compact || (root.key.mapped && root.u < 42px);
-            x: self.compact ? 3px : 5px;
-            y: root.key.mapped ? 2px : 3px;
-            width: parent.width - (self.compact ? 4px : 8px);
+        // The legend measured at 10px, to work out the size that fits.
+        measure := Text {
+            visible: false;
             text: root.key.label;
-            font-size: self.tight && root.key.label.character-count > 3 ? 7.5px : self.small ? 8.5px : (root.u > 38px ? Theme.font-sm : Theme.font-xs);
+            font-size: 10px;
+        }
+        legend := Text {
+            property <length> room: parent.width - 2 * root.legend-x;
+            x: root.legend-x;
+            y: (root.key.mapped ? 2px : 3px) * root.s;
+            width: self.room;
+            text: root.key.label;
+            font-size: min(root.legend-size, 10px * self.room / max(measure.preferred-width, 1px));
             color: root.key.mapped ? Theme.text-muted : Theme.text;
             overflow: elide;
         }
         if root.key.mapped: Text {
-            x: 3px;
-            y: parent.height - self.height - 1px;
-            width: parent.width - 6px;
+            x: 3px * root.s;
+            y: parent.height - self.height - 1px * root.s;
+            width: parent.width - 6px * root.s;
             horizontal-alignment: right;
             text: root.key.value;
-            font-size: root.u < 42px ? 9px : Theme.font-xs;
+            font-size: max(Theme.font-xs * root.s, 7px);
             font-weight: 700;
             color: Theme.accent;
             overflow: elide;
@@ -73,8 +83,14 @@ export component KeyboardDiagram inherits Rectangle {
     in property <float> units-wide: 18.25;
     callback select(string);
 
-    property <length> pad: 14px;
-    property <length> u: clamp((root.width - 2 * root.pad - 48px) / root.units-wide, 20px, 50px);
+    // Key size: as large as fits (24px margin each side, room above and
+    // below for the tools and legend), at most the full-size 50px. The
+    // padding around the keys is 14px at full size and scales with them.
+    property <length> u: clamp(
+        min((root.width - 48px) / (root.units-wide + 0.56), (root.height - 120px) / (6.25 + 0.56)),
+        16px, 50px);
+    property <float> s: root.u / 50px;
+    property <length> pad: 14px * root.s;
     property <length> kw: root.units-wide * root.u + 2 * root.pad;
     property <length> kh: 6.25 * root.u + 2 * root.pad;
 
@@ -94,9 +110,9 @@ export component KeyboardDiagram inherits Rectangle {
         for k in root.keys: KeyView {
             x: root.pad + k.x * root.u;
             y: root.pad + k.y * root.u;
-            width: k.w * root.u - 3px;
-            height: k.h * root.u - 3px;
-            u: root.u;
+            width: k.w * root.u - 3px * root.s;
+            height: k.h * root.u - 3px * root.s;
+            s: root.s;
             key: k;
             selected: k.id == root.selected;
             clicked => { root.select(k.id); }

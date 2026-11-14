@@ -60,8 +60,8 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 
 - **+** next to *PROFILES* adds one. Click the name in the header to rename it.
 - Add the programs it's for: type the exe name (`eldenring.exe`), a path or `title:…` and
-  press **Enter** (`.exe` is added to a plain name), or switch to the game once, come back
-  and click it under **Recent**.
+  press **Enter** (`.exe` is added to a plain name), or switch to the game once, come back,
+  click **Recent…** and pick it from the list.
 - **Duplicate** copies the profile with all its bindings (the copy starts with no apps, so
   the two don't fight over the same game).
 - **Delete** removes it (Default can't be deleted). Remove an app with the **×** on its chip.

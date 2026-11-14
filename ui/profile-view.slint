@@ -2,11 +2,67 @@
 
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
-import { Button, Chip, Divider, Field, Segmented, Switch, ValueField } from "widgets.slint";
+import { Button, Chip, Divider, Field, SectionLabel, Segmented, Switch, ValueField } from "widgets.slint";
 import { MouseDiagram } from "mouse.slint";
 import { KeyboardDiagram } from "keyboard.slint";
 import { ControllerDiagram } from "controller.slint";
 import { Inspector } from "inspector.slint";
+
+// "Recent…": apps that were in front lately, to add to the profile with a
+// click. A list in a popup, so any number of them fits the header.
+component RecentApps inherits Rectangle {
+    width: btn.min-width;
+    btn := Button {
+        width: parent.width;
+        compact: true;
+        text: "Recent…";
+        clicked => { popup.show(); }
+    }
+    popup := PopupWindow {
+        // Opens below the button, lined up with its right edge (so it stays
+        // inside the window).
+        x: btn.width - self.width;
+        y: btn.height + 4px;
+        width: 240px;
+        height: list.preferred-height;
+        Rectangle {
+            border-radius: Theme.radius;
+            background: Theme.panel-bg;
+            border-width: 1px;
+            border-color: Theme.border;
+            drop-shadow-blur: 12px;
+            drop-shadow-offset-y: 4px;
+            drop-shadow-color: #00000040;
+        }
+        list := VerticalLayout {
+            padding: 6px;
+            spacing: 1px;
+            SectionLabel {
+                text: "ADD A RECENT APP";
+                height: 22px;
+                vertical-alignment: center;
+            }
+            for app in Store.recent-apps: Rectangle {
+                height: 26px;
+                border-radius: Theme.radius-sm;
+                background: row-ta.has-hover ? Theme.control-hover : transparent;
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    text: "+ " + app;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                row-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { Store.add-app(app); }
+                }
+            }
+        }
+    }
+}
 
 component ProfileHeader inherits Rectangle {
     background: Theme.window-bg;
@@ -33,6 +89,8 @@ component ProfileHeader inherits Rectangle {
                 read-only: Store.selected-profile == 0;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
+                // A long name scrolls in the box; it doesn't widen the page.
+                min-width: 80px;
                 selection-background-color: Theme.accent-soft;
                 accepted => { Store.rename-profile(self.text); }
                 edited => { Store.rename-profile(self.text); }
@@ -65,14 +123,32 @@ component ProfileHeader inherits Rectangle {
             spacing: 6px;
             alignment: start;
             Text { text: "Activates for"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
-            for app in Store.profile-apps: Chip {
-                text: app;
-                removable: true;
-                active: true;
-                remove => { Store.remove-app(app); }
+            // The profile's apps. Short of room, long names end in "…"; with
+            // more apps than fit even then, the strip scrolls sideways
+            // instead of making the page wider than the window.
+            apps := Flickable {
+                height: 22px;
+                min-width: min(app-row.min-width, 120px);
+                preferred-width: app-row.preferred-width;
+                max-width: app-row.preferred-width;
+                content-width: app-row.width;
+                content-height: self.height;
+                app-row := HorizontalLayout {
+                    width: max(apps.width, self.min-width);
+                    height: 22px;
+                    spacing: 6px;
+                    for app in Store.profile-apps: Chip {
+                        text: app;
+                        removable: true;
+                        active: true;
+                        remove => { Store.remove-app(app); }
+                    }
+                }
             }
             Field {
-                width: 210px;
+                min-width: 120px;
+                preferred-width: 210px;
+                max-width: 210px;
                 height: 22px;
                 placeholder: "game.exe, a path, or title:text";
                 text <=> root.new-app;
@@ -81,16 +157,7 @@ component ProfileHeader inherits Rectangle {
                     root.new-app = "";
                 }
             }
-            if Store.recent-apps.length > 0: Text {
-                text: "Recent:";
-                color: Theme.text-faint;
-                font-size: Theme.font-sm;
-                vertical-alignment: center;
-            }
-            for app in Store.recent-apps: Chip {
-                text: "+ " + app;
-                clicked => { Store.add-app(app); }
-            }
+            if Store.recent-apps.length > 0: RecentApps { }
             Rectangle { horizontal-stretch: 1; }
             Text { text: "Only when fullscreen"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             VerticalLayout {

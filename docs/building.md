@@ -19,6 +19,7 @@ cargo build --release        # exe at target\release\mouse-kb-remap.exe
 .\start.bat install          # build + install/update Documents\mouse-kb-remap (see below)
 cargo run -- --quit          # ask the running copy to quit
 cargo test                   # unit tests (config, keys, dispatcher, scheduler, …)
+cargo test every_page_fits  # every page and panel fits the smallest window (see below)
 cargo test list_devices -- --ignored --nocapture       # the mice and XInput slots Windows reports here
 cargo test list_controllers -- --ignored --nocapture   # the controllers the app would read over HID
 cargo test vpad_round_trip -- --ignored --nocapture    # plug in a virtual controller, read it back (needs ViGEmBus)
@@ -26,6 +27,13 @@ cargo test download_matches -- --ignored               # download the ViGEmBus i
 cargo clippy --all-targets   # lints (CI fails on warnings)
 cargo fmt                    # formatting (max width 120, see rustfmt.toml)
 ```
+
+`every_page_fits_the_smallest_window` (src/ui_fit_tests.rs) runs the real UI on Slint's
+headless testing backend: it fills it with crowded data through `fill_ui` (the code the app
+uses), goes through every page, profile kind and inspector action at 1080 x 660, and fails
+if any text, field or button reaches past the window or the scroll area it's in. Finding
+elements needs Slint's debug info, which `build.rs` compiles into debug builds (and so
+tests) only. When you add a page or panel that none of its states reach, add a state.
 
 The virtual controller can be tested end to end without a real controller:
 `vpad_stand_in_controller` (ignored test) plugs in a second virtual controller that holds

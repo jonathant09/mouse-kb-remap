@@ -76,6 +76,11 @@ gpu = ["slint/renderer-femtovg"]
 [build-dependencies]
 slint-build = "1.18"
 
+[dev-dependencies]
+# Headless Slint backend for the layout test in src/ui_fit_tests.rs (same
+# version as slint).
+i-slint-backend-testing = "=1.18.1"
+
 [target.'cfg(windows)'.build-dependencies]
 # Embeds the app icon and version info into the exe.
 winresource = "0.1"

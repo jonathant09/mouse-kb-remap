@@ -22,6 +22,14 @@
 - New *Settings → Virtual controller* card: driver state, the install button and copying.
 - Config format version 5 (older files load unchanged; 0.4 can't read a file that uses the
   Controller action).
+- **Every page fits the smallest window.** In a profile for apps, the recently used apps are
+  now in a *Recent…* list next to the app box, and long app names end in "…" (with many apps
+  the row scrolls sideways), instead of pushing the right-hand panel off the window. The
+  macro editor's delay tools have a row of their own. A test now opens every page and panel
+  at the smallest window size (1080 x 660) and fails if anything reaches past its edge.
+- **One keyboard drawing.** The keyboard looks the same at every window size: the drawing a
+  maximized window shows, scaled down, with full key names (PrtSc, Home, PgUp) instead of
+  shortened ones.
 
 ## 0.4.0
 

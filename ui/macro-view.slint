@@ -26,6 +26,7 @@ component MacroHeader inherits Rectangle {
                 single-line: true;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
+                min-width: 80px;
                 selection-background-color: Theme.accent-soft;
                 accepted => { Store.rename-macro(self.text); }
                 changed has-focus => {
@@ -42,7 +43,7 @@ component MacroHeader inherits Rectangle {
             Button { text: "Duplicate"; clicked => { Store.duplicate-macro(); } }
             Button { text: "Delete"; danger: true; clicked => { Store.delete-macro(); } }
         }
-        Text { text: Store.macro-info; color: Theme.text-muted; font-size: Theme.font-sm; }
+        Text { text: Store.macro-info; color: Theme.text-muted; font-size: Theme.font-sm; overflow: elide; }
     }
 }
 
@@ -62,11 +63,23 @@ component StepList inherits Rectangle {
             spacing: 10px;
             SectionLabel { text: "ADD STEP"; vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
-            Text { text: "Delays:"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+            Button { text: "Clear steps"; compact: true; danger: true; clicked => { Store.clear-steps(); } }
+        }
+        ChoiceGrid {
+            columns: 5;
+            cell-height: 26px;
+            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text", "+ Move by", "+ Move to"];
+            selected(i) => { Store.add-step(i); }
+        }
+        // Delay tools on their own row, so the list keeps its width in the
+        // smallest window.
+        HorizontalLayout {
+            spacing: 10px;
+            SectionLabel { text: "DELAYS"; vertical-alignment: center; }
             Button { text: "Remove all"; compact: true; clicked => { Store.remove-delays(); } }
             Text { text: "Set all to"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             ValueField {
-                width: 80px;
+                width: 72px;
                 height: 24px;
                 value: "";
                 placeholder: "50";
@@ -75,20 +88,14 @@ component StepList inherits Rectangle {
             }
             Text { text: "Randomize ±"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
             ValueField {
-                width: 70px;
+                width: 72px;
                 height: 24px;
                 value: Store.macro-jitter;
                 placeholder: "0";
                 suffix: "ms";
                 committed(v) => { Store.set-macro-jitter(v); }
             }
-            Button { text: "Clear steps"; compact: true; danger: true; clicked => { Store.clear-steps(); } }
-        }
-        ChoiceGrid {
-            columns: 5;
-            cell-height: 26px;
-            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text", "+ Move by", "+ Move to"];
-            selected(i) => { Store.add-step(i); }
+            Rectangle { horizontal-stretch: 1; }
         }
 
         Rectangle {

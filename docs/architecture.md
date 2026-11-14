@@ -25,7 +25,7 @@ tables, and the engine sends the UI events.
 | File | Responsibility |
 | --- | --- |
 | `src/main.rs` | Command-line flags, single-instance check, hand-over after an update, starts the app |
-| `src/app.rs` | Owns `State`, wires every Slint callback, `refresh()` pushes state into `Store`; tray and close-to-tray, undo, updates, command-line answers |
+| `src/app.rs` | Owns `State`, wires every Slint callback, `refresh()` pushes state into `Store` (through `fill_ui`, which the layout test also uses); tray and close-to-tray, undo, updates, command-line answers |
 | `src/config.rs` | `Config` / `Profile` / `Action` / `Macro` types, combo ids, app rules and wildcards, hotkeys, JSON load + atomic save, import/export |
 | `src/keys.rs` | Key table (positions, Windows virtual-key codes), media keys, shortcut presets |
 | `src/system.rs` | Single instance (named mutex + event), start with Windows (Run key / Task Scheduler), open files and URLs, console for CLI output |
@@ -345,6 +345,14 @@ as one.
   unpainted and see-through.
 - Views get an explicit `max-width` in `app.slint`: without it, a view whose content has a
   bounded width would shrink the window.
+- Everything must fit the smallest window (1080 x 660). A row that needs more width than it
+  gets makes Slint lay the page out wider than the window, and the right-hand panel ends up
+  cut off. So rows of variable content shrink: text that can be long elides (`overflow:
+  elide`) or wraps, text boxes and name fields have a `min-width` below their preferred
+  width, lists of chips scroll, and a long list goes into a popup (*Recent…*). `cargo test
+  every_page_fits` checks it (see [building.md](building.md)).
+- The keyboard drawing has one design, its full size (1u = 50px), scaled down as a whole
+  in smaller windows (`s` in `keyboard.slint`); text scales too, but not below 7px.
 
 ## Adding a new action type
 

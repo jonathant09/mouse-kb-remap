@@ -55,7 +55,11 @@ export component Chip inherits Rectangle {
     callback remove;
 
     height: 22px;
-    min-width: layout.preferred-width;
+    // Never wider than its text, at most 200px, and it may shrink (the text
+    // then ends in "…") when the row it's in runs out of room.
+    min-width: layout.min-width;
+    preferred-width: min(layout.preferred-width, 200px);
+    max-width: layout.preferred-width;
     border-radius: Theme.radius-sm;
     background: root.active ? Theme.accent-soft : (ta.has-hover ? Theme.control-hover : Theme.input-bg);
     border-width: 1px;
@@ -72,9 +76,11 @@ export component Chip inherits Rectangle {
         spacing: 2px;
         Text {
             text: root.text;
+            min-width: min(self.preferred-width, 48px);
             vertical-alignment: center;
             font-size: Theme.font-sm;
             color: root.active ? Theme.accent : Theme.text;
+            overflow: elide;
         }
         if root.removable: Rectangle {
             width: 16px;

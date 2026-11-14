@@ -220,6 +220,55 @@ struct State {
 }
 
 impl State {
+    /// Nothing selected, nothing running: the state the app starts in.
+    fn new(cfg: Config) -> Self {
+        State {
+            cfg,
+            view: 0,
+            profile: 0,
+            layer: 0,
+            device: 0,
+            adding_device: false,
+            detecting: false,
+            picker_target: String::new(),
+            picker_group: 0,
+            input: String::new(),
+            slot: 0,
+            pending_kind: None,
+            macro_idx: None,
+            step: None,
+            capturing: String::new(),
+            ui_lone_mod: None,
+            recording: false,
+            record_target: String::new(),
+            picking: false,
+            focus_exe: String::new(),
+            focus_self: true,
+            elevation_blocked: false,
+            live: None,
+            last_live: None,
+            forced: false,
+            osd_profile: None,
+            osd_next_focus: false,
+            recent: Vec::new(),
+            autostart: Autostart::Off,
+            autostart_other: String::new(),
+            notice: (String::new(), false),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            undo_at: None,
+            update: None,
+            update_status: String::new(),
+            update_busy: false,
+            update_checked: None,
+            window_visible: false,
+            vpad: engine::VpadState::default(),
+            vpad_driver: false,
+            vpad_installing: false,
+            vpad_message: String::new(),
+        }
+    }
+
     fn bindings(&self) -> &BTreeMap<String, Action> {
         self.cfg.profiles[self.profile].layer(self.layer)
     }
@@ -395,63 +444,20 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.on_engine_event(ev)));
     });
 
+    let mut st = State::new(cfg);
+    if opts.updated {
+        let text = format!("Updated to version {}.", update::current_version());
+        st.notice = (text.clone(), false);
+        st.update_status = text;
+    }
+    st.vpad = engine::vpad_status();
+    st.vpad_driver = engine::vpad_driver_present();
+
     let app = Rc::new(App {
         ui: ui.as_weak(),
         centred: std::cell::Cell::new(false),
         tray: RefCell::new(None),
-        st: RefCell::new(State {
-            cfg,
-            view: 0,
-            profile: 0,
-            layer: 0,
-            device: 0,
-            adding_device: false,
-            detecting: false,
-            picker_target: String::new(),
-            picker_group: 0,
-            input: String::new(),
-            slot: 0,
-            pending_kind: None,
-            macro_idx: None,
-            step: None,
-            capturing: String::new(),
-            ui_lone_mod: None,
-            recording: false,
-            record_target: String::new(),
-            picking: false,
-            focus_exe: String::new(),
-            focus_self: true,
-            elevation_blocked: false,
-            live: None,
-            last_live: None,
-            forced: false,
-            osd_profile: None,
-            osd_next_focus: false,
-            recent: Vec::new(),
-            autostart: Autostart::Off,
-            autostart_other: String::new(),
-            notice: if opts.updated {
-                (format!("Updated to version {}.", update::current_version()), false)
-            } else {
-                (String::new(), false)
-            },
-            undo: Vec::new(),
-            redo: Vec::new(),
-            undo_at: None,
-            update: None,
-            update_status: if opts.updated {
-                format!("Updated to version {}.", update::current_version())
-            } else {
-                String::new()
-            },
-            update_busy: false,
-            update_checked: None,
-            window_visible: false,
-            vpad: engine::vpad_status(),
-            vpad_driver: engine::vpad_driver_present(),
-            vpad_installing: false,
-            vpad_message: String::new(),
-        }),
+        st: RefCell::new(st),
         engine,
         timers: RefCell::new(Vec::new()),
     });
@@ -1996,678 +2002,16 @@ impl App {
 
     // ---- refresh -------------------------------------------------------------------
 
-    /// Push the whole state into the UI. Cheap enough (a few hundred small
-    /// structs) that we don't bother with fine-grained updates.
     fn refresh(&self) {
         let Some(ui) = self.ui() else { return };
         let st = self.st.borrow();
-        let s = ui.global::<Store>();
-        let cfg = &st.cfg;
-        PAD_STYLE.with(|s| s.set(cfg.pad.labels));
-        let profile = &cfg.profiles[st.profile];
-        let bindings = st.bindings();
-
-        s.set_view(st.view);
-
-        // Sidebar
-        s.set_profiles(model(
-            cfg.profiles
-                .iter()
-                .enumerate()
-                .map(|(i, p)| ProfileItem {
-                    name: p.name.clone().into(),
-                    apps: if i == 0 {
-                        "Fallback for every app".into()
-                    } else if p.apps.is_empty() {
-                        "No apps assigned".into()
-                    } else {
-                        p.apps.join(", ").into()
-                    },
-                    live: st.live == Some(i),
-                    count: p.binding_count() as i32,
-                })
-                .collect(),
-        ));
-        s.set_selected_profile(st.profile as i32);
-        s.set_macros(model(
-            cfg.macros
-                .iter()
-                .map(|m| {
-                    let users = cfg.macro_users(&m.name).len();
-                    MacroItem {
-                        name: m.name.clone().into(),
-                        summary: format!(
-                            "{} step{} · {}",
-                            m.steps.len(),
-                            if m.steps.len() == 1 { "" } else { "s" },
-                            match users {
-                                0 => "not bound".to_string(),
-                                1 => "used by 1 profile".to_string(),
-                                n => format!("used by {n} profiles"),
-                            }
-                        )
-                        .into(),
-                    }
-                })
-                .collect(),
-        ));
-        s.set_macro_names(model(cfg.macros.iter().map(|m| SharedString::from(&m.name)).collect()));
-        s.set_selected_macro(st.macro_idx.map(|i| i as i32).unwrap_or(-1));
-        s.set_update_available(st.update.as_ref().map(|r| r.version.clone()).unwrap_or_default().into());
-
-        // Header
-        s.set_profile_name(profile.name.clone().into());
-        s.set_profile_apps(model(profile.apps.iter().map(SharedString::from).collect()));
-        s.set_profile_fullscreen(profile.fullscreen_only);
-        s.set_recent_apps(model(
-            st.recent
-                .iter()
-                .filter(|r| !profile.apps.iter().any(|a| a.eq_ignore_ascii_case(r)))
-                .take(4)
-                .map(SharedString::from)
-                .collect(),
-        ));
-        s.set_layer(st.layer as i32);
-        s.set_layer_banner(layer_banner(cfg, st.profile, st.layer).into());
-        s.set_full_keyboard(cfg.full_keyboard);
-
-        // Device shown, and what can't be bound for it
-        let suffix = st.device_suffix();
-        let mut device_names = vec![SharedString::from("All devices")];
-        device_names.extend(cfg.devices.iter().map(|d| SharedString::from(&d.name)));
-        s.set_device_names(model(device_names));
-        s.set_device_current(if st.shown_device().is_some() {
-            st.device as i32
-        } else {
-            0
-        });
-        let tab = s.get_device_tab();
-        s.set_device_note(
-            match st.shown_device() {
-                Some(d) if d.is_controller() && tab != 2 => {
-                    format!("{} is a controller: its bindings are on the Controller tab.", d.name)
-                }
-                Some(d) if !d.is_controller() && d.kind() != "Input device" && tab == 2 => {
-                    format!("{} is a mouse: its bindings are on the Mouse tab.", d.name)
-                }
-                Some(d) if tab == 1 && !KEYBOARDS_PER_DEVICE => format!(
-                    "Windows can't tell which keyboard a key came from, so keys can't have bindings just for {}. \
-                     Keyboard bindings are under \"All devices\".",
-                    d.name
-                ),
-                _ => String::new(),
-            }
-            .into(),
-        );
-
-        // Controller
-        s.set_pad_buttons(model(
-            PadButton::ALL
-                .iter()
-                .map(|b| {
-                    let id = format!("pad:{}{suffix}", b.id());
-                    let action = bindings.get(&id);
-                    let value = match action {
-                        Some(a) => a.label(),
-                        None => inherited_short(cfg, st.profile, st.layer, &id).unwrap_or_else(|| "—".into()),
-                    };
-                    MouseBtn {
-                        id: id.clone().into(),
-                        label: short_pad_label(*b, cfg.pad.labels).into(),
-                        detail: b.detail().into(),
-                        value: value.into(),
-                        mapped: action.is_some(),
-                        supported: true,
-                    }
-                })
-                .collect(),
-        ));
-        s.set_pad_glyphs(model(
-            PadButton::ALL
-                .iter()
-                .map(|b| SharedString::from(pad_glyph(*b, cfg.pad.labels)))
-                .collect(),
-        ));
-        let (stick_items, stick_current) = if st.profile == 0 {
-            (
-                vec!["Off", "Left", "Right"],
-                match profile.stick_pointer.unwrap_or_default() {
-                    StickPointer::Off => 0,
-                    StickPointer::Left => 1,
-                    StickPointer::Right => 2,
-                },
-            )
-        } else {
-            (
-                vec!["As Default", "Off", "Left", "Right"],
-                match profile.stick_pointer {
-                    None => 0,
-                    Some(StickPointer::Off) => 1,
-                    Some(StickPointer::Left) => 2,
-                    Some(StickPointer::Right) => 3,
-                },
-            )
-        };
-        s.set_stick_items(model(stick_items.into_iter().map(SharedString::from).collect()));
-        s.set_stick_current(stick_current);
-        s.set_stick_speed(cfg.stick_speed.to_string().into());
-        // Gyro / touchpad: Off / On, or (other profiles) Same as Default first.
-        let on_off = |own: Option<bool>| -> (Vec<SharedString>, i32) {
-            if st.profile == 0 {
-                (vec!["Off".into(), "On".into()], own.unwrap_or(false) as i32)
-            } else {
-                (
-                    vec!["As Default".into(), "Off".into(), "On".into()],
-                    match own {
-                        None => 0,
-                        Some(false) => 1,
-                        Some(true) => 2,
-                    },
-                )
-            }
-        };
-        let (items, current) = on_off(profile.gyro_pointer);
-        s.set_gyro_items(model(items));
-        s.set_gyro_current(current);
-        let (items, current) = on_off(profile.touch_pointer);
-        s.set_touch_items(model(items));
-        s.set_touch_current(current);
-        s.set_pad_detecting(st.detecting);
-        if let Some(Action::Gyro { toggle }) = st.action() {
-            s.set_gyro_toggle(*toggle);
-        }
-        let p = &cfg.pad;
-        s.set_pad_gyro_speed(p.gyro_speed.to_string().into());
-        s.set_pad_touch_speed(p.touch_speed.to_string().into());
-        s.set_pad_invert_x(p.gyro_invert_x);
-        s.set_pad_invert_y(p.gyro_invert_y);
-        s.set_pad_labels(match p.labels {
-            PadLabels::Xbox => 0,
-            PadLabels::PlayStation => 1,
-            PadLabels::Nintendo => 2,
-        });
-        s.set_pad_xinput(p.xinput);
-        s.set_pad_direct(p.direct);
-        s.set_pad_skip_steam(p.skip_steam_virtual);
-        s.set_pad_lizard(p.steam_lizard_off);
-        s.set_pad_copy(p.copy_to_virtual);
-        s.set_vpad_supported(engine::VPAD_SUPPORTED);
-        let (state, text) = vpad_display(&st);
-        s.set_vpad_state(state);
-        s.set_vpad_text(text.into());
-        s.set_pad_output_names(model(
-            PadButton::OUTPUTS
-                .iter()
-                .map(|b| SharedString::from(output_grid_name(*b)))
-                .collect(),
-        ));
-        s.set_pad_output_current(match st.action() {
-            Some(Action::Pad { button }) => output_index(*button),
-            _ => -1,
-        });
-
-        // Keyboard
-        s.set_keys(model(
-            keys::layout(cfg.full_keyboard)
-                .map(|k| {
-                    let id = format!("key:{}{suffix}", k.id);
-                    let action = bindings.get(&id);
-                    KeyCap {
-                        id: id.into(),
-                        label: k.label.into(),
-                        x: k.x,
-                        y: k.y,
-                        w: k.w,
-                        h: k.h,
-                        mapped: action.is_some(),
-                        value: action.map(|a| a.short_label()).unwrap_or_default().into(),
-                    }
-                })
-                .collect(),
-        ));
-
-        // Mouse
-        s.set_mouse_buttons(model(
-            MOUSE_ORDER
-                .iter()
-                .map(|m| {
-                    let id = format!("mouse:{m}{suffix}");
-                    if *m == "dpi" {
-                        return MouseBtn {
-                            id: id.into(),
-                            label: "DPI button".into(),
-                            detail: "Firmware".into(),
-                            value: "Firmware".into(),
-                            mapped: false,
-                            supported: false,
-                        };
-                    }
-                    let action = bindings.get(&id);
-                    let value = match action {
-                        Some(a) => a.label(),
-                        None => inherited_short(cfg, st.profile, st.layer, &id).unwrap_or_else(|| "Default".into()),
-                    };
-                    MouseBtn {
-                        id: id.clone().into(),
-                        label: plain_label(split_device(&id).0).into(),
-                        detail: input_detail(split_device(&id).0).into(),
-                        value: value.into(),
-                        mapped: action.is_some(),
-                        supported: true,
-                    }
-                })
-                .collect(),
-        ));
-
-        // All bindings of this profile (by layer, mouse before keys, combos last)
-        let mut rows: Vec<BindingRow> = (0..LAYER_COUNT)
-            .flat_map(|layer| {
-                profile.layer(layer).iter().map(move |(input, action)| BindingRow {
-                    input_id: input.clone().into(),
-                    input: input_label(input).into(),
-                    action: action.label().into(),
-                    layer: layer as i32,
-                })
-            })
-            .collect();
-        rows.sort_by_key(|r| {
-            let combo = r.input_id.contains('+');
-            (r.layer, combo, !r.input_id.starts_with("mouse:"))
-        });
-        s.set_bindings(model(rows));
-
-        // Inspector
-        let input = st.input.as_str();
-        let combo = Combo::parse(input);
-        s.set_selected_input(input.into());
-        s.set_selected_label(input_label(input).into());
-        let is_dpi = split_device(input).0 == "mouse:dpi";
-        s.set_selected_detail(
-            if is_dpi {
-                "Handled by firmware".into()
-            } else {
-                input_detail(input)
-            }
-            .into(),
-        );
-        s.set_selected_supported(!is_dpi);
-        s.set_selected_is_combo(combo.is_some());
-        if let Some(c) = &combo {
-            s.set_combo_mods(Modifier::to_bits(&c.mods) as i32);
-            let held_mouse = c
-                .held
-                .iter()
-                .find_map(|h| h.strip_prefix("mouse:").and_then(MouseButton::from_id))
-                .and_then(|b| COMBO_MOUSE.iter().position(|m| *m == b))
-                .map(|i| i as i32 + 1)
-                .unwrap_or(0);
-            s.set_combo_held_mouse(held_mouse);
-            s.set_combo_held_key(
-                c.held
-                    .iter()
-                    .find(|h| h.starts_with("key:"))
-                    .map(|h| plain_label(h))
-                    .unwrap_or_default()
-                    .into(),
-            );
-            s.set_combo_trigger(plain_label(&c.trigger).into());
-            s.set_combos(model(vec![]));
-        } else {
-            s.set_combos(model(
-                bindings
-                    .iter()
-                    .filter(|(id, _)| Combo::parse(id).is_some_and(|c| c.trigger == input))
-                    .map(|(id, a)| BindingRow {
-                        input_id: id.clone().into(),
-                        input: input_label(id).into(),
-                        action: a.label().into(),
-                        layer: st.layer as i32,
-                    })
-                    .collect(),
-            ));
-        }
-
-        let action = st.action();
-        let kind = st
-            .pending_kind
-            .unwrap_or_else(|| action.map(kind_of).unwrap_or(K_DEFAULT));
-        s.set_selected_kind(kind);
-        s.set_slot(st.slot as i32);
-        let gesture = matches!(st.binding(), Some(Action::Gesture { .. }));
-        s.set_slot_title(
-            if gesture {
-                GESTURE_TITLES[st.slot.min(5)]
-            } else {
-                SLOT_TITLES[st.slot.min(3)]
-            }
-            .into(),
-        );
-        s.set_slot_back(if gesture { "← Gesture" } else { "← Tap / hold" }.into());
-        if let Some(Action::Gesture { distance, .. }) = st.binding() {
-            let parts: Vec<SharedString> = (1..=5)
-                .map(|n| {
-                    st.binding()
-                        .and_then(|a| a.slot(n))
-                        .map(|a| a.label())
-                        .unwrap_or_else(|| "Nothing".into())
-                        .into()
-                })
-                .collect();
-            s.set_gesture_parts(model(parts));
-            s.set_gesture_distance(distance.to_string().into());
-        }
-        if st.slot == 0 {
-            s.set_kind_items(model(KIND_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
-            s.set_kind_current(kind);
-            s.set_inherited_value(inherited(cfg, st.profile, st.layer, input).unwrap_or_default().into());
-        } else {
-            s.set_kind_items(model(SLOT_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
-            s.set_kind_current(
-                SLOT_KINDS
-                    .iter()
-                    .position(|k| *k == kind)
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-            );
-            s.set_inherited_value(
-                match (gesture, st.slot) {
-                    (true, 1) => "Nothing happens when you let go without moving.",
-                    (true, _) => "Nothing happens for this direction.",
-                    (false, 1) => "Nothing happens on a tap.",
-                    (false, 2) => "Nothing happens on a hold.",
-                    _ => "No double tap: a second tap is just another tap.",
-                }
-                .into(),
-            );
-        }
-        if let Some(Action::TapHold { hold_ms, double_ms, .. }) = st.binding() {
-            let part = |n: usize| {
-                st.binding()
-                    .and_then(|a| a.slot(n))
-                    .map(|a| a.label())
-                    .unwrap_or_else(|| "Nothing".into())
-            };
-            s.set_taphold_tap(part(1).into());
-            s.set_taphold_hold(part(2).into());
-            s.set_taphold_double(part(3).into());
-            s.set_taphold_hold_ms(hold_ms.to_string().into());
-            s.set_taphold_double_ms(double_ms.to_string().into());
-        }
-
-        let (key_value, key_mods) = match action {
-            Some(Action::Key { key, mods }) if !keys::MEDIA.contains(&key.as_str()) => {
-                (combo_label(key, mods), Modifier::to_bits(mods))
-            }
-            _ => (String::new(), 0),
-        };
-        s.set_key_value(key_value.into());
-        s.set_key_mods(key_mods as i32);
-        s.set_shortcut_current(
-            match action {
-                Some(Action::Key { key, mods }) => keys::SHORTCUTS
-                    .iter()
-                    .position(|(_, k, m)| k == key && Modifier::to_bits(m) == Modifier::to_bits(mods))
-                    .map(|i| i as i32),
-                _ => None,
-            }
-            .unwrap_or(-1),
-        );
-        s.set_mouse_current(match action {
-            Some(Action::Mouse { button }) => MouseButton::ALL.iter().position(|b| b == button).unwrap_or(0) as i32,
-            _ => -1,
-        });
-        s.set_media_current(match action {
-            Some(Action::Key { key, .. }) => keys::MEDIA
-                .iter()
-                .position(|m| m == key)
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            _ => -1,
-        });
-        s.set_system_current(match action {
-            Some(Action::System { command }) => SystemCommand::ALL
-                .iter()
-                .position(|c| c == command)
-                .map(|i| i as i32)
-                .unwrap_or(-1),
-            _ => -1,
-        });
-        if let Some(Action::Layer { layer, toggle }) = action {
-            s.set_layer_target(*layer as i32);
-            s.set_layer_toggle(*toggle);
-        }
-
-        if let Some(Action::Macro {
-            name,
-            mode,
-            count,
-            gap_ms,
-        }) = action
-        {
-            s.set_macro_current(
-                cfg.macros
-                    .iter()
-                    .position(|m| &m.name == name)
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-            );
-            s.set_macro_mode(mode.index());
-            s.set_macro_count(count.to_string().into());
-            s.set_macro_gap(gap_ms.to_string().into());
-        } else {
-            s.set_macro_current(-1);
-            s.set_macro_mode(0);
-        }
-
-        if let Some(Action::Turbo {
-            output,
-            interval_ms,
-            hold_ms,
-            delay_ms,
-            toggle,
-        }) = action
-        {
-            match output {
-                Output::Key { key, mods } => {
-                    s.set_turbo_kind(0);
-                    s.set_turbo_key(combo_label(key, mods).into());
-                    s.set_turbo_mods(Modifier::to_bits(mods) as i32);
-                    s.set_turbo_mouse(-1);
-                }
-                Output::Mouse { button } => {
-                    s.set_turbo_kind(1);
-                    s.set_turbo_key("".into());
-                    s.set_turbo_mods(0);
-                    s.set_turbo_mouse(MouseButton::ALL.iter().position(|b| b == button).unwrap_or(0) as i32);
-                }
-                Output::Pad { button } => {
-                    s.set_turbo_kind(2);
-                    s.set_turbo_key("".into());
-                    s.set_turbo_mods(0);
-                    s.set_turbo_mouse(-1);
-                    s.set_turbo_pad(output_index(*button));
-                }
-            }
-            s.set_turbo_interval(interval_ms.to_string().into());
-            s.set_turbo_hold(hold_ms.to_string().into());
-            s.set_turbo_delay(delay_ms.to_string().into());
-            s.set_turbo_toggle(*toggle);
-            s.set_turbo_rate(format!("{}/s", per_second(*interval_ms)).into());
-        }
-
-        if let Some(Action::Text { text, delay_ms }) = action {
-            s.set_text_value(text.clone().into());
-            s.set_text_delay(delay_ms.to_string().into());
-        } else {
-            s.set_text_value("".into());
-        }
-        if let Some(Action::Launch { path, args }) = action {
-            s.set_launch_path(path.clone().into());
-            s.set_launch_args(args.clone().into());
-        } else {
-            s.set_launch_path("".into());
-            s.set_launch_args("".into());
-        }
-        s.set_sens_speed(match action {
-            Some(Action::Sensitivity { speed }) => *speed as i32,
-            _ => 10,
-        });
-
-        s.set_capturing(st.capturing.clone().into());
-
-        // Key picker ("Choose from a list")
-        s.set_picker_target(st.picker_target.clone().into());
-        if !st.picker_target.is_empty() {
-            let group = st.picker_group.min(PICKER_GROUPS.len() - 1);
-            let list = picker_keys(group);
-            let current = picker_current(&st, &st.picker_target);
-            s.set_picker_groups(model(PICKER_GROUPS.iter().map(|g| SharedString::from(*g)).collect()));
-            s.set_picker_group(group as i32);
-            s.set_picker_keys(model(
-                list.iter()
-                    .map(|k| SharedString::from(keys::display_name(k.id)))
-                    .collect(),
-            ));
-            s.set_picker_current(
-                current
-                    .and_then(|c| list.iter().position(|k| k.id == c))
-                    .map_or(-1, |i| i as i32),
-            );
-            s.set_picker_columns(match group {
-                0..=2 => 4,
-                8 => 2,
-                _ => 3,
-            });
-        }
-
-        // Macro editor
-        let m = st.macro_idx.and_then(|i| cfg.macros.get(i));
-        s.set_macro_name(m.map(|m| m.name.clone()).unwrap_or_default().into());
-        s.set_macro_jitter(m.map(|m| m.jitter_ms.to_string()).unwrap_or_default().into());
-        s.set_steps(model(
-            m.map(|m| {
-                m.steps
-                    .iter()
-                    .map(|step| {
-                        let (kind, value) = step.describe();
-                        StepRow {
-                            kind: kind.into(),
-                            value: value.into(),
-                            delay: matches!(step, MacroStep::Delay { .. }),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        ));
-        s.set_recording(st.recording);
-        s.set_picking_position(st.picking);
-        if let Some(m) = m {
-            let total: u64 = m
-                .steps
-                .iter()
-                .map(|s| match s {
-                    MacroStep::Delay { ms } => *ms as u64,
-                    MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. } => *hold_ms as u64,
-                    _ => 0,
-                })
-                .sum();
-            let users = cfg.macro_users(&m.name);
-            s.set_macro_info(
-                format!(
-                    "{} step{} · plays in about {:.2} s · {}",
-                    m.steps.len(),
-                    if m.steps.len() == 1 { "" } else { "s" },
-                    total as f64 / 1000.0,
-                    if users.is_empty() {
-                        "not bound to any input yet".to_string()
-                    } else {
-                        format!("used by {}", users.join(", "))
-                    }
-                )
-                .into(),
-            );
-        }
-        let step = m.and_then(|m| st.step.and_then(|i| m.steps.get(i)));
-        s.set_selected_step(if step.is_some() { st.step.unwrap() as i32 } else { -1 });
-        if let Some(step) = step {
-            s.set_step_kind(step_kind(step));
-            s.set_step_key(step_key(step).map(keys::display_name).unwrap_or_default().into());
-            s.set_step_mouse(
-                step_button(step)
-                    .and_then(|b| MouseButton::ALL.iter().position(|x| *x == b))
-                    .map(|i| i as i32)
-                    .unwrap_or(-1),
-            );
-            s.set_step_ms(step_ms(step).map(|v| v.to_string()).unwrap_or_default().into());
-            s.set_step_text(
-                match step {
-                    MacroStep::Text { text } => text.clone(),
-                    _ => String::new(),
-                }
-                .into(),
-            );
-            let (x, y) = step_xy(step).unwrap_or((0, 0));
-            s.set_step_x(x.to_string().into());
-            s.set_step_y(y.to_string().into());
-        } else {
-            s.set_step_kind(-1);
-        }
-
-        // Settings
-        s.set_autostart(st.autostart.index());
-        s.set_autostart_other(st.autostart_other.clone().into());
-        s.set_close_to_tray(cfg.close_to_tray);
-        s.set_notice(st.notice.0.clone().into());
-        s.set_notice_error(st.notice.1);
-        s.set_hotkey_values(model(
-            (0..Hotkeys::NAMES.len())
-                .map(|i| {
-                    cfg.hotkeys
-                        .get(i)
-                        .map(|h| SharedString::from(combo_label(&h.key, &h.mods)))
-                        .unwrap_or_default()
-                })
-                .collect(),
-        ));
-        s.set_notifications(cfg.notifications);
-        s.set_check_updates(cfg.check_updates);
-        s.set_devices(model(
-            cfg.devices
-                .iter()
-                .map(|d| DeviceItem {
-                    name: d.name.clone().into(),
-                    detail: format!("{} · {}", d.kind(), device_id_summary(&d.id)).into(),
-                })
-                .collect(),
-        ));
-        s.set_adding_device(st.adding_device);
-        s.set_keyboards_per_device(KEYBOARDS_PER_DEVICE);
-        s.set_update_status(st.update_status.clone().into());
-        s.set_update_busy(st.update_busy);
-
-        // Status bar
-        s.set_focused_app(st.focus_exe.clone().into());
-        let live_name = cfg.profiles[st.shown_live()].name.clone();
-        s.set_live_profile(
-            if st.focus_self && !st.focus_exe.is_empty() {
-                format!("{live_name} (paused while this window is focused)")
-            } else {
-                live_name.clone()
-            }
-            .into(),
-        );
-        s.set_live_forced(st.forced);
-        s.set_elevation_warning(st.elevation_blocked && !st.focus_self);
-        s.set_engine_enabled(cfg.enabled);
-        s.set_can_undo(!st.undo.is_empty());
-        s.set_can_redo(!st.redo.is_empty());
-
+        fill_ui(&ui, &st);
         if let Some(tray) = self.tray.borrow().as_ref() {
+            let cfg = &st.cfg;
             tray.set_remap_enabled(cfg.enabled);
             tray.set_status(
                 if cfg.enabled {
-                    format!("{live_name} profile")
+                    format!("{} profile", cfg.profiles[st.shown_live()].name)
                 } else {
                     "paused".to_string()
                 }
@@ -2675,6 +2019,672 @@ impl App {
             );
         }
     }
+}
+
+/// Push the whole state into the UI. Cheap enough (a few hundred small
+/// structs) that we don't bother with fine-grained updates.
+fn fill_ui(ui: &AppWindow, st: &State) {
+    let s = ui.global::<Store>();
+    let cfg = &st.cfg;
+    PAD_STYLE.with(|s| s.set(cfg.pad.labels));
+    let profile = &cfg.profiles[st.profile];
+    let bindings = st.bindings();
+
+    s.set_view(st.view);
+
+    // Sidebar
+    s.set_profiles(model(
+        cfg.profiles
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ProfileItem {
+                name: p.name.clone().into(),
+                apps: if i == 0 {
+                    "Fallback for every app".into()
+                } else if p.apps.is_empty() {
+                    "No apps assigned".into()
+                } else {
+                    p.apps.join(", ").into()
+                },
+                live: st.live == Some(i),
+                count: p.binding_count() as i32,
+            })
+            .collect(),
+    ));
+    s.set_selected_profile(st.profile as i32);
+    s.set_macros(model(
+        cfg.macros
+            .iter()
+            .map(|m| {
+                let users = cfg.macro_users(&m.name).len();
+                MacroItem {
+                    name: m.name.clone().into(),
+                    summary: format!(
+                        "{} step{} · {}",
+                        m.steps.len(),
+                        if m.steps.len() == 1 { "" } else { "s" },
+                        match users {
+                            0 => "not bound".to_string(),
+                            1 => "used by 1 profile".to_string(),
+                            n => format!("used by {n} profiles"),
+                        }
+                    )
+                    .into(),
+                }
+            })
+            .collect(),
+    ));
+    s.set_macro_names(model(cfg.macros.iter().map(|m| SharedString::from(&m.name)).collect()));
+    s.set_selected_macro(st.macro_idx.map(|i| i as i32).unwrap_or(-1));
+    s.set_update_available(st.update.as_ref().map(|r| r.version.clone()).unwrap_or_default().into());
+
+    // Header
+    s.set_profile_name(profile.name.clone().into());
+    s.set_profile_apps(model(profile.apps.iter().map(SharedString::from).collect()));
+    s.set_profile_fullscreen(profile.fullscreen_only);
+    s.set_recent_apps(model(
+        st.recent
+            .iter()
+            .filter(|r| !profile.apps.iter().any(|a| a.eq_ignore_ascii_case(r)))
+            .take(4)
+            .map(SharedString::from)
+            .collect(),
+    ));
+    s.set_layer(st.layer as i32);
+    s.set_layer_banner(layer_banner(cfg, st.profile, st.layer).into());
+    s.set_full_keyboard(cfg.full_keyboard);
+
+    // Device shown, and what can't be bound for it
+    let suffix = st.device_suffix();
+    let mut device_names = vec![SharedString::from("All devices")];
+    device_names.extend(cfg.devices.iter().map(|d| SharedString::from(&d.name)));
+    s.set_device_names(model(device_names));
+    s.set_device_current(if st.shown_device().is_some() {
+        st.device as i32
+    } else {
+        0
+    });
+    let tab = s.get_device_tab();
+    s.set_device_note(
+        match st.shown_device() {
+            Some(d) if d.is_controller() && tab != 2 => {
+                format!("{} is a controller: its bindings are on the Controller tab.", d.name)
+            }
+            Some(d) if !d.is_controller() && d.kind() != "Input device" && tab == 2 => {
+                format!("{} is a mouse: its bindings are on the Mouse tab.", d.name)
+            }
+            Some(d) if tab == 1 && !KEYBOARDS_PER_DEVICE => format!(
+                "Windows can't tell which keyboard a key came from, so keys can't have bindings just for {}. \
+                     Keyboard bindings are under \"All devices\".",
+                d.name
+            ),
+            _ => String::new(),
+        }
+        .into(),
+    );
+
+    // Controller
+    s.set_pad_buttons(model(
+        PadButton::ALL
+            .iter()
+            .map(|b| {
+                let id = format!("pad:{}{suffix}", b.id());
+                let action = bindings.get(&id);
+                let value = match action {
+                    Some(a) => a.label(),
+                    None => inherited_short(cfg, st.profile, st.layer, &id).unwrap_or_else(|| "—".into()),
+                };
+                MouseBtn {
+                    id: id.clone().into(),
+                    label: short_pad_label(*b, cfg.pad.labels).into(),
+                    detail: b.detail().into(),
+                    value: value.into(),
+                    mapped: action.is_some(),
+                    supported: true,
+                }
+            })
+            .collect(),
+    ));
+    s.set_pad_glyphs(model(
+        PadButton::ALL
+            .iter()
+            .map(|b| SharedString::from(pad_glyph(*b, cfg.pad.labels)))
+            .collect(),
+    ));
+    let (stick_items, stick_current) = if st.profile == 0 {
+        (
+            vec!["Off", "Left", "Right"],
+            match profile.stick_pointer.unwrap_or_default() {
+                StickPointer::Off => 0,
+                StickPointer::Left => 1,
+                StickPointer::Right => 2,
+            },
+        )
+    } else {
+        (
+            vec!["As Default", "Off", "Left", "Right"],
+            match profile.stick_pointer {
+                None => 0,
+                Some(StickPointer::Off) => 1,
+                Some(StickPointer::Left) => 2,
+                Some(StickPointer::Right) => 3,
+            },
+        )
+    };
+    s.set_stick_items(model(stick_items.into_iter().map(SharedString::from).collect()));
+    s.set_stick_current(stick_current);
+    s.set_stick_speed(cfg.stick_speed.to_string().into());
+    // Gyro / touchpad: Off / On, or (other profiles) Same as Default first.
+    let on_off = |own: Option<bool>| -> (Vec<SharedString>, i32) {
+        if st.profile == 0 {
+            (vec!["Off".into(), "On".into()], own.unwrap_or(false) as i32)
+        } else {
+            (
+                vec!["As Default".into(), "Off".into(), "On".into()],
+                match own {
+                    None => 0,
+                    Some(false) => 1,
+                    Some(true) => 2,
+                },
+            )
+        }
+    };
+    let (items, current) = on_off(profile.gyro_pointer);
+    s.set_gyro_items(model(items));
+    s.set_gyro_current(current);
+    let (items, current) = on_off(profile.touch_pointer);
+    s.set_touch_items(model(items));
+    s.set_touch_current(current);
+    s.set_pad_detecting(st.detecting);
+    if let Some(Action::Gyro { toggle }) = st.action() {
+        s.set_gyro_toggle(*toggle);
+    }
+    let p = &cfg.pad;
+    s.set_pad_gyro_speed(p.gyro_speed.to_string().into());
+    s.set_pad_touch_speed(p.touch_speed.to_string().into());
+    s.set_pad_invert_x(p.gyro_invert_x);
+    s.set_pad_invert_y(p.gyro_invert_y);
+    s.set_pad_labels(match p.labels {
+        PadLabels::Xbox => 0,
+        PadLabels::PlayStation => 1,
+        PadLabels::Nintendo => 2,
+    });
+    s.set_pad_xinput(p.xinput);
+    s.set_pad_direct(p.direct);
+    s.set_pad_skip_steam(p.skip_steam_virtual);
+    s.set_pad_lizard(p.steam_lizard_off);
+    s.set_pad_copy(p.copy_to_virtual);
+    s.set_vpad_supported(engine::VPAD_SUPPORTED);
+    let (state, text) = vpad_display(st);
+    s.set_vpad_state(state);
+    s.set_vpad_text(text.into());
+    s.set_pad_output_names(model(
+        PadButton::OUTPUTS
+            .iter()
+            .map(|b| SharedString::from(output_grid_name(*b)))
+            .collect(),
+    ));
+    s.set_pad_output_current(match st.action() {
+        Some(Action::Pad { button }) => output_index(*button),
+        _ => -1,
+    });
+
+    // Keyboard
+    s.set_keys(model(
+        keys::layout(cfg.full_keyboard)
+            .map(|k| {
+                let id = format!("key:{}{suffix}", k.id);
+                let action = bindings.get(&id);
+                KeyCap {
+                    id: id.into(),
+                    label: k.label.into(),
+                    x: k.x,
+                    y: k.y,
+                    w: k.w,
+                    h: k.h,
+                    mapped: action.is_some(),
+                    value: action.map(|a| a.short_label()).unwrap_or_default().into(),
+                }
+            })
+            .collect(),
+    ));
+
+    // Mouse
+    s.set_mouse_buttons(model(
+        MOUSE_ORDER
+            .iter()
+            .map(|m| {
+                let id = format!("mouse:{m}{suffix}");
+                if *m == "dpi" {
+                    return MouseBtn {
+                        id: id.into(),
+                        label: "DPI button".into(),
+                        detail: "Firmware".into(),
+                        value: "Firmware".into(),
+                        mapped: false,
+                        supported: false,
+                    };
+                }
+                let action = bindings.get(&id);
+                let value = match action {
+                    Some(a) => a.label(),
+                    None => inherited_short(cfg, st.profile, st.layer, &id).unwrap_or_else(|| "Default".into()),
+                };
+                MouseBtn {
+                    id: id.clone().into(),
+                    label: plain_label(split_device(&id).0).into(),
+                    detail: input_detail(split_device(&id).0).into(),
+                    value: value.into(),
+                    mapped: action.is_some(),
+                    supported: true,
+                }
+            })
+            .collect(),
+    ));
+
+    // All bindings of this profile (by layer, mouse before keys, combos last)
+    let mut rows: Vec<BindingRow> = (0..LAYER_COUNT)
+        .flat_map(|layer| {
+            profile.layer(layer).iter().map(move |(input, action)| BindingRow {
+                input_id: input.clone().into(),
+                input: input_label(input).into(),
+                action: action.label().into(),
+                layer: layer as i32,
+            })
+        })
+        .collect();
+    rows.sort_by_key(|r| {
+        let combo = r.input_id.contains('+');
+        (r.layer, combo, !r.input_id.starts_with("mouse:"))
+    });
+    s.set_bindings(model(rows));
+
+    // Inspector
+    let input = st.input.as_str();
+    let combo = Combo::parse(input);
+    s.set_selected_input(input.into());
+    s.set_selected_label(input_label(input).into());
+    let is_dpi = split_device(input).0 == "mouse:dpi";
+    s.set_selected_detail(
+        if is_dpi {
+            "Handled by firmware".into()
+        } else {
+            input_detail(input)
+        }
+        .into(),
+    );
+    s.set_selected_supported(!is_dpi);
+    s.set_selected_is_combo(combo.is_some());
+    if let Some(c) = &combo {
+        s.set_combo_mods(Modifier::to_bits(&c.mods) as i32);
+        let held_mouse = c
+            .held
+            .iter()
+            .find_map(|h| h.strip_prefix("mouse:").and_then(MouseButton::from_id))
+            .and_then(|b| COMBO_MOUSE.iter().position(|m| *m == b))
+            .map(|i| i as i32 + 1)
+            .unwrap_or(0);
+        s.set_combo_held_mouse(held_mouse);
+        s.set_combo_held_key(
+            c.held
+                .iter()
+                .find(|h| h.starts_with("key:"))
+                .map(|h| plain_label(h))
+                .unwrap_or_default()
+                .into(),
+        );
+        s.set_combo_trigger(plain_label(&c.trigger).into());
+        s.set_combos(model(vec![]));
+    } else {
+        s.set_combos(model(
+            bindings
+                .iter()
+                .filter(|(id, _)| Combo::parse(id).is_some_and(|c| c.trigger == input))
+                .map(|(id, a)| BindingRow {
+                    input_id: id.clone().into(),
+                    input: input_label(id).into(),
+                    action: a.label().into(),
+                    layer: st.layer as i32,
+                })
+                .collect(),
+        ));
+    }
+
+    let action = st.action();
+    let kind = st
+        .pending_kind
+        .unwrap_or_else(|| action.map(kind_of).unwrap_or(K_DEFAULT));
+    s.set_selected_kind(kind);
+    s.set_slot(st.slot as i32);
+    let gesture = matches!(st.binding(), Some(Action::Gesture { .. }));
+    s.set_slot_title(
+        if gesture {
+            GESTURE_TITLES[st.slot.min(5)]
+        } else {
+            SLOT_TITLES[st.slot.min(3)]
+        }
+        .into(),
+    );
+    s.set_slot_back(if gesture { "← Gesture" } else { "← Tap / hold" }.into());
+    if let Some(Action::Gesture { distance, .. }) = st.binding() {
+        let parts: Vec<SharedString> = (1..=5)
+            .map(|n| {
+                st.binding()
+                    .and_then(|a| a.slot(n))
+                    .map(|a| a.label())
+                    .unwrap_or_else(|| "Nothing".into())
+                    .into()
+            })
+            .collect();
+        s.set_gesture_parts(model(parts));
+        s.set_gesture_distance(distance.to_string().into());
+    }
+    if st.slot == 0 {
+        s.set_kind_items(model(KIND_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
+        s.set_kind_current(kind);
+        s.set_inherited_value(inherited(cfg, st.profile, st.layer, input).unwrap_or_default().into());
+    } else {
+        s.set_kind_items(model(SLOT_NAMES.iter().map(|n| SharedString::from(*n)).collect()));
+        s.set_kind_current(
+            SLOT_KINDS
+                .iter()
+                .position(|k| *k == kind)
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+        );
+        s.set_inherited_value(
+            match (gesture, st.slot) {
+                (true, 1) => "Nothing happens when you let go without moving.",
+                (true, _) => "Nothing happens for this direction.",
+                (false, 1) => "Nothing happens on a tap.",
+                (false, 2) => "Nothing happens on a hold.",
+                _ => "No double tap: a second tap is just another tap.",
+            }
+            .into(),
+        );
+    }
+    if let Some(Action::TapHold { hold_ms, double_ms, .. }) = st.binding() {
+        let part = |n: usize| {
+            st.binding()
+                .and_then(|a| a.slot(n))
+                .map(|a| a.label())
+                .unwrap_or_else(|| "Nothing".into())
+        };
+        s.set_taphold_tap(part(1).into());
+        s.set_taphold_hold(part(2).into());
+        s.set_taphold_double(part(3).into());
+        s.set_taphold_hold_ms(hold_ms.to_string().into());
+        s.set_taphold_double_ms(double_ms.to_string().into());
+    }
+
+    let (key_value, key_mods) = match action {
+        Some(Action::Key { key, mods }) if !keys::MEDIA.contains(&key.as_str()) => {
+            (combo_label(key, mods), Modifier::to_bits(mods))
+        }
+        _ => (String::new(), 0),
+    };
+    s.set_key_value(key_value.into());
+    s.set_key_mods(key_mods as i32);
+    s.set_shortcut_current(
+        match action {
+            Some(Action::Key { key, mods }) => keys::SHORTCUTS
+                .iter()
+                .position(|(_, k, m)| k == key && Modifier::to_bits(m) == Modifier::to_bits(mods))
+                .map(|i| i as i32),
+            _ => None,
+        }
+        .unwrap_or(-1),
+    );
+    s.set_mouse_current(match action {
+        Some(Action::Mouse { button }) => MouseButton::ALL.iter().position(|b| b == button).unwrap_or(0) as i32,
+        _ => -1,
+    });
+    s.set_media_current(match action {
+        Some(Action::Key { key, .. }) => keys::MEDIA
+            .iter()
+            .position(|m| m == key)
+            .map(|i| i as i32)
+            .unwrap_or(-1),
+        _ => -1,
+    });
+    s.set_system_current(match action {
+        Some(Action::System { command }) => SystemCommand::ALL
+            .iter()
+            .position(|c| c == command)
+            .map(|i| i as i32)
+            .unwrap_or(-1),
+        _ => -1,
+    });
+    if let Some(Action::Layer { layer, toggle }) = action {
+        s.set_layer_target(*layer as i32);
+        s.set_layer_toggle(*toggle);
+    }
+
+    if let Some(Action::Macro {
+        name,
+        mode,
+        count,
+        gap_ms,
+    }) = action
+    {
+        s.set_macro_current(
+            cfg.macros
+                .iter()
+                .position(|m| &m.name == name)
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+        );
+        s.set_macro_mode(mode.index());
+        s.set_macro_count(count.to_string().into());
+        s.set_macro_gap(gap_ms.to_string().into());
+    } else {
+        s.set_macro_current(-1);
+        s.set_macro_mode(0);
+    }
+
+    if let Some(Action::Turbo {
+        output,
+        interval_ms,
+        hold_ms,
+        delay_ms,
+        toggle,
+    }) = action
+    {
+        match output {
+            Output::Key { key, mods } => {
+                s.set_turbo_kind(0);
+                s.set_turbo_key(combo_label(key, mods).into());
+                s.set_turbo_mods(Modifier::to_bits(mods) as i32);
+                s.set_turbo_mouse(-1);
+            }
+            Output::Mouse { button } => {
+                s.set_turbo_kind(1);
+                s.set_turbo_key("".into());
+                s.set_turbo_mods(0);
+                s.set_turbo_mouse(MouseButton::ALL.iter().position(|b| b == button).unwrap_or(0) as i32);
+            }
+            Output::Pad { button } => {
+                s.set_turbo_kind(2);
+                s.set_turbo_key("".into());
+                s.set_turbo_mods(0);
+                s.set_turbo_mouse(-1);
+                s.set_turbo_pad(output_index(*button));
+            }
+        }
+        s.set_turbo_interval(interval_ms.to_string().into());
+        s.set_turbo_hold(hold_ms.to_string().into());
+        s.set_turbo_delay(delay_ms.to_string().into());
+        s.set_turbo_toggle(*toggle);
+        s.set_turbo_rate(format!("{}/s", per_second(*interval_ms)).into());
+    }
+
+    if let Some(Action::Text { text, delay_ms }) = action {
+        s.set_text_value(text.clone().into());
+        s.set_text_delay(delay_ms.to_string().into());
+    } else {
+        s.set_text_value("".into());
+    }
+    if let Some(Action::Launch { path, args }) = action {
+        s.set_launch_path(path.clone().into());
+        s.set_launch_args(args.clone().into());
+    } else {
+        s.set_launch_path("".into());
+        s.set_launch_args("".into());
+    }
+    s.set_sens_speed(match action {
+        Some(Action::Sensitivity { speed }) => *speed as i32,
+        _ => 10,
+    });
+
+    s.set_capturing(st.capturing.clone().into());
+
+    // Key picker ("Choose from a list")
+    s.set_picker_target(st.picker_target.clone().into());
+    if !st.picker_target.is_empty() {
+        let group = st.picker_group.min(PICKER_GROUPS.len() - 1);
+        let list = picker_keys(group);
+        let current = picker_current(st, &st.picker_target);
+        s.set_picker_groups(model(PICKER_GROUPS.iter().map(|g| SharedString::from(*g)).collect()));
+        s.set_picker_group(group as i32);
+        s.set_picker_keys(model(
+            list.iter()
+                .map(|k| SharedString::from(keys::display_name(k.id)))
+                .collect(),
+        ));
+        s.set_picker_current(
+            current
+                .and_then(|c| list.iter().position(|k| k.id == c))
+                .map_or(-1, |i| i as i32),
+        );
+        s.set_picker_columns(match group {
+            0..=2 => 4,
+            8 => 2,
+            _ => 3,
+        });
+    }
+
+    // Macro editor
+    let m = st.macro_idx.and_then(|i| cfg.macros.get(i));
+    s.set_macro_name(m.map(|m| m.name.clone()).unwrap_or_default().into());
+    s.set_macro_jitter(m.map(|m| m.jitter_ms.to_string()).unwrap_or_default().into());
+    s.set_steps(model(
+        m.map(|m| {
+            m.steps
+                .iter()
+                .map(|step| {
+                    let (kind, value) = step.describe();
+                    StepRow {
+                        kind: kind.into(),
+                        value: value.into(),
+                        delay: matches!(step, MacroStep::Delay { .. }),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default(),
+    ));
+    s.set_recording(st.recording);
+    s.set_picking_position(st.picking);
+    if let Some(m) = m {
+        let total: u64 = m
+            .steps
+            .iter()
+            .map(|s| match s {
+                MacroStep::Delay { ms } => *ms as u64,
+                MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. } => *hold_ms as u64,
+                _ => 0,
+            })
+            .sum();
+        let users = cfg.macro_users(&m.name);
+        s.set_macro_info(
+            format!(
+                "{} step{} · plays in about {:.2} s · {}",
+                m.steps.len(),
+                if m.steps.len() == 1 { "" } else { "s" },
+                total as f64 / 1000.0,
+                if users.is_empty() {
+                    "not bound to any input yet".to_string()
+                } else {
+                    format!("used by {}", users.join(", "))
+                }
+            )
+            .into(),
+        );
+    }
+    let step = m.and_then(|m| st.step.and_then(|i| m.steps.get(i)));
+    s.set_selected_step(if step.is_some() { st.step.unwrap() as i32 } else { -1 });
+    if let Some(step) = step {
+        s.set_step_kind(step_kind(step));
+        s.set_step_key(step_key(step).map(keys::display_name).unwrap_or_default().into());
+        s.set_step_mouse(
+            step_button(step)
+                .and_then(|b| MouseButton::ALL.iter().position(|x| *x == b))
+                .map(|i| i as i32)
+                .unwrap_or(-1),
+        );
+        s.set_step_ms(step_ms(step).map(|v| v.to_string()).unwrap_or_default().into());
+        s.set_step_text(
+            match step {
+                MacroStep::Text { text } => text.clone(),
+                _ => String::new(),
+            }
+            .into(),
+        );
+        let (x, y) = step_xy(step).unwrap_or((0, 0));
+        s.set_step_x(x.to_string().into());
+        s.set_step_y(y.to_string().into());
+    } else {
+        s.set_step_kind(-1);
+    }
+
+    // Settings
+    s.set_autostart(st.autostart.index());
+    s.set_autostart_other(st.autostart_other.clone().into());
+    s.set_close_to_tray(cfg.close_to_tray);
+    s.set_notice(st.notice.0.clone().into());
+    s.set_notice_error(st.notice.1);
+    s.set_hotkey_values(model(
+        (0..Hotkeys::NAMES.len())
+            .map(|i| {
+                cfg.hotkeys
+                    .get(i)
+                    .map(|h| SharedString::from(combo_label(&h.key, &h.mods)))
+                    .unwrap_or_default()
+            })
+            .collect(),
+    ));
+    s.set_notifications(cfg.notifications);
+    s.set_check_updates(cfg.check_updates);
+    s.set_devices(model(
+        cfg.devices
+            .iter()
+            .map(|d| DeviceItem {
+                name: d.name.clone().into(),
+                detail: format!("{} · {}", d.kind(), device_id_summary(&d.id)).into(),
+            })
+            .collect(),
+    ));
+    s.set_adding_device(st.adding_device);
+    s.set_keyboards_per_device(KEYBOARDS_PER_DEVICE);
+    s.set_update_status(st.update_status.clone().into());
+    s.set_update_busy(st.update_busy);
+
+    // Status bar
+    s.set_focused_app(st.focus_exe.clone().into());
+    let live_name = cfg.profiles[st.shown_live()].name.clone();
+    s.set_live_profile(
+        if st.focus_self && !st.focus_exe.is_empty() {
+            format!("{live_name} (paused while this window is focused)")
+        } else {
+            live_name.clone()
+        }
+        .into(),
+    );
+    s.set_live_forced(st.forced);
+    s.set_elevation_warning(st.elevation_blocked && !st.focus_self);
+    s.set_engine_enabled(cfg.enabled);
+    s.set_can_undo(!st.undo.is_empty());
+    s.set_can_redo(!st.redo.is_empty());
 }
 
 fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
@@ -3619,3 +3629,7 @@ fn set_kind(st: &mut State, kind: i32) {
         _ => st.pending_kind = Some(kind),
     }
 }
+
+#[cfg(test)]
+#[path = "ui_fit_tests.rs"]
+mod ui_fit_tests;
