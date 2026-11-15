@@ -188,7 +188,8 @@ end-to-end tests exercise this path.
 
 ### Controllers
 
-Controllers are read only while the active profile uses one (`Layers::uses_pad`), from two
+Controllers are read only while the active profile uses one (`Layers::uses_pad`), a macro
+is being recorded, or *Detect button* / device capture is waiting (`pads_needed`), from two
 sources that both produce a `pad::PadReading` and hand it to `win_devices::on_reading`:
 
 - **XInput** (`win_devices.rs`): polled every 4 ms, empty slots once a second (asking about
@@ -209,7 +210,9 @@ sources that both produce a `pad::PadReading` and hand it to `win_devices::on_re
 
 `PadState` (`pad.rs`) turns readings into pressed inputs, with hysteresis for triggers (a
 third) and stick directions (half way); changes go to the engine thread as `WM_PAD` and
-through the dispatcher like keys. They can't be swallowed: controllers are read shared. The
+through the dispatcher like keys (while recording, the engine thread also records them as
+`RecEvent::Pad`; changes read only for a recording carry `PAD_RECORD_ONLY` and skip the
+dispatcher). They can't be swallowed: controllers are read shared. The
 same state moves the pointer with relative `SendInput` moves from the stick
 (`pad::stick_move`: dead zone, then speed growing with the square of the tilt), the gyro
 (`GyroMouse`: learns its drift while still, yaw → x, pitch → y) and the touchpad

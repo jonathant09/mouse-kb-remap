@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+- **Macro recording picks up controllers.** Pressing buttons, triggers and stick
+  directions on a controller while recording now adds *Controller down / up* steps (with
+  the pauses between them), played on the virtual controller. Before, recording only heard
+  keys and mouse buttons, and controllers weren't even read unless the active profile
+  used one. Inputs the virtual Xbox controller doesn't have (touchpad, paddles, numbered
+  buttons) are left out. Windows and Linux.
+- Tested on Windows 11 with a stand-in virtual controller (new ignored test
+  `record_stand_in_controller`).
+
 ## 0.6.0
 
 - **Hide the real controller from games.** *Settings → Virtual controller → Hide the real

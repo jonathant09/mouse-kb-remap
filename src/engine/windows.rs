@@ -331,6 +331,7 @@ impl Engine {
             });
         }
         sh.recording.store(true, Ordering::SeqCst);
+        win_devices::set_recording(true);
         post_engine(WM_UPDATE_HOOKS);
         true
     }
@@ -338,6 +339,7 @@ impl Engine {
     pub fn stop_recording(&self) -> Vec<(Duration, RecEvent)> {
         let sh = shared();
         sh.recording.store(false, Ordering::SeqCst);
+        win_devices::set_recording(false);
         post_engine(WM_UPDATE_HOOKS);
         sh.record
             .lock()
@@ -433,12 +435,14 @@ fn engine_thread() {
                     }
                     WM_PAD => {
                         if let Some(b) = win_devices::pad_from_code(msg.wParam.0) {
-                            let phase = if msg.wParam.0 & win_devices::PAD_RELEASED != 0 {
-                                Phase::Up
-                            } else {
-                                Phase::Down
-                            };
-                            handle(Input::Pad(b), phase, device_of(msg.lParam));
+                            let down = msg.wParam.0 & win_devices::PAD_RELEASED == 0;
+                            if shared().recording.load(Ordering::Relaxed) {
+                                record(RecEvent::Pad { button: b, down });
+                            }
+                            if msg.wParam.0 & win_devices::PAD_RECORD_ONLY == 0 {
+                                let phase = if down { Phase::Down } else { Phase::Up };
+                                handle(Input::Pad(b), phase, device_of(msg.lParam));
+                            }
                         }
                         continue;
                     }

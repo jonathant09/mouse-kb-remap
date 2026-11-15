@@ -155,6 +155,8 @@ pub enum RecEvent {
     Key { vk: u16, down: bool },
     Button { button: MouseButton, down: bool },
     Wheel(MouseButton),
+    /// A real controller's button, trigger or stick direction.
+    Pad { button: PadButton, down: bool },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -959,7 +961,8 @@ pub fn compile(cfg: &Config) -> Compiled {
 }
 
 /// Turn recorded input into macro steps, with the recorded pauses as delays.
-/// Key auto-repeat is dropped.
+/// Key auto-repeat is dropped, and so are controller inputs the virtual
+/// controller can't press (numbered buttons, touchpad, paddles).
 pub fn recording_to_steps(events: &[(std::time::Duration, RecEvent)]) -> Vec<MacroStep> {
     let mut steps = Vec::new();
     let mut last: Option<std::time::Duration> = None;
@@ -981,6 +984,9 @@ pub fn recording_to_steps(events: &[(std::time::Duration, RecEvent)]) -> Vec<Mac
             RecEvent::Button { button, down: true } => Some(MacroStep::MouseDown { button }),
             RecEvent::Button { button, down: false } => Some(MacroStep::MouseUp { button }),
             RecEvent::Wheel(button) => Some(MacroStep::MouseClick { button, hold_ms: 0 }),
+            RecEvent::Pad { button, .. } if !button.is_output() => None,
+            RecEvent::Pad { button, down: true } => Some(MacroStep::PadDown { button }),
+            RecEvent::Pad { button, down: false } => Some(MacroStep::PadUp { button }),
         };
         let Some(step) = step else { continue };
         if let Some(prev) = last {
@@ -1110,7 +1116,7 @@ impl Engine {
         self.inner.detect_pad(on);
     }
 
-    /// Start recording keys and mouse buttons for a macro.
+    /// Start recording keys, mouse buttons and controller inputs for a macro.
     pub fn start_recording(&self) -> bool {
         self.inner.start_recording()
     }
@@ -1475,6 +1481,37 @@ mod tests {
                 MacroStep::MouseDown {
                     button: MouseButton::Left
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn recorded_controller_inputs_become_pad_steps() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let pad = |button, down| RecEvent::Pad { button, down };
+        let steps = recording_to_steps(&[
+            (ms(0), pad(PadButton::A, true)),
+            (ms(40), pad(PadButton::Touchpad, true)), // virtual pad has none
+            (ms(60), pad(PadButton::Button(7), true)), // nor numbered buttons
+            (ms(100), pad(PadButton::A, false)),
+            (ms(150), pad(PadButton::RsLeft, true)),
+            (ms(150), pad(PadButton::Rt, true)),
+            (ms(400), pad(PadButton::Rt, false)),
+        ]);
+        assert_eq!(
+            steps,
+            vec![
+                MacroStep::PadDown { button: PadButton::A },
+                MacroStep::Delay { ms: 100 },
+                MacroStep::PadUp { button: PadButton::A },
+                MacroStep::Delay { ms: 50 },
+                MacroStep::PadDown {
+                    button: PadButton::RsLeft
+                },
+                MacroStep::PadDown { button: PadButton::Rt },
+                MacroStep::Delay { ms: 250 },
+                MacroStep::PadUp { button: PadButton::Rt },
             ]
         );
     }

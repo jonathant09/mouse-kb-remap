@@ -840,6 +840,9 @@ fn pad_loop(mut dev: Device) {
                             });
                             continue;
                         }
+                        if sh.recording.load(Ordering::Relaxed) {
+                            record(RecEvent::Pad { button: b, down });
+                        }
                         dispatch(
                             Input::Pad(b),
                             if down { Phase::Down } else { Phase::Up },

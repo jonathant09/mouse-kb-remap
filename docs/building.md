@@ -23,6 +23,7 @@ cargo test every_page_fits  # every page and panel fits the smallest window (see
 cargo test list_devices -- --ignored --nocapture       # the mice and XInput slots Windows reports here
 cargo test list_controllers -- --ignored --nocapture   # the controllers the app would read over HID
 cargo test vpad_round_trip -- --ignored --nocapture    # plug in a virtual controller, read it back (needs ViGEmBus)
+cargo test record_stand_in_controller -- --ignored --nocapture  # record a macro from a stand-in controller (needs ViGEmBus)
 cargo test download_matches -- --ignored               # download the ViGEmBus and HidHide installers, check their checksums
 cargo test install_hidhide_for_real -- --ignored --nocapture  # install HidHide like the button does (admin prompt)
 cargo clippy --all-targets   # lints (CI fails on warnings)

@@ -18,7 +18,7 @@ app that works with **any** mouse or keyboard.
 - **Remap any button or key** to:
   - a **key or combo** (Ctrl + C, Alt + Tab, Win + Shift + S…), with one-click presets
   - a **mouse button** or scroll step, including horizontal scroll (wheel tilt)
-  - a **macro**: recorded or hand-built keys, clicks, delays and text, played once, a set
+  - a **macro**: recorded or hand-built keys, clicks, controller buttons, delays and text, played once, a set
     number of times, while held, or toggled on/off
   - **turbo** / **repeat on hold** with your own timing: press interval, hold time and an
     optional "start repeating after" delay, while held or toggled

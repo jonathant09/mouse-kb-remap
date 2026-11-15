@@ -50,6 +50,9 @@ pub const WM_RAW_BUTTON: u32 = WM_APP + 3;
 /// plus `PAD_RELEASED` when released; `lParam` as above.
 pub const WM_PAD: u32 = WM_APP + 4;
 pub const PAD_RELEASED: usize = 0x1_0000;
+/// In a `WM_PAD` code: only for a macro recording (the active profile
+/// doesn't use the controller, so don't act on it).
+pub const PAD_RECORD_ONLY: usize = 0x2_0000;
 /// To the raw input thread: register or unregister as needed.
 const WM_REGISTER: u32 = WM_APP + 1;
 
@@ -76,6 +79,8 @@ static PAD_WANTED: AtomicBool = AtomicBool::new(false);
 static MOTION: AtomicBool = AtomicBool::new(false);
 /// "Detect button": the next controller press selects that input.
 static DETECT: AtomicBool = AtomicBool::new(false);
+/// A macro is being recorded: read controllers so their presses go in.
+static RECORDING: AtomicBool = AtomicBool::new(false);
 static GYRO_HELD: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 static DEVICES: RwLock<Vec<Device>> = RwLock::new(Vec::new());
@@ -166,6 +171,11 @@ pub fn set_detect(on: bool) {
     DETECT.store(on, Ordering::SeqCst);
 }
 
+/// Read controllers while a macro is recorded, whatever the profile uses.
+pub fn set_recording(on: bool) {
+    RECORDING.store(on, Ordering::SeqCst);
+}
+
 /// The Gyro action is holding the gyro mouse on (or toggled it).
 pub fn set_gyro_held(on: bool) {
     GYRO_HELD.store(on, Ordering::SeqCst);
@@ -179,7 +189,10 @@ pub fn reporting() -> bool {
 
 /// Whether controllers should be read at all right now.
 fn pads_needed() -> bool {
-    PAD_WANTED.load(Ordering::SeqCst) || CAPTURE.load(Ordering::SeqCst) || DETECT.load(Ordering::SeqCst)
+    PAD_WANTED.load(Ordering::SeqCst)
+        || CAPTURE.load(Ordering::SeqCst)
+        || DETECT.load(Ordering::SeqCst)
+        || RECORDING.load(Ordering::SeqCst)
 }
 
 /// Read controllers directly over HID (`win_hid.rs`).
@@ -211,7 +224,7 @@ pub fn pad_code(b: PadButton) -> usize {
 
 /// The controller input of a `WM_PAD` code.
 pub fn pad_from_code(code: usize) -> Option<PadButton> {
-    let code = code & !PAD_RELEASED;
+    let code = code & !(PAD_RELEASED | PAD_RECORD_ONLY);
     if code >= 0x100 {
         let n = code - 0x100 + 1;
         (n <= PadButton::MAX_NUMBERED as usize).then_some(PadButton::Button(n as u8))
@@ -524,7 +537,9 @@ pub fn on_reading(src: &mut Source, r: &PadReading) {
         }
     }
     if PAD_WANTED.load(Ordering::SeqCst) {
-        send_changes(src.device(), &changes);
+        send_changes(src.device(), &changes, 0);
+    } else if RECORDING.load(Ordering::SeqCst) {
+        send_changes(src.device(), &changes, PAD_RECORD_ONLY);
     }
     match config.mirror {
         Some(excluded) => {
@@ -551,18 +566,19 @@ pub fn on_reading(src: &mut Source, r: &PadReading) {
 /// A controller went away: release whatever it held.
 pub fn on_gone(src: &mut Source) {
     let changes = src.state.release_all();
-    send_changes(src.device(), &changes);
+    send_changes(src.device(), &changes, 0);
     if src.mirrored {
         super::vpad::mirror(src.key, None);
         src.mirrored = false;
     }
 }
 
-fn send_changes(device: Option<DeviceIndex>, changes: &[(PadButton, bool)]) {
+/// Tell the engine thread what changed; `flags` is 0 or `PAD_RECORD_ONLY`.
+fn send_changes(device: Option<DeviceIndex>, changes: &[(PadButton, bool)], flags: usize) {
     for &(b, down) in changes {
         super::windows::post_engine_with(
             WM_PAD,
-            WPARAM(pad_code(b) | if down { 0 } else { PAD_RELEASED }),
+            WPARAM(pad_code(b) | flags | if down { 0 } else { PAD_RELEASED }),
             LPARAM(device.map_or(0, |d| d as isize + 1)),
         );
     }

@@ -43,10 +43,17 @@ Macros live in the **Macros** section of the sidebar and can be used by any prof
 ### Recording
 
 1. Click **+** next to *MACROS* (or *Action → Macro → New macro…* from a binding).
-2. Click **● Record**, then press keys and mouse buttons. The pauses between them are
-   recorded too. Keys pressed while this window is focused are recorded without doing
-   anything here; you can also switch to another app and record there.
+2. Click **● Record**, then press keys, mouse buttons and controller buttons. The pauses
+   between them are recorded too. Keys pressed while this window is focused are recorded
+   without doing anything here; you can also switch to another app and record there.
 3. Click **■ Stop recording**. The click on the Stop button itself is left out.
+
+Controller buttons, triggers and stick directions become *Controller down / up* steps, so
+the macro plays them on the [virtual controller](user-guide.md#virtual-controller). Inputs
+an Xbox controller doesn't have (touchpad click, back paddles, an unknown controller's
+numbered buttons) are left out. A trigger or stick counts as pressed past the same point as
+for bindings (a third of the way for triggers, half way for sticks); how far it went isn't
+recorded. The controller keeps working in games while you record.
 
 Recording again adds to the end.
 

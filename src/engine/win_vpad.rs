@@ -481,6 +481,56 @@ mod tests {
         bus.unplug(serial);
     }
 
+    /// Records a macro from a stand-in controller while no profile uses
+    /// controllers (so they're read only because of the recording). Needs
+    /// ViGEmBus; run with
+    /// `cargo test record_stand_in_controller -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn record_stand_in_controller() {
+        use crate::config::{MacroStep, PadButton};
+        let engine = crate::engine::Engine::start(&crate::config::Config::default(), |_| {});
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(engine.start_recording());
+        let bus = Bus::open().expect("ViGEmBus not installed");
+        let serial = bus.plug_in().expect("plug in");
+        let hold = |buttons: u16, rt: u8, ms: u64| {
+            let report = XReport {
+                buttons,
+                rt,
+                ..Default::default()
+            };
+            let until = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < until {
+                let _ = bus.submit(serial, report);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        // Windows sets the controller up, and new ones are looked for once
+        // a second: wait with nothing pressed first.
+        hold(0, 0, 2500);
+        hold(0x1000, 0, 400); // A
+        hold(0, 0, 300);
+        hold(0, 255, 400); // right trigger
+        hold(0, 0, 300);
+        bus.unplug(serial);
+        let events = engine.stop_recording();
+        println!("{events:?}");
+        let steps: Vec<_> = crate::engine::recording_to_steps(&events)
+            .into_iter()
+            .filter(|s| !matches!(s, MacroStep::Delay { .. }))
+            .collect();
+        assert_eq!(
+            steps,
+            vec![
+                MacroStep::PadDown { button: PadButton::A },
+                MacroStep::PadUp { button: PadButton::A },
+                MacroStep::PadDown { button: PadButton::Rt },
+                MacroStep::PadUp { button: PadButton::Rt },
+            ]
+        );
+    }
+
     /// Plugs in a virtual controller, presses A and reads it back through
     /// XInput. Needs ViGEmBus installed; run with
     /// `cargo test vpad_round_trip -- --ignored --nocapture`.
