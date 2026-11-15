@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Store, StepRow } from "store.slint";
 import { Button, Callout, ChoiceGrid, Divider, Hint, SectionLabel, TextArea, ValueField } from "widgets.slint";
-import { CaptureBox, FormRow, KeyPicker } from "controls.slint";
+import { CaptureBox, FormRow, KeyPicker, VpadStatus } from "controls.slint";
 
 component MacroHeader inherits Rectangle {
     background: Theme.window-bg;
@@ -68,7 +68,7 @@ component StepList inherits Rectangle {
         ChoiceGrid {
             columns: 5;
             cell-height: 26px;
-            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text", "+ Move by", "+ Move to"];
+            items: ["+ Key press", "+ Key down", "+ Key up", "+ Mouse click", "+ Mouse down", "+ Mouse up", "+ Delay", "+ Text", "+ Move by", "+ Move to", "+ Pad press", "+ Pad down", "+ Pad up"];
             selected(i) => { Store.add-step(i); }
         }
         // Delay tools on their own row, so the list keeps its width in the
@@ -171,80 +171,96 @@ component StepInspector inherits Rectangle {
     width: 300px;
     background: Theme.panel-bg;
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
-        alignment: start;
-
-        SectionLabel { text: Store.selected-step >= 0 ? "STEP " + (Store.selected-step + 1) + " OF " + Store.steps.length : "STEP"; }
-        if Store.selected-step < 0: Hint { text: "Select a step to edit it, or add one on the left."; }
-        if Store.selected-step >= 0: VerticalLayout {
+    // Scrolls: a controller step's list of outputs is taller than the
+    // smallest window.
+    Flickable {
+        VerticalLayout {
+            padding: 16px;
             spacing: 10px;
-            ChoiceGrid {
-                columns: 2;
-                cell-height: 26px;
-                items: Store.step-kind-names;
-                current: Store.step-kind;
-                selected(i) => { Store.set-step-kind(i); }
-            }
-            Divider { }
-            if Store.step-kind <= 2: CaptureBox { target: "step"; value: Store.step-key; }
-            if Store.step-kind <= 2: KeyPicker { target: "step"; }
-            if Store.step-kind >= 3 && Store.step-kind <= 5: ChoiceGrid {
-                items: Store.mouse-names;
-                current: Store.step-mouse;
-                selected(i) => { Store.set-step-mouse(i); }
-            }
-            if Store.step-kind == 0 || Store.step-kind == 3: FormRow {
-                label: "Hold for";
-                ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
-            }
-            if Store.step-kind == 6: FormRow {
-                label: "Wait";
-                ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
-            }
-            if Store.step-kind == 7: TextArea {
-                value: Store.step-text;
-                placeholder: "Text to type…";
-                edited(t) => { Store.set-step-text(t); }
-            }
-            if Store.step-kind >= 8: VerticalLayout {
-                spacing: 8px;
-                FormRow {
-                    label: Store.step-kind == 8 ? "Right (−: left)" : "X (pixels from the left)";
-                    ValueField { value: Store.step-x; committed(v) => { Store.set-step-xy(v, Store.step-y); } }
-                }
-                FormRow {
-                    label: Store.step-kind == 8 ? "Down (−: up)" : "Y (pixels from the top)";
-                    ValueField { value: Store.step-y; committed(v) => { Store.set-step-xy(Store.step-x, v); } }
-                }
-                if Store.step-kind == 9: Button {
-                    text: Store.picking-position ? "Move the pointer there…" : "Use the pointer's position in 3 s";
-                    enabled: !Store.picking-position;
-                    clicked => { Store.pick-position(); }
-                }
-                Hint {
-                    text: Store.step-kind == 8
-                        ? "Moves like the mouse would, so games that read the mouse see it. The Windows pointer speed and \"Enhance pointer precision\" change how far it goes on the desktop."
-                        : "A position on the screen, in pixels (all monitors together; the main one starts at 0, 0). Some games ignore it.";
-                }
-            }
-            HorizontalLayout {
-                spacing: 6px;
-                Button { text: "↑"; horizontal-stretch: 1; clicked => { Store.move-step(-1); } }
-                Button { text: "↓"; horizontal-stretch: 1; clicked => { Store.move-step(1); } }
-                Button { text: "Duplicate"; horizontal-stretch: 2; clicked => { Store.duplicate-step(); } }
-                Button { text: "Delete"; danger: true; horizontal-stretch: 2; clicked => { Store.delete-step(); } }
-            }
-        }
+            alignment: start;
 
-        Divider { }
-        SectionLabel { text: "USING THIS MACRO"; }
-        Hint {
-            text: "Open a profile, click a button or key, choose Macro and pick this macro. How it plays (once, repeat, while held or toggle) is set on each binding.";
-        }
-        Hint {
-            text: "Tip: games often miss key presses shorter than a frame. Keep holds at 15 ms or more.";
+            SectionLabel { text: Store.selected-step >= 0 ? "STEP " + (Store.selected-step + 1) + " OF " + Store.steps.length : "STEP"; }
+            if Store.selected-step < 0: Hint { text: "Select a step to edit it, or add one on the left."; }
+            if Store.selected-step >= 0: VerticalLayout {
+                spacing: 10px;
+                ChoiceGrid {
+                    columns: 2;
+                    cell-height: 26px;
+                    items: Store.step-kind-names;
+                    current: Store.step-kind;
+                    selected(i) => { Store.set-step-kind(i); }
+                }
+                Divider { }
+                if Store.step-kind <= 2: CaptureBox { target: "step"; value: Store.step-key; }
+                if Store.step-kind <= 2: KeyPicker { target: "step"; }
+                if Store.step-kind >= 3 && Store.step-kind <= 5: ChoiceGrid {
+                    items: Store.mouse-names;
+                    current: Store.step-mouse;
+                    selected(i) => { Store.set-step-mouse(i); }
+                }
+                if Store.step-kind == 10: FormRow {
+                    label: "Hold for";
+                    ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
+                }
+                if Store.step-kind >= 10: ChoiceGrid {
+                    columns: 3;
+                    cell-height: 24px;
+                    items: Store.pad-output-names;
+                    current: Store.step-pad;
+                    selected(i) => { Store.set-step-pad(i); }
+                }
+                if Store.step-kind >= 10: VpadStatus { }
+                if Store.step-kind == 0 || Store.step-kind == 3: FormRow {
+                    label: "Hold for";
+                    ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
+                }
+                if Store.step-kind == 6: FormRow {
+                    label: "Wait";
+                    ValueField { value: Store.step-ms; suffix: "ms"; committed(v) => { Store.set-step-number(v); } }
+                }
+                if Store.step-kind == 7: TextArea {
+                    value: Store.step-text;
+                    placeholder: "Text to type…";
+                    edited(t) => { Store.set-step-text(t); }
+                }
+                if Store.step-kind >= 8 && Store.step-kind <= 9: VerticalLayout {
+                    spacing: 8px;
+                    FormRow {
+                        label: Store.step-kind == 8 ? "Right (−: left)" : "X (pixels from the left)";
+                        ValueField { value: Store.step-x; committed(v) => { Store.set-step-xy(v, Store.step-y); } }
+                    }
+                    FormRow {
+                        label: Store.step-kind == 8 ? "Down (−: up)" : "Y (pixels from the top)";
+                        ValueField { value: Store.step-y; committed(v) => { Store.set-step-xy(Store.step-x, v); } }
+                    }
+                    if Store.step-kind == 9: Button {
+                        text: Store.picking-position ? "Move the pointer there…" : "Use the pointer's position in 3 s";
+                        enabled: !Store.picking-position;
+                        clicked => { Store.pick-position(); }
+                    }
+                    Hint {
+                        text: Store.step-kind == 8
+                            ? "Moves like the mouse would, so games that read the mouse see it. The Windows pointer speed and \"Enhance pointer precision\" change how far it goes on the desktop."
+                            : "A position on the screen, in pixels (all monitors together; the main one starts at 0, 0). Some games ignore it.";
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button { text: "↑"; horizontal-stretch: 1; clicked => { Store.move-step(-1); } }
+                    Button { text: "↓"; horizontal-stretch: 1; clicked => { Store.move-step(1); } }
+                    Button { text: "Duplicate"; horizontal-stretch: 2; clicked => { Store.duplicate-step(); } }
+                    Button { text: "Delete"; danger: true; horizontal-stretch: 2; clicked => { Store.delete-step(); } }
+                }
+            }
+
+            Divider { }
+            SectionLabel { text: "USING THIS MACRO"; }
+            Hint {
+                text: "Open a profile, click a button or key, choose Macro and pick this macro. How it plays (once, repeat, while held or toggle) is set on each binding.";
+            }
+            Hint {
+                text: "Tip: games often miss key presses shorter than a frame. Keep holds at 15 ms or more.";
+            }
         }
     }
 }

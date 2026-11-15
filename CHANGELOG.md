@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.6.0
+
+- **Hide the real controller from games.** *Settings → Virtual controller → Hide the real
+  controllers from games meanwhile*: while the virtual controller copies a real one, games
+  see only the remapped one. On Windows this uses the free HidHide driver, which the app
+  now installs on request like ViGEmBus (*Install HidHide*: the official 1.5.230 installer,
+  checked against a checksum built into the app, after Windows' admin prompt). The app lets
+  itself keep reading the controller, never hides a virtual one, and gives the controller
+  back when the virtual one is unplugged, when it quits, and after a crash at its next
+  start. No more setting up HidHide by hand.
+- **Mouse movement → stick.** On a profile's Mouse tab, *Mouse moves controller stick*
+  (Left or Right) turns mouse movement into a stick of the virtual controller, for games
+  that only take a controller: the faster the mouse moves, the further the stick leans.
+  Speed, where the stick starts (past the game's dead zone) and *Keep the pointer still*
+  are in *Settings → Virtual controller*.
+- **Controller steps in macros**: *Pad press*, *Pad down* and *Pad up* press buttons,
+  triggers and stick directions of the virtual controller, mixed with keys, mouse steps and
+  delays. A profile that plays such a macro plugs the virtual controller in.
+- **Linux (experimental): a virtual controller.** The Controller action, controller macro
+  steps, mouse → stick and copying a real controller now work on Linux through uinput (an
+  Xbox 360 controller to games, SDL and Steam). Hiding the real controller takes it with an
+  evdev grab.
+- **Linux: per-app profiles on Wayland** with sway, Hyprland and niri, read from the
+  compositor (with window titles, and fullscreen on sway and Hyprland), so title and
+  fullscreen rules work there too. GNOME and KDE Plasma on Wayland still only show XWayland
+  programs.
+- Config format version 6 (older files load unchanged; 0.5 can't read a file with
+  controller macro steps).
+- Tested end to end on Windows 11 (mouse → stick, macro steps, hiding with HidHide, all on a
+  stand-in virtual controller) and, for Linux, in WSL 2 with uinput test devices and a
+  headless sway. Still not tried with a real controller or in games.
+
 ## 0.5.0
 
 - **Virtual controller** (Windows). The new *Controller* action presses a button, trigger or

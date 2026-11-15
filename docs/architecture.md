@@ -32,7 +32,7 @@ tables, and the engine sends the UI events.
 | `src/log.rs` | `log!` macro: stderr and `mouse-kb-remap.log` |
 | `src/osd.rs` | On-screen notifications (Windows) |
 | `src/update.rs` | Release check and in-place update |
-| `src/driver.rs` | Installing the ViGEmBus driver: download, checksum, admin prompt |
+| `src/driver.rs` | Installing the ViGEmBus and HidHide drivers: download, checksum, admin prompt |
 | `src/ipc.rs` | Command-line control over a named pipe |
 | `src/engine/mod.rs` | Platform-independent API (`Engine`), `Input` / `Target` / `Layers` / `ComboBinding`, `compile()`, profile picking, recording → macro steps |
 | `src/engine/dispatch.rs` | `Dispatcher`: what one input event does (layers, combos, tap / hold, hotkeys). Shared by all backends, unit-tested. |
@@ -41,10 +41,14 @@ tables, and the engine sends the UI events.
 | `src/engine/win_actions.rs` | System actions: lock, microphone, audio output, window actions |
 | `src/engine/win_devices.rs` | Raw input thread (which mouse a button came from, adding a device), XInput polling, the shared controller path (`on_reading`) |
 | `src/engine/win_hid.rs` | Controllers read directly over HID: enumeration, one reader thread each, generic report-descriptor parsing |
+| `src/engine/vpad.rs` | The virtual controller's platform-independent part: the report (`compose`, `mirror_report`), the shared `State` the input threads change, mouse → stick (`MouseFeed`) |
+| `src/engine/win_hidhide.rs` | Hiding the real controllers from games with HidHide while the virtual controller copies them; undoing it |
 | `src/engine/win_vpad.rs` | The virtual Xbox controller: ViGEmBus protocol, plugging in and out, composing reports from bindings and copied controllers |
 | `src/engine/pad_hid.rs` | Report formats of PlayStation, Switch and Steam controllers (pure functions, unit-tested) |
 | `src/engine/pad.rs` | Controller readings → pressed inputs (with hysteresis); stick, gyro and touchpad → pointer movement; shared by both backends |
-| `src/engine/linux.rs` | evdev grab per device (controllers read, not grabbed), uinput output, X11 focus tracking |
+| `src/engine/linux.rs` | evdev grab per device (controllers read, grabbed only while hidden), uinput output, X11 focus tracking |
+| `src/engine/linux_vpad.rs` | The virtual controller as a uinput device laid out like xpad's |
+| `src/engine/linux_focus.rs` | The focused window from sway, Hyprland and niri IPC |
 | `src/engine/fallback.rs` | No-op engine for other OSes (UI preview) |
 | `ui/store.slint` | The `Store` global: every property and callback shared with Rust |
 | `ui/app.slint` | Main window and `AppTray` |
@@ -90,6 +94,7 @@ handles it:
   microphone, audio output).
 - `Vpad(VpadState)` when the virtual controller is plugged in or out, or can't be (no
   driver, an error).
+- `Hide(HideState)` when hiding the real controllers starts, stops or fails.
 
 ## The hot path
 
@@ -212,27 +217,44 @@ same state moves the pointer with relative `SendInput` moves from the stick
 so every controller turns the same way. `Target::Gyro` (the *Gyro* action) reaches the
 controller threads through `Sink::gyro`.
 
-### Virtual controller (Windows)
+### Virtual controller
 
-`win_vpad.rs` drives a virtual Xbox 360 controller through the ViGEmBus driver, speaking
-its protocol directly (device interface `{96E42B22-…}`, `DeviceIoControl` with the
-control codes and structures ViGEmClient uses: check version, plug in, wait until ready,
-submit an `XUSB_REPORT`, unplug). One thread owns the driver handle; everyone else
-changes a shared `State` under a mutex and wakes it with a condition variable:
+`vpad.rs` is the part every platform shares; `win_vpad.rs` (ViGEmBus) and `linux_vpad.rs`
+(uinput) each own the device on one thread. Everyone else changes the shared
+`vpad::State` under a mutex and wakes that thread with a condition variable:
 
 - `Target::Pad` (the *Controller* action) and `Step::PadDown` / `PadUp` (turbo of a
-  controller button, tap / hold taps through `Cmd::PadTap`, held 50 ms) become
-  `Out::Pad`, which `out_to_inputs` turns into `win_vpad::press`: a press count per
-  output, so two inputs holding the same button don't release each other.
-- With *Copy the real controller* on, `win_devices::on_reading` passes every controller
-  reading through `mirror_report` (leaving out `Layers::pad_excluded()`: inputs bound on
-  any layer, the pointer stick, Guide; nothing but Guide while paused) and hands it to
-  `win_vpad::mirror`.
+  controller button, macro steps, tap / hold taps through `Cmd::PadTap`, held 50 ms)
+  become `Out::Pad`, which the backends turn into `vpad::press`: a press count per output,
+  so two inputs holding the same button don't release each other.
+- With *Copy the real controller* on, every controller reading goes through
+  `mirror_report` (leaving out `Layers::pad_excluded()`: inputs bound on any layer, the
+  pointer stick, Guide; nothing but Guide while paused) to `vpad::mirror`
+  (`win_devices::on_reading`, Linux's `pad_loop`).
+- **Mouse → stick** (`Layers::mouse_stick`): mouse movement is added to two atomics
+  (`vpad::mouse_motion`, a thousand times a second, waking nobody). While the mouse leans
+  a stick the device thread ticks every 8 ms, and `MouseFeed` (`pad::MouseStick`) turns
+  the movement into a stick position: velocity smoothed over 25 ms, scaled by the speed
+  setting, lifted past the game's dead zone by the *starts at* percentage, centred when it
+  drops below 1 %. On Windows the movement comes from raw input (the raw input thread
+  registers for it); with *Keep the pointer still*, the mouse hook swallows moves instead
+  (`hiding_moves`, only while the controller is plugged in) and reports each one's offset
+  from the held pointer itself, because raw input missed about half of the swallowed moves
+  in testing. A pointer held within 100 px of the screen edge is moved to the middle of its
+  monitor (`WM_CENTER_CURSOR`) so moves that way aren't cut short. On Linux `device_loop`
+  reports `REL_X` / `REL_Y` and drops them from the forwarded events.
 - `compose` builds the report: copied controllers merged (buttons ORed, the bigger
-  deflection wins), then held outputs on top (triggers at 255, a pushed stick overrides
-  the copied one, diagonals on the circle). It's submitted only when it changed.
+  deflection wins), the mouse's stick over the copied one while it moves, then held
+  outputs on top (triggers at 255, a pushed stick overrides the others, diagonals on the
+  circle). It's sent only when it changed.
 
-`update_mouse_hook` sets `win_vpad::set_wanted(Layers::uses_vpad)` for the active profile
+#### Windows (ViGEmBus)
+
+`win_vpad.rs` speaks ViGEmBus's protocol directly (device interface `{96E42B22-…}`,
+`DeviceIoControl` with the control codes and structures ViGEmClient uses: check version,
+plug in, wait until ready, submit an `XUSB_REPORT`, unplug).
+
+`update_mouse_hook` sets `vpad::set_wanted(Layers::uses_vpad)` for the active profile
 (left as it is while our own window is focused); the thread plugs the controller in when
 wanted and unplugs it 10 s after it stops being wanted. Closing the handle (the app
 exiting) makes the driver unplug it too. Without the driver the thread looks again every
@@ -246,11 +268,36 @@ known yet, any new 045E:028E controller: reading our own output back as a real c
 would copy it into itself. ViGEmBus's HID-compatible interface has `IG_` in its path, so
 `win_hid.rs` skips it already.
 
-`driver.rs` installs ViGEmBus on request: download the 1.22.0 installer from its GitHub
-release with `update::http`, check its size and SHA-256 against constants (it's signed by
+`driver.rs` installs ViGEmBus or HidHide on request (`driver::VIGEMBUS`, `HIDHIDE`):
+download the pinned installer (ViGEmBus 1.22.0, HidHide 1.5.230) from its GitHub release
+with `update::http`, check its size and SHA-256 against constants (both are signed by
 Nefarius Software Solutions), save it to `%TEMP%\mouse-kb-remap-driver`, `ShellExecuteEx`
 with the `runas` verb (the admin prompt), wait, check the exit code (0 / 3010) and that
-the driver answers, then `vpad_retry()`.
+the driver answers, then tell the engine.
+
+#### Hiding the real controller (HidHide)
+
+`win_hidhide.rs` talks to HidHide's control device (`\\.\HidHide`, open to every user)
+with the control codes of its `HidHideIoctlContract.h`: lists as REG_MULTI_SZ, flags as one
+byte. Its thread hides while `Layers::uses_vpad`, copying and *Hide the real controllers*
+are on and the controller is plugged in (`set_wanted` from `update_mouse_hook`, rechecked
+every 2 s for controllers that come and go):
+
+1. refuse if HidHide's inverse mode is on;
+2. add our exe to the whitelist as the driver names it (`\Device\HarddiskVolumeN\…`:
+   volume mount point → volume GUID → `QueryDosDevice`);
+3. hide the device instances of the controllers the app reads: every XUSB device (XInput)
+   and HID `IG_` device when Xbox-style controllers are read, the HID interfaces
+   `win_hid::enumerate` reads otherwise; never one under the ViGEmBus device (any virtual
+   controller), Steam's 28DE:11FF, or our own (`MOUSE_KB_REMAP_HIDE_VIRTUAL=1`, for tests,
+   lets other virtual ones count as real);
+4. turn hiding on if it was off.
+
+Newer drivers have a list per process that they drop when the process ends
+(`IOCTL_ADD_SESSION_BLACKLIST`); the app tries that first. HidHide 1.5.230, the current
+release, only has the saved lists, so what the app adds there is written to
+`hidhide-restore.json` first and taken out again when hiding stops, at `Engine::shutdown`,
+or at the next start after a crash. Only entries the app added are removed.
 
 Keys are sent as **scan codes** (`KEYEVENTF_SCANCODE`, with `KEYEVENTF_EXTENDEDKEY` when
 `MapVirtualKeyW(.., MAPVK_VK_TO_VSC_EX)` reports an `E0`/`E1` prefix). Many games read
@@ -297,8 +344,10 @@ merge into one step (typing). Settings (theme, startup, hotkeys…) aren't part 
 Every keyboard and relative mouse is grabbed with `EVIOCGRAB`; one thread per device reads
 events, feeds remappable ones through the same `Dispatcher`, and forwards everything else to
 a uinput virtual device at each `SYN_REPORT`. A scanner thread grabs devices plugged in
-later. The focused window comes from X11 (`_NET_ACTIVE_WINDOW` → `_NET_WM_PID` →
-`/proc/<pid>/exe`). Key identity uses the same virtual-key codes as Windows, mapped to
+later. The focused window comes from the compositor's IPC on sway (i3 IPC window events),
+Hyprland (event socket, then `j/activewindow`) and niri (JSON event stream), with titles and
+fullscreen, in `linux_focus.rs`; otherwise from X11 (`_NET_ACTIVE_WINDOW` → `_NET_WM_PID` →
+`/proc/<pid>/exe`), which on GNOME and KDE Wayland only sees XWayland windows. Key identity uses the same virtual-key codes as Windows, mapped to
 evdev codes by a table. The sensitivity clutch scales forwarded `REL_X` / `REL_Y` motion.
 
 Since each device has its own thread, per-device bindings need nothing special: the thread
@@ -311,6 +360,13 @@ moves the pointer with a stick through uinput; a controller's motion sensors are
 device (`INPUT_PROP_ACCELEROMETER`) whose gyro, scaled by the axis resolution, drives a
 `GyroMouse`. Touchpads are left to the desktop, which already treats a PlayStation touchpad
 as one.
+
+The virtual controller (`linux_vpad.rs`) is a uinput device with xpad's ids (045E:028E,
+version 0x0114), buttons and axes (y flipped the way xpad flips it, the d-pad as a hat),
+sent as the events that changed. Controller threads skip it by name. While copying with
+*Hide the real controllers* on, `pad_loop` grabs the real controller (`update_grab`,
+checked every 200 ms with `poll`, so it doesn't wait for the controller's next event):
+evdev readers then get nothing, hidraw readers still see it.
 
 ## Safety rules
 

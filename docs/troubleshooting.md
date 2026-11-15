@@ -80,8 +80,8 @@ plain remap). Buttons without per-device bindings are not affected.
 - **The original Steam Controller (2015)** isn't read directly; with Steam running, its
   desktop layout can send keys the app remaps. **Switch 2** controllers aren't supported yet.
 - A game still sees the original buttons as well. To change what a game sees, remap the
-  controller onto the [virtual controller](user-guide.md#virtual-controller) and hide the
-  real one with HidHide.
+  controller onto the [virtual controller](user-guide.md#virtual-controller) and turn on
+  *Hide the real controllers from games meanwhile*.
 
 ## Controller buttons count twice
 
@@ -98,9 +98,10 @@ tool's settings, e.g. HidHide for DS4Windows, and keep *Xbox-style controllers* 
   profile while the game is focused.
 - **Driver missing:** use *Install controller driver*, or install ViGEmBus yourself. If the
   installer finished but the app still says it's missing, restart Windows.
-- **The game reads only controller 1** and your real controller is controller 1: hide the
-  real one with HidHide (see [Remapping a real controller](user-guide.md#remapping-a-real-controller)),
-  or connect it after the virtual one is plugged in.
+- **The game reads only controller 1** and your real controller is controller 1: turn on
+  *Hide the real controllers from games meanwhile* (see
+  [Hiding the real controller](user-guide.md#hiding-the-real-controller-hidhide)), or
+  connect it after the virtual one is plugged in.
 - **The game ignores it:** some games, and some anti-cheats, refuse virtual controllers.
   Nothing on the app's side can change that.
 - **Steam** may take over the virtual controller like any Xbox controller (Steam Input):
@@ -117,17 +118,38 @@ from one profile that stays active (it's only plugged in when a profile uses it)
 
 ## Remapped controller buttons still do their old thing in a game
 
-The game is also reading your real controller. Hide it with HidHide and allow
-`mouse-kb-remap.exe` there, so only the virtual controller (your controller with its
-remaps) reaches games. See [Remapping a real controller](user-guide.md#remapping-a-real-controller).
+The game is also reading your real controller. Turn on *Settings → Virtual controller →
+Hide the real controllers from games meanwhile* (Windows installs HidHide for it), so only
+the virtual controller (your controller with its remaps) reaches games. See
+[Hiding the real controller](user-guide.md#hiding-the-real-controller-hidhide).
+
+- **Still there?** Hiding applies when a program opens the controller: restart the game,
+  or unplug the controller and plug it in again, after the virtual one is plugged in.
+- The box under the switch says how many devices are hidden, or why it couldn't hide them
+  (HidHide's *inverse* mode on, for instance).
+- **The controller stays hidden after the app was closed by force** (Task Manager, a
+  crash): start the app again and it gives the controller back. Or open the *HidHide
+  Configuration Client* and untick the controller.
+
+## Mouse → stick moves too little, too much, or drifts
+
+- Change *Speed* in *Settings → Virtual controller → Mouse → stick*: higher leans the stick
+  further for the same mouse movement.
+- **Small movements do nothing in the game:** raise *Stick starts at* until they do (the
+  game's own dead zone is bigger). **The view creeps on its own:** lower it.
+- **The pointer still moves:** *Keep the pointer still meanwhile* only works while the
+  virtual controller is plugged in and the profile's app is in front.
 
 ## Installing the controller driver fails
 
-The message says why. *The admin prompt was declined* or *the installer was cancelled*:
-nothing was installed, try again. *The download isn't the expected installer*: the file
-from GitHub didn't match the checksum built into the app (a broken download or a changed
-file), so it wasn't run. You can always install ViGEmBus by hand from
-[its release page](https://github.com/nefarius/ViGEmBus/releases).
+This is about *Install controller driver* (ViGEmBus) and *Install HidHide* alike. The
+message says why. *The admin prompt was declined* or *the installer was cancelled*: nothing
+was installed, try again (Windows closes an admin prompt nobody answers after a while).
+*The download isn't the expected installer*: the file from GitHub didn't match the
+checksum built into the app (a broken download or a changed file), so it wasn't run. You
+can always install them by hand from their release pages:
+[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases),
+[HidHide](https://github.com/nefarius/HidHide/releases).
 
 ## Gyro or touchpad does nothing, or the gyro drifts
 
@@ -263,8 +285,15 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 Then log out and back in. `mouse-kb-remap.log` (in `~/.config/mouse-kb-remap/`) lists the
 devices it grabbed, or why it couldn't.
 
-- **Per-app profiles** need X11 or XWayland: the focused window is read from
-  `_NET_ACTIVE_WINDOW`. On a pure Wayland session the Default profile applies everywhere.
+- **Per-app profiles** follow the focused window on **sway**, **Hyprland** and **niri**
+  (through their own IPC, with window titles and, on sway and Hyprland, fullscreen) and on
+  X11. GNOME and KDE Plasma on Wayland don't tell other programs which window is in front,
+  so there only programs running through XWayland are seen; elsewhere the Default profile
+  applies. The log says which one the app uses ("following the focused window through
+  sway").
+- **Virtual controller**: needs the same `/dev/uinput` access. Games and Steam see it as an
+  Xbox 360 controller. Hiding the real controller takes it with an evdev grab, which hidraw
+  readers (Steam, some SDL games) don't respect.
 - **Text** actions type printable ASCII only (US layout).
 - Touchpads and tablets are left alone. Game controllers are read (not grabbed) for
   controller bindings; some drivers swap the X and Y buttons.

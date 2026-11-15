@@ -28,7 +28,7 @@ use super::{
     pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo, HotkeyBinding, Input,
     Layers, RecEvent, WindowInfo,
 };
-use crate::config::{MouseButton, PadSettings};
+use crate::config::{MouseButton, PadSettings, StickPointer};
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -40,7 +40,9 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -61,7 +63,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetTimer,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, KillTimer, PostThreadMessageW, SetCursorPos, SetTimer,
     SetWindowsHookExW, SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, EVENT_SYSTEM_FOREGROUND,
     HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETMOUSESPEED, SPI_SETMOUSESPEED,
@@ -90,6 +92,9 @@ const WM_UPDATE_HOOKS: u32 = WM_APP + 1;
 /// Thread message: the profile changed from another thread (config change,
 /// forced profile); toggled layers go off.
 const WM_RESET_LAYERS: u32 = WM_APP + 2;
+/// Thread message: move the held pointer away from the screen edge, so the
+/// moves it swallows (mouse → stick) aren't cut short there.
+const WM_CENTER_CURSOR: u32 = WM_APP + 5;
 
 /// How often the focused window's title / fullscreen state is re-checked
 /// while a profile has a title or fullscreen rule.
@@ -120,6 +125,20 @@ struct Deferred {
 
 /// Engine thread id, for posting it messages.
 static ENGINE_TID: AtomicU32 = AtomicU32::new(0);
+/// Swallow physical mouse movement: mouse movement leans a virtual
+/// controller stick and the pointer should stay still.
+static HIDE_MOVES: AtomicBool = AtomicBool::new(false);
+/// Where `center_cursor` put the pointer (packed x, y), so the hook doesn't
+/// count that jump as mouse movement; `NO_JUMP` when none is pending.
+static CURSOR_JUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(NO_JUMP);
+const NO_JUMP: u64 = u64::MAX;
+
+/// Whether the mouse hook is swallowing mouse movement now (mouse → stick
+/// with the pointer kept still): the stick then follows the hook's moves
+/// instead of raw input.
+pub(super) fn hiding_moves() -> bool {
+    HIDE_MOVES.load(Ordering::Relaxed) && super::vpad::is_plugged()
+}
 
 struct Recording {
     start: Instant,
@@ -230,6 +249,7 @@ impl Engine {
         win_devices::set_devices(compiled.devices);
         win_devices::start(sh.on_event.clone(), sh.accept_injected, MAGIC);
         super::win_vpad::start(sh.on_event.clone());
+        super::win_hidhide::start(sh.on_event.clone());
 
         std::thread::Builder::new()
             .name("remap-player".into())
@@ -333,6 +353,8 @@ impl Engine {
         // pointer speed is back to the user's setting.
         std::thread::sleep(Duration::from_millis(40));
         set_pointer_speed(None);
+        // Give the real controllers back to games.
+        super::win_hidhide::stop();
     }
 }
 
@@ -387,6 +409,10 @@ fn engine_thread() {
                     }
                     WM_RESET_LAYERS => {
                         DISPATCH.with(|d| d.borrow_mut().reset_layers());
+                        continue;
+                    }
+                    WM_CENTER_CURSOR => {
+                        center_cursor();
                         continue;
                     }
                     WM_TIMER if msg.wParam.0 == TAP_TIMER.get() && msg.wParam.0 != 0 => {
@@ -452,8 +478,11 @@ fn device_of(lparam: LPARAM) -> Option<DeviceIndex> {
 fn update_mouse_hook() {
     let sh = shared();
     let active = sh.active.read().ok().and_then(|a| a.clone());
-    let wanted = sh.recording.load(Ordering::SeqCst) || active.as_ref().is_some_and(|l| l.uses_mouse());
     let settings = sh.pad.lock().map(|p| p.clone()).unwrap_or_default();
+    let mouse_stick = active.as_ref().map(|l| l.mouse_stick).unwrap_or_default();
+    let hide_moves = mouse_stick != StickPointer::Off && settings.mouse_stick_hide;
+    HIDE_MOVES.store(hide_moves, Ordering::SeqCst);
+    let wanted = sh.recording.load(Ordering::SeqCst) || hide_moves || active.as_ref().is_some_and(|l| l.uses_mouse());
     let pointer = PointerSettings {
         stick: active.as_ref().map(|l| l.stick_pointer).unwrap_or_default(),
         stick_speed: sh.stick_speed.load(Ordering::SeqCst),
@@ -466,6 +495,7 @@ fn update_mouse_hook() {
     };
     win_devices::update(
         active.as_ref().is_some_and(|l| l.mouse_device_bindings()),
+        mouse_stick != StickPointer::Off,
         // Copying a real controller to the virtual one needs it read too.
         active
             .as_ref()
@@ -483,8 +513,18 @@ fn update_mouse_hook() {
     // While our own window is focused (no active profile) the virtual
     // controller stays as it was, so a game behind it keeps its controller.
     if let Some(l) = active.as_ref() {
-        super::win_vpad::set_wanted(l.uses_vpad);
+        super::vpad::set_wanted(l.uses_vpad);
     }
+    // Hide the real controllers while the virtual one copies them.
+    if let Some(l) = active.as_ref() {
+        super::win_hidhide::set_wanted(l.uses_vpad && settings.copy_to_virtual && settings.hide_real, &settings);
+    }
+    // Mouse movement in our own window doesn't lean the stick.
+    super::vpad::set_mouse_stick(super::vpad::MouseStickSettings {
+        stick: mouse_stick,
+        speed: settings.mouse_stick_speed,
+        deadzone: settings.mouse_stick_deadzone,
+    });
     let busy = DISPATCH.with(|d| d.borrow().holds_mouse()) || DEFERRED.with(|q| !q.borrow().is_empty());
     MOUSE_HOOK.with(|hook| match (wanted, hook.get()) {
         (true, None) => {
@@ -800,6 +840,25 @@ fn record(ev: RecEvent) {
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let msg = wparam.0 as u32;
+    if code == HC_ACTION as i32 && msg == WM_MOUSEMOVE && hiding_moves() {
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        if is_physical(info.flags & LLMHF_INJECTED != 0, info.dwExtraInfo) {
+            // Raw input misses some moves that are swallowed, so the stick
+            // follows where each one would have taken the pointer.
+            let pt = info.pt;
+            if CURSOR_JUMP.swap(NO_JUMP, Ordering::Relaxed) == pack_point(pt) {
+                return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+            }
+            let mut cur = POINT::default();
+            if unsafe { GetCursorPos(&mut cur) }.is_ok() {
+                super::vpad::mouse_motion(pt.x - cur.x, pt.y - cur.y);
+                if near_screen_edge(cur) {
+                    post_engine(WM_CENTER_CURSOR);
+                }
+            }
+            return LRESULT(1);
+        }
+    }
     if code == HC_ACTION as i32 && msg != WM_MOUSEMOVE {
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         if is_physical(info.flags & LLMHF_INJECTED != 0, info.dwExtraInfo) {
@@ -831,6 +890,50 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+fn pack_point(p: POINT) -> u64 {
+    ((p.x as u32 as u64) << 32) | p.y as u32 as u64
+}
+
+/// Whether the pointer is so close to the edge of the screens that a move
+/// that way would be cut short.
+fn near_screen_edge(p: POINT) -> bool {
+    const MARGIN: i32 = 100;
+    let (x, y, w, h) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    p.x < x + MARGIN || p.y < y + MARGIN || p.x >= x + w - MARGIN || p.y >= y + h - MARGIN
+}
+
+/// Put the held pointer in the middle of its screen. Engine thread.
+fn center_cursor() {
+    let mut cur = POINT::default();
+    if unsafe { GetCursorPos(&mut cur) }.is_err() || !near_screen_edge(cur) {
+        return;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let monitor = unsafe { MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST) };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return;
+    }
+    let r = info.rcMonitor;
+    let to = POINT {
+        x: (r.left + r.right) / 2,
+        y: (r.top + r.bottom) / 2,
+    };
+    CURSOR_JUMP.store(pack_point(to), Ordering::Relaxed);
+    unsafe {
+        let _ = SetCursorPos(to.x, to.y);
+    }
 }
 
 fn decode_mouse(msg: u32, mouse_data: u32) -> Option<(Input, Phase)> {
@@ -1305,7 +1408,7 @@ fn out_to_inputs(out: &Out, push: &mut impl FnMut(INPUT)) {
             }
         }
         Out::Move { x, y, absolute } => push(move_input(x, y, absolute)),
-        Out::Pad { button, down } => super::win_vpad::press(button, down),
+        Out::Pad { button, down } => super::vpad::press(button, down),
         Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
     }
 }

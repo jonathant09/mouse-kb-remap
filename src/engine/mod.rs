@@ -22,6 +22,9 @@ pub mod pad;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod pad_hid;
 pub mod player;
+// The virtual controller, minus the driver (win_vpad.rs, linux_vpad.rs).
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub mod vpad;
 
 #[cfg(windows)]
 mod win_actions;
@@ -29,6 +32,8 @@ mod win_actions;
 mod win_devices;
 #[cfg(windows)]
 mod win_hid;
+#[cfg(windows)]
+mod win_hidhide;
 #[cfg(windows)]
 mod win_vpad;
 #[cfg(windows)]
@@ -38,6 +43,10 @@ use windows as imp;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod linux_focus;
+#[cfg(target_os = "linux")]
+mod linux_vpad;
 #[cfg(target_os = "linux")]
 use linux as imp;
 
@@ -103,6 +112,23 @@ pub enum EngineEvent {
     /// The virtual controller was plugged in or out, or can't be.
     #[cfg_attr(not(windows), allow(dead_code))]
     Vpad(VpadState),
+    /// Hiding the real controllers (HidHide) started, stopped or failed.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Hide(HideState),
+}
+
+/// Hiding the real controllers from games (Windows, HidHide).
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HideState {
+    /// Not hiding anything.
+    #[default]
+    Off,
+    /// Hiding this many controller devices (a controller can have two).
+    Hiding(usize),
+    /// Wanted, but HidHide isn't installed.
+    NotInstalled,
+    Failed(String),
 }
 
 /// The virtual controller (Windows, ViGEmBus).
@@ -276,8 +302,11 @@ pub struct Layers {
     pub touch_pointer: bool,
     /// Some input is bound to the Gyro action.
     pub gyro_bound: bool,
-    /// Some binding sends virtual controller output.
+    /// Some binding sends virtual controller output (or the mouse moves
+    /// one of its sticks).
     pub uses_vpad: bool,
+    /// Virtual controller stick that mouse movement moves.
+    pub mouse_stick: StickPointer,
 }
 
 impl Layers {
@@ -602,6 +631,12 @@ pub fn macro_steps(steps: &[MacroStep]) -> Vec<Step> {
                 y: *y,
                 absolute: *absolute,
             }),
+            MacroStep::PadTap { button, hold_ms } if button.is_output() => {
+                out.extend([Step::PadDown(*button), Step::Delay(*hold_ms), Step::PadUp(*button)])
+            }
+            MacroStep::PadDown { button } if button.is_output() => out.push(Step::PadDown(*button)),
+            MacroStep::PadUp { button } if button.is_output() => out.push(Step::PadUp(*button)),
+            MacroStep::PadTap { .. } | MacroStep::PadDown { .. } | MacroStep::PadUp { .. } => {}
         }
     }
     out
@@ -851,6 +886,7 @@ pub fn compile(cfg: &Config) -> Compiled {
             stick_pointer: cfg.stick_pointer(index),
             gyro_pointer: cfg.gyro_pointer(index),
             touch_pointer: cfg.touch_pointer(index),
+            mouse_stick: cfg.mouse_stick(index),
             ..Layers::default()
         };
         for (l, inherited) in default.iter().enumerate() {
@@ -889,6 +925,7 @@ pub fn compile(cfg: &Config) -> Compiled {
                 .flat_map(|m| m.values())
                 .any(Target::uses_vpad)
             || layers.combos.iter().flatten().any(|c| c.target.uses_vpad());
+        layers.uses_vpad |= layers.mouse_stick != StickPointer::Off;
         layers
     };
     let mut profiles: Vec<CompiledProfile> = cfg
@@ -958,8 +995,9 @@ pub fn recording_to_steps(events: &[(std::time::Duration, RecEvent)]) -> Vec<Mac
     steps
 }
 
-/// Whether this system can have a virtual controller (Windows, ViGEmBus).
-pub const VPAD_SUPPORTED: bool = cfg!(windows);
+/// Whether this system can have a virtual controller (Windows: ViGEmBus;
+/// Linux: uinput).
+pub const VPAD_SUPPORTED: bool = cfg!(any(windows, target_os = "linux"));
 
 /// Whether the virtual controller's driver (ViGEmBus) is installed.
 pub fn vpad_driver_present() -> bool {
@@ -967,29 +1005,54 @@ pub fn vpad_driver_present() -> bool {
     {
         win_vpad::driver_present()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_vpad::driver_present()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
 }
 
 /// Look for the virtual controller's driver again (it was just installed).
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn vpad_retry() {
+    vpad::retry();
+}
+
+/// Whether HidHide (for hiding the real controllers) is installed.
+pub fn hidhide_present() -> bool {
     #[cfg(windows)]
-    win_vpad::retry();
+    {
+        win_hidhide::driver_present()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Look for HidHide again (it was just installed).
+pub fn hidhide_retry() {
+    #[cfg(windows)]
+    win_hidhide::retry();
+}
+
+/// Hiding the real controllers now.
+pub fn hide_status() -> HideState {
+    #[cfg(windows)]
+    {
+        win_hidhide::status()
+    }
+    #[cfg(not(windows))]
+    {
+        HideState::Off
+    }
 }
 
 /// The virtual controller now.
 pub fn vpad_status() -> VpadState {
-    #[cfg(windows)]
-    {
-        win_vpad::status()
-    }
-    #[cfg(not(windows))]
-    {
-        VpadState::Unplugged
-    }
+    vpad::status()
 }
 
 pub struct Engine {
@@ -1480,5 +1543,53 @@ mod tests {
         let mut other = Config::default();
         other.profiles[0].bindings.insert("key:A".into(), key("B"));
         assert!(!compile(&other).profiles[0].layers.uses_vpad);
+    }
+
+    #[test]
+    fn controller_macro_steps_and_mouse_stick_use_the_virtual_controller() {
+        let steps = macro_steps(&[
+            MacroStep::PadDown { button: PadButton::A },
+            MacroStep::PadTap {
+                button: PadButton::LsUp,
+                hold_ms: 40,
+            },
+            MacroStep::PadUp { button: PadButton::A },
+            // Not an output of the virtual controller: skipped.
+            MacroStep::PadTap {
+                button: PadButton::Touchpad,
+                hold_ms: 40,
+            },
+        ]);
+        assert_eq!(
+            steps,
+            [
+                Step::PadDown(PadButton::A),
+                Step::PadDown(PadButton::LsUp),
+                Step::Delay(40),
+                Step::PadUp(PadButton::LsUp),
+                Step::PadUp(PadButton::A),
+            ]
+        );
+        let mut cfg = Config::default();
+        cfg.macros
+            .push(Macro::new("Pad", vec![MacroStep::PadDown { button: PadButton::B }]));
+        cfg.profiles[0].bindings.insert(
+            "key:F1".into(),
+            Action::Macro {
+                name: "Pad".into(),
+                mode: MacroMode::Once,
+                count: 1,
+                gap_ms: 0,
+            },
+        );
+        assert!(compile(&cfg).profiles[0].layers.uses_vpad);
+        // Mouse → stick alone needs it too, and other profiles follow Default.
+        let mut cfg = Config::default();
+        cfg.profiles[0].mouse_stick = Some(StickPointer::Right);
+        let compiled = compile(&cfg);
+        assert!(compiled.profiles.iter().all(|p| p.layers.uses_vpad));
+        assert_eq!(compiled.profiles[1].layers.mouse_stick, StickPointer::Right);
+        cfg.profiles[1].mouse_stick = Some(StickPointer::Off);
+        assert!(!compile(&cfg).profiles[1].layers.uses_vpad);
     }
 }

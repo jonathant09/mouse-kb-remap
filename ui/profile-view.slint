@@ -291,6 +291,21 @@ component Canvas inherits Rectangle {
         }
     }
 
+    // Mouse tools: mouse movement → a virtual controller stick
+    if Store.device-tab == 0 && Store.vpad-supported: HorizontalLayout {
+        x: parent.width - self.width - 16px;
+        y: root.pad-tools-y;
+        width: self.preferred-width;
+        height: 28px;
+        spacing: 8px;
+        Text { text: "Mouse moves controller stick"; color: Theme.text-muted; font-size: Theme.font-sm; vertical-alignment: center; }
+        Segmented {
+            items: Store.mouse-stick-items;
+            current: Store.mouse-stick-current;
+            selected(i) => { Store.set-mouse-stick(i); }
+        }
+    }
+
     // Layer banner
     if Store.layer != 0: Rectangle {
         x: 16px;

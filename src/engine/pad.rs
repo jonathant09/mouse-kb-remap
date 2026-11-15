@@ -278,6 +278,64 @@ impl TouchMouse {
     }
 }
 
+/// Mouse movement → a controller stick (for games that only take a
+/// controller). The stick leans as far as the mouse moves fast: its
+/// velocity, smoothed over a few milliseconds, scaled by the speed setting
+/// and lifted past the game's own dead zone so slow movements still turn.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct MouseStick {
+    /// Smoothed velocity, counts per second (y down, like the mouse).
+    vel: (f32, f32),
+}
+
+impl MouseStick {
+    /// Mouse counts per second for a full deflection at speed 10.
+    const FULL_AT: f32 = 4000.0;
+    /// How quickly the velocity follows the mouse (seconds).
+    const SMOOTH: f32 = 0.025;
+    /// Below this deflection the stick is centred.
+    const REST: f32 = 0.01;
+
+    /// The mouse moved `dx`, `dy` counts in the last `dt` seconds. Returns
+    /// the stick position (XInput convention: up is positive). `speed` is
+    /// 1-20, `deadzone` the percentage the stick starts at once it moves.
+    pub fn update(&mut self, dx: i32, dy: i32, dt: f32, speed: u32, deadzone: u32) -> (i16, i16) {
+        if dt <= 0.0 {
+            return self.stick(speed, deadzone);
+        }
+        let k = 1.0 - (-dt / Self::SMOOTH).exp();
+        let (vx, vy) = (dx as f32 / dt, dy as f32 / dt);
+        self.vel.0 += (vx - self.vel.0) * k;
+        self.vel.1 += (vy - self.vel.1) * k;
+        self.stick(speed, deadzone)
+    }
+
+    fn stick(&mut self, speed: u32, deadzone: u32) -> (i16, i16) {
+        let full = Self::FULL_AT * 10.0 / speed.clamp(1, 20) as f32;
+        let (x, y) = (self.vel.0 / full, self.vel.1 / full);
+        let mag = (x * x + y * y).sqrt();
+        if mag < Self::REST {
+            // Centred, but keep a slow movement building up.
+            if mag < Self::REST / 10.0 {
+                self.vel = (0.0, 0.0);
+            }
+            return (0, 0);
+        }
+        if mag > 1.0 {
+            // Past full: a fast flick shouldn't keep the stick out longer.
+            self.vel = (self.vel.0 / mag, self.vel.1 / mag);
+        }
+        let floor = deadzone.min(90) as f32 / 100.0;
+        let out = floor + (1.0 - floor) * mag.min(1.0);
+        let scale = out / mag * 32767.0;
+        ((x * scale).round() as i16, (-y * scale).round() as i16)
+    }
+
+    pub fn reset(&mut self) {
+        self.vel = (0.0, 0.0);
+    }
+}
+
 /// Everything one controller remembers between readings.
 #[derive(Default, Debug)]
 pub struct PadState {
@@ -332,6 +390,44 @@ impl PadState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_moves_the_stick_and_lets_go() {
+        let mut m = MouseStick::default();
+        let dt = 0.008;
+        // A steady 2000 counts/s to the right at speed 10: half of full.
+        let mut last = (0, 0);
+        for _ in 0..40 {
+            last = m.update(16, 0, dt, 10, 20);
+        }
+        let expect = ((0.2 + 0.8 * 0.5) * 32767.0) as i16;
+        assert!((last.0 - expect).abs() < 300, "{last:?} vs {expect}");
+        assert_eq!(last.1, 0);
+        // Moving down pulls the stick down (negative), and fast is capped.
+        for _ in 0..40 {
+            last = m.update(0, 400, dt, 10, 20);
+        }
+        assert!(last.0.abs() < 50 && last.1 <= -32700, "{last:?}");
+        // A tiny movement still clears the dead zone.
+        let mut slow = MouseStick::default();
+        let mut s = (0, 0);
+        for _ in 0..40 {
+            s = slow.update(1, 0, dt, 10, 25);
+        }
+        assert!(s.0 >= (0.25 * 32767.0) as i16, "{s:?}");
+        // Stopping centres it within a fraction of a second.
+        for _ in 0..20 {
+            last = m.update(0, 0, dt, 10, 20);
+        }
+        assert_eq!(last, (0, 0));
+        // Diagonals stay inside the circle.
+        let mut d = MouseStick::default();
+        for _ in 0..40 {
+            last = d.update(400, -400, dt, 10, 0);
+        }
+        let r = ((last.0 as f32).powi(2) + (last.1 as f32).powi(2)).sqrt();
+        assert!(r <= 32768.0 && last.0 > 0 && last.1 > 0, "{last:?}");
+    }
 
     #[test]
     fn controller_mask_has_hysteresis() {

@@ -8,8 +8,9 @@ use std::path::PathBuf;
 /// v3 added layers 2-3, tap / hold, combos as triggers, system actions,
 /// hotkeys and app rules; v4 added controllers, gestures and per-device
 /// bindings; v5 the virtual controller (Controller action, turbo of a
-/// controller button). Older files load unchanged.
-pub const CONFIG_VERSION: u32 = 5;
+/// controller button); v6 controller steps in macros, mouse → stick and
+/// hiding the real controller. Older files load unchanged.
+pub const CONFIG_VERSION: u32 = 6;
 
 /// Binding layers per profile: base, shift (layer 1), layer 2, layer 3.
 pub const LAYER_COUNT: usize = 4;
@@ -1033,6 +1034,19 @@ pub enum MacroStep {
         #[serde(default, skip_serializing_if = "is_false")]
         absolute: bool,
     },
+    /// Press and release a virtual controller button, trigger or stick
+    /// direction, holding it for `hold_ms`.
+    PadTap {
+        button: PadButton,
+        #[serde(default = "d50")]
+        hold_ms: u32,
+    },
+    PadDown {
+        button: PadButton,
+    },
+    PadUp {
+        button: PadButton,
+    },
 }
 
 impl MacroStep {
@@ -1056,6 +1070,9 @@ impl MacroStep {
             MacroStep::Text { text } => ("Type text", format!("\"{text}\"")),
             MacroStep::MouseMove { x, y, absolute: false } => ("Move by", format!("{x:+}, {y:+}")),
             MacroStep::MouseMove { x, y, absolute: true } => ("Move to", format!("{x}, {y}")),
+            MacroStep::PadTap { button, hold_ms } => ("Controller press", format!("{} · {hold_ms} ms", button.name())),
+            MacroStep::PadDown { button } => ("Controller down", button.name()),
+            MacroStep::PadUp { button } => ("Controller up", button.name()),
         }
     }
 }
@@ -1113,6 +1130,10 @@ pub struct Profile {
     /// The controller's touchpad moves the pointer. `None`: same as Default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch_pointer: Option<bool>,
+    /// Mouse movement moves this stick of the virtual controller. `None`:
+    /// same as the Default profile (off for Default itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_stick: Option<StickPointer>,
 }
 
 impl Profile {
@@ -1127,6 +1148,7 @@ impl Profile {
             stick_pointer: None,
             gyro_pointer: None,
             touch_pointer: None,
+            mouse_stick: None,
         }
     }
 
@@ -1432,6 +1454,17 @@ pub struct PadSettings {
     /// Pass what a real controller does that the profile doesn't remap on to
     /// the virtual controller, so a remapped controller works in games.
     pub copy_to_virtual: bool,
+    /// How far the stick leans for a mouse speed (1-20), when mouse movement
+    /// moves a stick.
+    pub mouse_stick_speed: u32,
+    /// Where the stick starts once the mouse moves (percent), past the dead
+    /// zone games put around the centre.
+    pub mouse_stick_deadzone: u32,
+    /// Keep the pointer still while mouse movement moves the stick.
+    pub mouse_stick_hide: bool,
+    /// Hide the real controllers from games (HidHide) while the virtual
+    /// controller copies them.
+    pub hide_real: bool,
 }
 
 impl Default for PadSettings {
@@ -1447,6 +1480,10 @@ impl Default for PadSettings {
             skip_steam_virtual: true,
             steam_lizard_off: false,
             copy_to_virtual: true,
+            mouse_stick_speed: 10,
+            mouse_stick_deadzone: 20,
+            mouse_stick_hide: false,
+            hide_real: false,
         }
     }
 }
@@ -1688,6 +1725,16 @@ impl Config {
             .unwrap_or(false)
     }
 
+    /// The virtual controller stick that mouse movement moves in profile
+    /// `index`.
+    pub fn mouse_stick(&self, index: usize) -> StickPointer {
+        self.profiles
+            .get(index)
+            .and_then(|p| p.mouse_stick)
+            .or_else(|| self.profiles.first().and_then(|p| p.mouse_stick))
+            .unwrap_or_default()
+    }
+
     pub fn stick_pointer(&self, index: usize) -> StickPointer {
         self.profiles
             .get(index)
@@ -1865,6 +1912,45 @@ mod tests {
         let a: Action = serde_json::from_str(r#"{"type":"gesture"}"#).unwrap();
         assert!(matches!(a, Action::Gesture { distance: 40, .. }));
         assert_eq!(PadButton::from_id("rs_left"), Some(PadButton::RsLeft));
+    }
+
+    #[test]
+    fn controller_steps_mouse_stick_and_hiding_round_trip() {
+        let text = r#"{
+            "version": 5,
+            "pad": { "mouse_stick_speed": 14, "mouse_stick_hide": true, "hide_real": true },
+            "macros": [ { "name": "Combo", "steps": [
+                { "type": "pad_down", "button": "a" },
+                { "type": "pad_tap", "button": "rs_up" },
+                { "type": "pad_up", "button": "a" } ] } ],
+            "profiles": [ { "name": "Default", "mouse_stick": "left" }, { "name": "Game", "apps": ["game.exe"] } ]
+        }"#;
+        let cfg = Config::parse(text).unwrap();
+        // Defaults for what the file leaves out.
+        assert_eq!(cfg.pad.mouse_stick_deadzone, 20);
+        assert!(cfg.pad.copy_to_virtual);
+        assert_eq!(
+            (cfg.pad.mouse_stick_speed, cfg.pad.mouse_stick_hide, cfg.pad.hide_real),
+            (14, true, true)
+        );
+        // Other profiles follow Default unless they say otherwise.
+        assert_eq!(cfg.mouse_stick(1), StickPointer::Left);
+        let steps = &cfg.macros[0].steps;
+        assert_eq!(
+            steps[1],
+            MacroStep::PadTap {
+                button: PadButton::RsUp,
+                hold_ms: 50
+            }
+        );
+        assert_eq!(
+            steps[1].describe(),
+            ("Controller press", "Right stick up · 50 ms".to_string())
+        );
+        let back = Config::parse(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.macros, cfg.macros);
+        assert_eq!(back.profiles, cfg.profiles);
+        assert_eq!(back.pad, cfg.pad);
     }
 
     #[test]

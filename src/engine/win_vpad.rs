@@ -1,25 +1,18 @@
 //! Windows: the virtual Xbox 360 controller, through the ViGEmBus driver.
 //!
-//! Inputs bound to the *Controller* action press its buttons, triggers and
-//! stick directions. With *Copy the real controller* on, what a real
-//! controller does that the profile doesn't remap goes to it as well, so a
-//! remapped controller works in games (which should then be kept from seeing
-//! the real one, e.g. with HidHide).
-//!
-//! It's plugged in only while the active profile sends controller output,
-//! and unplugged a few seconds after that stops, so games only see it while
-//! it's wanted. One thread owns the driver connection; the hooks and the
-//! controller threads change the shared state and wake it.
+//! What it reports comes from `vpad.rs`; this is the driver connection and
+//! the thread that owns it. It's plugged in only while the active profile
+//! sends controller output, and unplugged a few seconds after that stops,
+//! so games only see it while it's wanted.
 //!
 //! The driver protocol (device interface, control codes and structures) is
 //! the one ViGEmClient uses, see github.com/nefarius/ViGEmBus. The driver
 //! unplugs our controller by itself when the app exits.
 
-use super::pad::{bit, PadReading};
+use super::vpad::{self, MouseFeed, XReport, LINGER, MOUSE_TICK, PRODUCT, RETRY, VENDOR};
 use super::{EngineEvent, VpadState};
-use crate::config::PadButton;
 
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::core::{GUID, PCWSTR};
@@ -49,15 +42,6 @@ const IOCTL_XUSB_SUBMIT_REPORT: u32 = 0x2A_A808;
 const BUS_VERSION: u32 = 1;
 /// Target type: wired Xbox 360 controller.
 const XBOX360_WIRED: i32 = 0;
-/// A real Xbox 360 controller's ids, which games know best.
-pub const VENDOR: u16 = 0x045E;
-pub const PRODUCT: u16 = 0x028E;
-
-/// Unplug this long after the profile stops needing it (switching between
-/// apps shouldn't plug it in and out every time).
-const LINGER: Duration = Duration::from_secs(10);
-/// Without the driver, look again this often while it's wanted.
-const RETRY: Duration = Duration::from_secs(10);
 
 #[repr(C)]
 struct CheckVersion {
@@ -81,19 +65,6 @@ struct Serial {
     serial: u32,
 }
 
-/// `XUSB_REPORT`: the same layout as `XINPUT_GAMEPAD`.
-#[repr(C)]
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct XReport {
-    pub buttons: u16,
-    pub lt: u8,
-    pub rt: u8,
-    pub lx: i16,
-    pub ly: i16,
-    pub rx: i16,
-    pub ry: i16,
-}
-
 #[repr(C)]
 struct SubmitReport {
     size: u32,
@@ -101,216 +72,36 @@ struct SubmitReport {
     report: XReport,
 }
 
-/// XInput button flag of a controller output.
-pub fn xbox_flag(b: PadButton) -> Option<u16> {
-    Some(match b {
-        PadButton::Up => 0x0001,
-        PadButton::Down => 0x0002,
-        PadButton::Left => 0x0004,
-        PadButton::Right => 0x0008,
-        PadButton::Start => 0x0010,
-        PadButton::Back => 0x0020,
-        PadButton::Ls => 0x0040,
-        PadButton::Rs => 0x0080,
-        PadButton::Lb => 0x0100,
-        PadButton::Rb => 0x0200,
-        PadButton::Guide => 0x0400,
-        PadButton::A => 0x1000,
-        PadButton::B => 0x2000,
-        PadButton::X => 0x4000,
-        PadButton::Y => 0x8000,
-        _ => return None,
-    })
-}
-
-/// What a real controller passes on, leaving out the inputs in `excluded`
-/// (bits of `pad::bit`): those are remapped, so the game shouldn't see
-/// them. A stick direction left out stops the stick going that way.
-pub fn mirror_report(r: &PadReading, excluded: u64) -> XReport {
-    let kept = |b: PadButton| excluded & bit(b) == 0;
-    let mut out = XReport::default();
-    for b in PadButton::OUTPUTS {
-        if let Some(flag) = xbox_flag(b) {
-            if r.buttons & bit(b) != 0 && kept(b) {
-                out.buttons |= flag;
-            }
-        }
-    }
-    out.lt = if kept(PadButton::Lt) { r.lt } else { 0 };
-    out.rt = if kept(PadButton::Rt) { r.rt } else { 0 };
-    let axis = |v: i16, plus: PadButton, minus: PadButton| {
-        let v = if kept(plus) { v } else { v.min(0) };
-        if kept(minus) {
-            v
-        } else {
-            v.max(0)
-        }
-    };
-    out.lx = axis(r.lx, PadButton::LsRight, PadButton::LsLeft);
-    out.ly = axis(r.ly, PadButton::LsUp, PadButton::LsDown);
-    out.rx = axis(r.rx, PadButton::RsRight, PadButton::RsLeft);
-    out.ry = axis(r.ry, PadButton::RsUp, PadButton::RsDown);
-    out
-}
-
-/// The report: real controllers copied in, then what bindings hold down
-/// on top. A stick a binding pushes ignores the real stick meanwhile.
-pub fn compose(mirrors: &[(u32, XReport)], held: &[u16; PadButton::OUTPUTS.len()]) -> XReport {
-    let mut r = XReport::default();
-    let bigger = |a: i16, b: i16| if b.unsigned_abs() > a.unsigned_abs() { b } else { a };
-    for (_, m) in mirrors {
-        r.buttons |= m.buttons;
-        r.lt = r.lt.max(m.lt);
-        r.rt = r.rt.max(m.rt);
-        r.lx = bigger(r.lx, m.lx);
-        r.ly = bigger(r.ly, m.ly);
-        r.rx = bigger(r.rx, m.rx);
-        r.ry = bigger(r.ry, m.ry);
-    }
-    let on = |b: PadButton| {
-        PadButton::OUTPUTS
-            .iter()
-            .position(|o| *o == b)
-            .is_some_and(|i| held[i] > 0)
-    };
-    for b in PadButton::OUTPUTS {
-        if let Some(flag) = xbox_flag(b) {
-            if on(b) {
-                r.buttons |= flag;
-            }
-        }
-    }
-    if on(PadButton::Lt) {
-        r.lt = 255;
-    }
-    if on(PadButton::Rt) {
-        r.rt = 255;
-    }
-    let stick = |up, down, left, right| -> Option<(i16, i16)> {
-        let x = on(right) as i32 - on(left) as i32;
-        let y = on(up) as i32 - on(down) as i32;
-        if !(on(up) || on(down) || on(left) || on(right)) {
-            return None;
-        }
-        // Diagonals stay on the stick's circle.
-        let full = if x != 0 && y != 0 { 23170 } else { 32767 };
-        Some(((x * full) as i16, (y * full) as i16))
-    };
-    if let Some((x, y)) = stick(
-        PadButton::LsUp,
-        PadButton::LsDown,
-        PadButton::LsLeft,
-        PadButton::LsRight,
-    ) {
-        (r.lx, r.ly) = (x, y);
-    }
-    if let Some((x, y)) = stick(
-        PadButton::RsUp,
-        PadButton::RsDown,
-        PadButton::RsLeft,
-        PadButton::RsRight,
-    ) {
-        (r.rx, r.ry) = (x, y);
-    }
-    r
-}
-
-#[derive(Default)]
-struct State {
-    /// The active profile sends controller output.
-    wanted: bool,
-    /// Presses per output (two bindings can hold the same button).
-    held: [u16; PadButton::OUTPUTS.len()],
-    /// Real controllers being copied: (source key, what they pass on).
-    mirrors: Vec<(u32, XReport)>,
-    /// Look for the driver again now (it was just installed).
-    retry: bool,
-    status: VpadState,
-    /// XInput slot (0-3) of our controller, so it isn't read as a real one.
-    slot: Option<u32>,
-    /// Ours is plugged in (or being plugged in): until its slot is known,
-    /// any new Xbox 360 controller may be it.
-    plugged: bool,
-}
-
-static STATE: Mutex<Option<State>> = Mutex::new(None);
-static WAKE: Condvar = Condvar::new();
-static EVENTS: OnceLock<Arc<dyn Fn(EngineEvent) + Send + Sync>> = OnceLock::new();
-
-fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let r = f(guard.get_or_insert_with(State::default));
-    WAKE.notify_all();
-    r
-}
-
-/// Read the state without waking the thread.
-fn peek<R>(f: impl FnOnce(&State) -> R) -> R {
-    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    f(guard.get_or_insert_with(State::default))
-}
-
 /// Start the thread (it idles until a profile needs the controller).
 pub fn start(on_event: Arc<dyn Fn(EngineEvent) + Send + Sync>) {
-    let _ = EVENTS.set(on_event);
+    vpad::set_events(on_event);
     std::thread::Builder::new()
         .name("remap-vpad".into())
         .spawn(run)
         .expect("failed to spawn virtual controller thread");
 }
 
-/// Whether the active profile sends controller output.
-pub fn set_wanted(on: bool) {
-    with(|s| s.wanted = on);
-}
+/// ViGEmBus serial number of our controller while plugged in (0: none).
+static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// A binding pressed or released an output.
-pub fn press(b: PadButton, down: bool) {
-    let Some(i) = PadButton::OUTPUTS.iter().position(|o| *o == b) else {
-        return;
-    };
-    with(|s| {
-        s.held[i] = if down {
-            s.held[i].saturating_add(1)
-        } else {
-            s.held[i].saturating_sub(1)
-        }
-    });
-}
-
-/// What a real controller passes on now, or `None` when it's gone.
-pub fn mirror(source: u32, report: Option<XReport>) {
-    with(|s| {
-        let i = s.mirrors.iter().position(|(k, _)| *k == source);
-        match (i, report) {
-            (Some(i), Some(r)) => s.mirrors[i].1 = r,
-            (None, Some(r)) => s.mirrors.push((source, r)),
-            (Some(i), None) => {
-                s.mirrors.remove(i);
-            }
-            (None, None) => {}
-        }
-    });
-}
-
-/// Look for the driver again (after installing it).
-pub fn retry() {
-    with(|s| s.retry = true);
-}
-
-pub fn status() -> VpadState {
-    peek(|s| s.status.clone())
+/// Our controller's ViGEmBus serial number (its device is
+/// `USBVID_045E&PID_028E<serial>`), while plugged in.
+pub fn serial() -> Option<u32> {
+    match SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(n),
+    }
 }
 
 /// The XInput slot (0-3) of our controller, once known.
 pub fn slot() -> Option<u32> {
-    peek(|s| s.slot)
+    vpad::peek(|s| s.slot)
 }
 
 /// Whether a new Xbox 360 controller may be ours: it's plugged in and its
 /// slot isn't known yet.
 pub fn finding_slot() -> bool {
-    peek(|s| s.plugged && s.slot.is_none())
+    vpad::peek(|s| s.plugged && s.slot.is_none())
 }
 
 /// Which XInput slots have a controller. (The driver can't say which slot
@@ -329,28 +120,6 @@ pub fn driver_present() -> bool {
     match Bus::open() {
         Ok(_) => true,
         Err(e) => e != BusError::Missing,
-    }
-}
-
-fn set_status(status: VpadState) {
-    let changed = with(|s| {
-        let changed = s.status != status;
-        s.status = status.clone();
-        changed
-    });
-    if changed {
-        match &status {
-            VpadState::Plugged { slot } => crate::log!(
-                "virtual controller: plugged in{}",
-                slot.map(|n| format!(" as controller {n}")).unwrap_or_default()
-            ),
-            VpadState::Unplugged => crate::log!("virtual controller: unplugged"),
-            VpadState::NoDriver => crate::log!("virtual controller: the ViGEmBus driver isn't installed"),
-            VpadState::Failed(e) => crate::log!("virtual controller: {e}"),
-        }
-        if let Some(f) = EVENTS.get() {
-            f(EngineEvent::Vpad(status));
-        }
     }
 }
 
@@ -546,25 +315,25 @@ struct Plugged {
 fn run() {
     let mut plugged: Option<Plugged> = None;
     let mut next_try = Instant::now();
+    let mut feed = MouseFeed::default();
     loop {
-        let (wanted, retry, report, slot_known) = {
-            let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-            let s = guard.get_or_insert_with(State::default);
-            let retry = std::mem::take(&mut s.retry);
-            (s.wanted, retry, compose(&s.mirrors, &s.held), s.slot.is_some())
-        };
+        let (wanted, retry, settings, slot_known) = vpad::peek(|s| (s.wanted, s.retry, s.mouse, s.slot.is_some()));
         if retry {
+            vpad::with(|s| s.retry = false);
             next_try = Instant::now();
         }
+        let lean = feed.next(if wanted { settings } else { Default::default() });
+        let report = vpad::peek(|s| s.report(lean));
 
         if wanted && plugged.is_none() && Instant::now() >= next_try {
             match Bus::open() {
                 Ok(bus) => {
-                    with(|s| s.plugged = true);
+                    vpad::with(|s| s.plugged = true);
                     let before = xinput_slots();
                     match bus.plug_in() {
                         Ok(serial) => {
-                            set_status(VpadState::Plugged { slot: None });
+                            SERIAL.store(serial, std::sync::atomic::Ordering::Relaxed);
+                            vpad::set_status(VpadState::Plugged { slot: None });
                             plugged = Some(Plugged {
                                 bus,
                                 serial,
@@ -575,24 +344,24 @@ fn run() {
                             });
                         }
                         Err(e) => {
-                            with(|s| s.plugged = false);
-                            set_status(VpadState::Failed(e));
+                            vpad::with(|s| s.plugged = false);
+                            vpad::set_status(VpadState::Failed(e));
                             next_try = Instant::now() + RETRY;
                         }
                     }
                 }
                 Err(BusError::Missing) => {
-                    set_status(VpadState::NoDriver);
+                    vpad::set_status(VpadState::NoDriver);
                     next_try = Instant::now() + RETRY;
                 }
                 Err(BusError::Other(e)) => {
-                    set_status(VpadState::Failed(e));
+                    vpad::set_status(VpadState::Failed(e));
                     next_try = Instant::now() + RETRY;
                 }
             }
         }
         if !wanted && plugged.is_none() {
-            set_status(VpadState::Unplugged);
+            vpad::set_status(VpadState::Unplugged);
         }
 
         let mut unplug = false;
@@ -617,8 +386,8 @@ fn run() {
                     };
                     let _ = p.bus.submit(p.serial, nudge);
                     p.last = None;
-                    with(|s| s.slot = Some(slot as u32));
-                    set_status(VpadState::Plugged {
+                    vpad::with(|s| s.slot = Some(slot as u32));
+                    vpad::set_status(VpadState::Plugged {
                         slot: Some(slot as u8 + 1),
                     });
                 } else if Instant::now() + Duration::from_millis(100) >= p.find_until {
@@ -642,19 +411,21 @@ fn run() {
             if let Some(p) = plugged.take() {
                 let _ = p.bus.submit(p.serial, XReport::default());
                 p.bus.unplug(p.serial);
+                SERIAL.store(0, std::sync::atomic::Ordering::Relaxed);
                 // Keep its slot skipped until XInput has seen it go.
                 std::thread::sleep(Duration::from_millis(500));
             }
-            with(|s| {
+            vpad::with(|s| {
                 s.slot = None;
                 s.plugged = false;
             });
-            set_status(VpadState::Unplugged);
+            vpad::set_status(VpadState::Unplugged);
         }
 
-        // Sleep until something changes, or a timer is due.
-        let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        // Sleep until something changes, or a timer is due. While the mouse
+        // leans a stick, tick to follow it.
         let timeout = match &plugged {
+            Some(_) if lean.is_some() => MOUSE_TICK,
             Some(p)
                 if p.unwanted_since.is_some()
                     || (!slot_known && Instant::now() < p.find_until)
@@ -668,11 +439,9 @@ fn run() {
                 .max(Duration::from_millis(50)),
             None => Duration::from_secs(60),
         };
-        let unchanged = |s: &mut Option<State>| {
-            let s = s.get_or_insert_with(State::default);
-            s.wanted == wanted && !s.retry && compose(&s.mirrors, &s.held) == report
-        };
-        let _ = WAKE.wait_timeout_while(guard, timeout, unchanged);
+        vpad::wait(timeout, |s| {
+            s.wanted != wanted || s.retry || s.mouse != settings || s.report(lean) != report
+        });
     }
 }
 
@@ -680,70 +449,11 @@ fn run() {
 mod tests {
     use super::*;
 
-    fn held(list: &[PadButton]) -> [u16; PadButton::OUTPUTS.len()] {
-        let mut h = [0; PadButton::OUTPUTS.len()];
-        for b in list {
-            h[PadButton::OUTPUTS.iter().position(|o| o == b).unwrap()] += 1;
-        }
-        h
-    }
-
     #[test]
     fn report_layout_matches_the_driver() {
         assert_eq!(std::mem::size_of::<XReport>(), 12);
         assert_eq!(std::mem::size_of::<SubmitReport>(), 20);
         assert_eq!(std::mem::size_of::<PluginTarget>(), 16);
-    }
-
-    #[test]
-    fn bindings_press_buttons_triggers_and_sticks() {
-        let r = compose(&[], &held(&[PadButton::A, PadButton::Rt, PadButton::LsUp]));
-        assert_eq!(r.buttons, 0x1000);
-        assert_eq!((r.lt, r.rt), (0, 255));
-        assert_eq!((r.lx, r.ly), (0, 32767));
-        let r = compose(&[], &held(&[PadButton::RsLeft, PadButton::RsDown]));
-        assert_eq!((r.rx, r.ry), (-23170, -23170));
-        // Opposite directions cancel out.
-        let r = compose(&[], &held(&[PadButton::LsLeft, PadButton::LsRight]));
-        assert_eq!((r.lx, r.ly), (0, 0));
-    }
-
-    #[test]
-    fn mirror_leaves_out_remapped_inputs() {
-        let real = PadReading {
-            buttons: bit(PadButton::A) | bit(PadButton::Lb) | bit(PadButton::Guide),
-            lt: 200,
-            lx: 20000,
-            ly: -15000,
-            ..Default::default()
-        };
-        let excluded = bit(PadButton::Lb) | bit(PadButton::Lt) | bit(PadButton::LsRight) | bit(PadButton::Guide);
-        let m = mirror_report(&real, excluded);
-        assert_eq!(m.buttons, 0x1000);
-        assert_eq!(m.lt, 0);
-        assert_eq!((m.lx, m.ly), (0, -15000));
-        // The binding's output goes on top; its stick overrides the real one.
-        let r = compose(&[(1, m)], &held(&[PadButton::B, PadButton::LsLeft]));
-        assert_eq!(r.buttons, 0x1000 | 0x2000);
-        assert_eq!((r.lx, r.ly), (-32767, 0));
-    }
-
-    #[test]
-    fn two_controllers_merge() {
-        let a = XReport {
-            buttons: 0x1000,
-            lx: 100,
-            ..Default::default()
-        };
-        let b = XReport {
-            buttons: 0x2000,
-            lx: -9000,
-            rt: 50,
-            ..Default::default()
-        };
-        let r = compose(&[(1, a), (2, b)], &held(&[]));
-        assert_eq!(r.buttons, 0x3000);
-        assert_eq!((r.lx, r.rt), (-9000, 50));
     }
 
     /// Stands in for a real controller in end-to-end tests: plugs in an

@@ -56,6 +56,8 @@ export global Store {
     in property <[string]> pad-glyphs;     // short glyphs for the drawing, by PadButton order
     in property <[string]> stick-items;    // what moves the pointer
     in property <int> stick-current;
+    in property <[string]> mouse-stick-items; // which virtual controller stick the mouse leans
+    in property <int> mouse-stick-current;
     in property <string> stick-speed;
     in property <[string]> gyro-items;     // gyro moves the pointer: (Same as Default,) Off, On
     in property <int> gyro-current;
@@ -162,10 +164,11 @@ export global Store {
     in property <bool> recording;
     in property <string> macro-info;       // "Used by: …"
     in property <string> macro-jitter;     // random ± ms on every delay
-    in property <[string]> step-kind-names: ["Key press", "Key down", "Key up", "Mouse click", "Mouse down", "Mouse up", "Delay", "Text", "Move by", "Move to"];
+    in property <[string]> step-kind-names: ["Key press", "Key down", "Key up", "Mouse click", "Mouse down", "Mouse up", "Delay", "Text", "Move by", "Move to", "Controller press", "Controller down", "Controller up"];
     in property <int> step-kind: -1;
     in property <string> step-key;
     in property <int> step-mouse: -1;
+    in property <int> step-pad: -1;        // index into pad-output-names
     in property <string> step-ms;
     in property <string> step-text;
     in property <string> step-x;
@@ -202,6 +205,9 @@ export global Store {
     in property <bool> pad-skip-steam;     // skip Steam's virtual controllers
     in property <bool> pad-lizard;         // turn off Steam devices' own mouse mode
     in property <bool> pad-copy;           // copy real controllers to the virtual one
+    in property <string> pad-mouse-speed;  // mouse → stick: speed 1-20
+    in property <string> pad-mouse-deadzone; // … where the stick starts, percent
+    in property <bool> pad-mouse-hide;     // … keep the pointer still
 
     // ---- virtual controller (Controller action) -----------------------------------
     in property <[string]> pad-output-names;
@@ -210,6 +216,11 @@ export global Store {
     // 0 driver missing, 1 ready (not plugged in), 2 plugged in, 3 failed, 4 installing
     in property <int> vpad-state;
     in property <string> vpad-text;
+    // ---- hiding the real controllers (HidHide) -------------------------------------
+    in property <bool> pad-hide-real;      // the setting
+    // 0 not installed, 1 ready, 2 hiding, 3 failed, 4 installing
+    in property <int> hide-state;
+    in property <string> hide-text;
 
     // ---- status bar ----------------------------------------------------------------
     in property <string> focused-app;
@@ -245,6 +256,7 @@ export global Store {
     callback select-device(int);           // index into device-names
     callback tab-changed();                // device-tab was changed in the UI
     callback set-stick(int);               // index into stick-items
+    callback set-mouse-stick(int);         // index into mouse-stick-items
     callback set-stick-speed(string);
     callback set-gyro(int);                // index into gyro-items
     callback set-touch(int);               // index into touch-items
@@ -281,6 +293,7 @@ export global Store {
     callback set-turbo-pad(int);
     callback set-pad-output(int);
     callback install-vpad-driver();
+    callback install-hidhide();
     callback set-turbo-mouse(int);
     callback set-turbo-number(string, string); // field ("interval"/"hold"/"delay"), value
     callback set-turbo-toggle(bool);
@@ -303,6 +316,7 @@ export global Store {
     callback select-step(int);
     callback set-step-kind(int);
     callback set-step-mouse(int);
+    callback set-step-pad(int);
     callback set-step-number(string);
     callback set-step-text(string);
     callback set-step-xy(string, string);

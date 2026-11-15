@@ -126,6 +126,23 @@ impl Drop for Preparsed {
     }
 }
 
+/// Device instance ids (upper case) of the controllers `enumerate` finds, for
+/// hiding them (`win_hidhide.rs`).
+pub fn controller_instances() -> Vec<String> {
+    enumerate()
+        .iter()
+        .filter_map(|f| interface_to_instance(&f.path))
+        .collect()
+}
+
+/// `\\?\hid#vid_054c&pid_0ce6#7&2b4b&0&0000#{4d1e…}` →
+/// `HID\VID_054C&PID_0CE6\7&2B4B&0&0000`.
+pub fn interface_to_instance(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("\\\\?\\").or_else(|| path.strip_prefix("\\\\.\\"))?;
+    let end = rest.rfind("#{")?;
+    Some(rest[..end].replace('#', "\\").to_ascii_uppercase())
+}
+
 /// Controllers worth reading: known ones by vendor / product (Steam ones on
 /// their vendor-defined interface), anything else that calls itself a
 /// joystick or gamepad. Xbox-style controllers (`IG_` in the path) are

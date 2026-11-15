@@ -3,7 +3,7 @@
 import { Theme } from "theme.slint";
 import { Store } from "store.slint";
 import { Button, Callout, Divider, Hint, SectionLabel, Segmented, Switch, ValueField } from "widgets.slint";
-import { CaptureBox, VpadStatus } from "controls.slint";
+import { CaptureBox, HideStatus, VpadStatus } from "controls.slint";
 
 component SwitchRow inherits HorizontalLayout {
     in property <string> text;
@@ -253,9 +253,34 @@ export component SettingsView inherits Rectangle {
                 VpadStatus { }
                 SwitchRow {
                     text: "Copy the real controller to the virtual one";
-                    hint: "What your controller does that the profile doesn't remap goes to the virtual controller too, so it works as your remapped controller. Games also still see the real controller: hide it from them with HidHide (by the same author as ViGEmBus) and allow mouse-kb-remap in HidHide, or remapped buttons do both things.";
+                    hint: "What your controller does that the profile doesn't remap goes to the virtual controller too, so it works as your remapped controller. Games also still see the real controller unless it's hidden from them (below), or remapped buttons do both things.";
                     checked: Store.pad-copy;
                     toggled(on) => { Store.set-pad-flag("copy", on); }
+                }
+                SwitchRow {
+                    text: "Hide the real controllers from games meanwhile";
+                    hint: "While the virtual controller copies a real one, other programs can't use the real one, so games see only your remapped controller (Steam doesn't see it either then). Windows: with the free HidHide driver, by the same author as ViGEmBus. The app gives the controller back when the virtual one is unplugged and when it quits.";
+                    checked: Store.pad-hide-real;
+                    toggled(on) => { Store.set-pad-flag("hide_real", on); }
+                }
+                if Store.pad-hide-real: HideStatus { }
+                SectionLabel { text: "MOUSE → STICK"; }
+                Hint { text: "Turned on per profile on the Mouse tab: moving the mouse leans a stick of the virtual controller, further the faster it moves, for games that only take a controller."; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { horizontal-stretch: 1; text: "Speed (1-20)"; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    ValueField { width: 60px; value: Store.pad-mouse-speed; committed(v) => { Store.set-pad-number("mouse", v); } }
+                }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text { horizontal-stretch: 1; text: "Stick starts at (past the game's dead zone)"; wrap: word-wrap; color: Theme.text; font-size: Theme.font; vertical-alignment: center; }
+                    ValueField { width: 60px; value: Store.pad-mouse-deadzone; suffix: "%"; committed(v) => { Store.set-pad-number("mouse_deadzone", v); } }
+                }
+                SwitchRow {
+                    text: "Keep the pointer still meanwhile";
+                    hint: "Only while the virtual controller is plugged in and that profile's app is in front: opening this window frees the pointer. Games that read the mouse directly still see it move.";
+                    checked: Store.pad-mouse-hide;
+                    toggled(on) => { Store.set-pad-flag("mouse_hide", on); }
                 }
                 Callout {
                     text: "ViGEmBus is no longer developed (its last version is from 2023) but still works on Windows 10 and 11. Some games' anti-cheat refuses virtual controllers, or treats them as cheating: check before using one in competitive online games.";

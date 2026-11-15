@@ -2740,11 +2740,12 @@ dependencies = [
 
 [[package]]
 name = "mouse-kb-remap"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "directories",
  "evdev",
  "i-slint-backend-testing",
+ "libc",
  "rfd",
  "serde",
  "serde_json",

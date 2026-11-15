@@ -66,6 +66,8 @@ const PAD_RESCAN: Duration = Duration::from_secs(1);
 
 static RAW_TID: AtomicU32 = AtomicU32::new(0);
 static RAW_WANTED: AtomicBool = AtomicBool::new(false);
+/// Mouse movement leans a virtual controller stick: forward it.
+static RAW_MOTION: AtomicBool = AtomicBool::new(false);
 static RAW_ON: AtomicBool = AtomicBool::new(false);
 static CAPTURE: AtomicBool = AtomicBool::new(false);
 static PAD_WANTED: AtomicBool = AtomicBool::new(false);
@@ -132,6 +134,7 @@ pub fn set_devices(devices: Vec<Device>) {
 /// to the virtual controller).
 pub fn update(
     raw: bool,
+    motion_stick: bool,
     pad: bool,
     motion: bool,
     pointer: PointerSettings,
@@ -139,6 +142,7 @@ pub fn update(
     mirror: Option<u64>,
 ) {
     RAW_WANTED.store(raw, Ordering::SeqCst);
+    RAW_MOTION.store(motion_stick, Ordering::SeqCst);
     PAD_WANTED.store(pad, Ordering::SeqCst);
     MOTION.store(motion, Ordering::SeqCst);
     if let Ok(mut c) = PAD_CONFIG.lock() {
@@ -282,7 +286,7 @@ fn raw_thread() {
 
 /// Register for mouse raw input, or stop, as needed.
 fn register(hwnd: HWND) {
-    let want = RAW_WANTED.load(Ordering::SeqCst) || CAPTURE.load(Ordering::SeqCst);
+    let want = RAW_WANTED.load(Ordering::SeqCst) || RAW_MOTION.load(Ordering::SeqCst) || CAPTURE.load(Ordering::SeqCst);
     if want == RAW_ON.load(Ordering::SeqCst) {
         return;
     }
@@ -332,6 +336,17 @@ fn on_raw_input(handle: HRAWINPUT) {
     let Some(ctx) = CTX.get() else { return };
     let mouse = unsafe { raw.data.mouse };
     let flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags } & 0x0FFF;
+    // Relative movement (not a tablet's absolute position), not our own.
+    // While the hook swallows moves it reports them itself.
+    if RAW_MOTION.load(Ordering::Relaxed)
+        && !super::windows::hiding_moves()
+        && mouse.usFlags.0 & 0x01 == 0
+        && (mouse.lLastX != 0 || mouse.lLastY != 0)
+        && mouse.ulExtraInformation != ctx.magic
+        && (!raw.header.hDevice.is_invalid() || ctx.accept_injected)
+    {
+        super::vpad::mouse_motion(mouse.lLastX, mouse.lLastY);
+    }
     if flags == 0 || mouse.ulExtraInformation == ctx.magic {
         // Movement only, or our own output.
         return;
@@ -519,11 +534,11 @@ pub fn on_reading(src: &mut Source, r: &PadReading) {
             } else {
                 super::pad::bit(PadButton::Guide)
             };
-            super::win_vpad::mirror(src.key, Some(super::win_vpad::mirror_report(r, excluded)));
+            super::vpad::mirror(src.key, Some(super::vpad::mirror_report(r, excluded)));
             src.mirrored = true;
         }
         None if src.mirrored => {
-            super::win_vpad::mirror(src.key, None);
+            super::vpad::mirror(src.key, None);
             src.mirrored = false;
         }
         None => {}
@@ -538,7 +553,7 @@ pub fn on_gone(src: &mut Source) {
     let changes = src.state.release_all();
     send_changes(src.device(), &changes);
     if src.mirrored {
-        super::win_vpad::mirror(src.key, None);
+        super::vpad::mirror(src.key, None);
         src.mirrored = false;
     }
 }
@@ -665,7 +680,7 @@ fn xinput_thread() {
                 if super::win_vpad::finding_slot()
                     && ex
                         .ids(slot)
-                        .is_none_or(|ids| ids == (super::win_vpad::VENDOR, super::win_vpad::PRODUCT))
+                        .is_none_or(|ids| ids == (super::vpad::VENDOR, super::vpad::PRODUCT))
                 {
                     continue;
                 }

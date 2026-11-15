@@ -1,6 +1,6 @@
 [package]
 name = "mouse-kb-remap"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Lightweight, brand-agnostic mouse & keyboard remapper with per-app profiles, macros and turbo"
 license = "MIT"
@@ -68,6 +68,8 @@ windows-core = "0.62"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+# poll() on controllers, so hiding one doesn't wait for its next event.
+libc = "0.2"
 x11rb = "0.14"
 
 [features]

@@ -19,6 +19,7 @@
 use super::dispatch::{Ctx, Dispatcher, Phase, Sink};
 use super::pad::{self, PadReading, PadState, PointerSettings};
 use super::player::{self, Cmd, Out};
+use super::vpad::{self, MouseStickSettings};
 use super::{
     match_device, pick_profile, AppCommand, Compiled, CompiledProfile, DeviceIndex, EngineEvent, FocusInfo,
     HotkeyBinding, Input, Layers, RecEvent, WindowInfo,
@@ -28,7 +29,7 @@ use crate::config::{MouseButton, PadButton, PadSettings, StickPointer, SystemCom
 use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -37,6 +38,19 @@ pub const SUPPORTED: bool = true;
 
 const NO_PROFILE: usize = usize::MAX;
 const VIRTUAL_NAME: &str = "mouse-kb-remap virtual input";
+
+/// Mouse movement → virtual controller stick in the active profile: 0 off,
+/// 1 on, 2 on and the pointer kept still.
+static MOUSE_STICK: AtomicU8 = AtomicU8::new(0);
+/// Real controllers are copied to the virtual one, leaving out these
+/// inputs (`pad::bit`); `NOT_COPYING` when they aren't.
+static COPY_EXCLUDED: AtomicU64 = AtomicU64::new(NOT_COPYING);
+const NOT_COPYING: u64 = u64::MAX;
+/// While copying, take the real controller for ourselves (evdev grab) so
+/// games reading it through evdev see only the virtual one.
+static HIDE_REAL: AtomicBool = AtomicBool::new(false);
+/// Source keys for `vpad::mirror`, one per controller thread.
+static NEXT_SOURCE: AtomicU32 = AtomicU32::new(1);
 
 /// Our key ids use Windows virtual-key codes; this maps them to Linux key codes.
 const VK_TO_EVDEV: &[(u16, u16)] = &[
@@ -357,6 +371,7 @@ impl Engine {
             detect: AtomicBool::new(false),
             gyro_held: AtomicBool::new(false),
         });
+        super::linux_vpad::start(shared().on_event.clone());
         recompute_active(&WindowInfo::default(), false);
 
         std::thread::Builder::new()
@@ -511,7 +526,7 @@ enum Kind {
 /// controllers and their motion sensors are read; touchpads (the desktop
 /// already handles a PlayStation touchpad) and tablets are left alone.
 fn wanted(dev: &Device) -> Option<Kind> {
-    if dev.name() == Some(VIRTUAL_NAME) {
+    if dev.name() == Some(VIRTUAL_NAME) || dev.name() == Some(super::linux_vpad::NAME) {
         return None;
     }
     if dev.properties().contains(evdev::PropType::ACCELEROMETER) {
@@ -654,6 +669,18 @@ fn device_loop(mut dev: Device) {
             if ty == EV_SYN {
                 continue;
             }
+            let mouse_stick = MOUSE_STICK.load(Ordering::Relaxed);
+            if mouse_stick != 0
+                && ty == EV_REL
+                && (code == REL_X || code == REL_Y)
+                && sh.enabled.load(Ordering::Relaxed)
+            {
+                let (dx, dy) = if code == REL_X { (value, 0) } else { (0, value) };
+                vpad::mouse_motion(dx, dy);
+                if mouse_stick == 2 && vpad::is_plugged() {
+                    continue;
+                }
+            }
             if ty == EV_REL && code == REL_X {
                 sh.pointer.0.fetch_add(value, Ordering::Relaxed);
             } else if ty == EV_REL && code == REL_Y {
@@ -710,12 +737,24 @@ fn pad_loop(mut dev: Device) {
     let mut device = DeviceMatch::new(&dev);
     let mut reading = PadReading::default();
     let mut state = PadState::default();
+    let source = NEXT_SOURCE.fetch_add(1, Ordering::Relaxed);
+    let mut mirroring = false;
+    let mut grabbed = false;
     let sh = shared();
     loop {
+        // Hide or give back the controller as copying starts and stops,
+        // without waiting for it to send something.
+        update_grab(&mut dev, &mut grabbed, &device.name);
+        if !wait_readable(&dev, 200) {
+            continue;
+        }
         let events: Vec<InputEvent> = match dev.fetch_events() {
             Ok(it) => it.collect(),
             Err(e) => {
                 crate::log!("engine: controller read failed: {e}");
+                if mirroring {
+                    vpad::mirror(source, None);
+                }
                 // Unplugged: release whatever was held.
                 for (b, _) in state.release_all() {
                     dispatch(Input::Pad(b), Phase::Up, device.index());
@@ -779,6 +818,18 @@ fn pad_loop(mut dev: Device) {
                     if let Ok(mut s) = sh.stick.lock() {
                         *s = reading;
                     }
+                    let excluded = COPY_EXCLUDED.load(Ordering::Relaxed);
+                    let paused = !sh.enabled.load(Ordering::Relaxed);
+                    if excluded != NOT_COPYING {
+                        // Paused: only Guide stays out, like on Windows.
+                        let excluded = if paused { pad::bit(PadButton::Guide) } else { excluded };
+                        vpad::mirror(source, Some(vpad::mirror_report(&reading, excluded)));
+                        mirroring = true;
+                    } else if mirroring {
+                        vpad::mirror(source, None);
+                        mirroring = false;
+                    }
+                    update_grab(&mut dev, &mut grabbed, &device.name);
                     // Pointer movement from the stick runs on its own thread
                     // (a held stick sends no events); gyro on the motion device.
                     let (changes, _) = state.update(&reading, 0.0, &PointerSettings::default(), false);
@@ -800,6 +851,36 @@ fn pad_loop(mut dev: Device) {
             }
         }
     }
+}
+
+/// Take the controller for ourselves (an evdev grab: other programs reading
+/// it through evdev get nothing) while it's copied to the plugged-in virtual
+/// one with hiding on; give it back otherwise.
+fn update_grab(dev: &mut Device, grabbed: &mut bool, name: &str) {
+    let grab =
+        HIDE_REAL.load(Ordering::Relaxed) && COPY_EXCLUDED.load(Ordering::Relaxed) != NOT_COPYING && vpad::is_plugged();
+    if grab == *grabbed {
+        return;
+    }
+    match if grab { dev.grab() } else { dev.ungrab() } {
+        Ok(()) => {
+            *grabbed = grab;
+            crate::log!("engine: {} {name}", if grab { "hiding" } else { "no longer hiding" });
+        }
+        Err(e) => crate::log!("engine: can't grab {name}: {e}"),
+    }
+}
+
+/// Whether the device has something to read within `ms` (or failed: the
+/// read then says how).
+fn wait_readable(dev: &Device, ms: i32) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut p = libc::pollfd {
+        fd: dev.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    unsafe { libc::poll(&mut p, 1, ms) != 0 }
 }
 
 /// A controller's motion sensors (a separate device on Linux): gyro moves
@@ -1179,7 +1260,7 @@ fn out_to_events(out: &Out, events: &mut Vec<InputEvent>) {
         Out::Move { absolute: true, .. } => crate::log!("macro: \"move to\" isn't supported on Linux yet"),
         Out::Launch(_) | Out::PointerSpeed(_) | Out::System(_) | Out::Notice(_) => {}
         // No virtual controller on Linux yet.
-        Out::Pad { .. } => {}
+        Out::Pad { button, down } => vpad::press(button, down),
     }
 }
 
@@ -1303,6 +1384,28 @@ fn recompute_active(window: &WindowInfo, is_self: bool) -> usize {
         let index = forced.unwrap_or_else(|| pick_profile(&profiles, window));
         (index, profiles.get(index).map(|p| p.layers.clone()))
     };
+    let pad = sh.pad.lock().map(|p| p.clone()).unwrap_or_default();
+    let mouse = layers.as_ref().map(|l| l.mouse_stick).unwrap_or_default();
+    if let Some(l) = layers.as_ref() {
+        // Our own window focused: the controller stays as it was.
+        vpad::set_wanted(l.uses_vpad);
+        let copying = l.uses_vpad && pad.copy_to_virtual;
+        COPY_EXCLUDED.store(if copying { l.pad_excluded() } else { NOT_COPYING }, Ordering::Relaxed);
+        HIDE_REAL.store(copying && pad.hide_real, Ordering::Relaxed);
+    }
+    MOUSE_STICK.store(
+        match (mouse, pad.mouse_stick_hide) {
+            (StickPointer::Off, _) => 0,
+            (_, false) => 1,
+            (_, true) => 2,
+        },
+        Ordering::Relaxed,
+    );
+    vpad::set_mouse_stick(MouseStickSettings {
+        stick: mouse,
+        speed: pad.mouse_stick_speed,
+        deadzone: pad.mouse_stick_deadzone,
+    });
     if let Ok(mut a) = sh.active.write() {
         *a = layers;
     }
@@ -1334,20 +1437,21 @@ fn emit_focus() {
     }));
 }
 
-fn on_focus(pid: u32) {
+fn on_focus(f: super::linux_focus::Focused) {
     let sh = shared();
+    let pid = f.pid;
     let is_self = pid == sh.self_pid;
     let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
     let exe = path
         .as_ref()
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
         .unwrap_or_default();
-    // Window titles and fullscreen aren't tracked on Linux yet.
+    // Titles and fullscreen come from the Wayland compositor's IPC (not X11).
     let window = WindowInfo {
         exe: exe.to_lowercase(),
         path: path.map(|p| p.display().to_string().to_lowercase()).unwrap_or_default(),
-        title: String::new(),
-        fullscreen: false,
+        title: f.title.to_lowercase(),
+        fullscreen: f.fullscreen,
     };
     if let Ok(mut f) = sh.last_focus.lock() {
         *f = (window.clone(), exe, is_self);
@@ -1365,6 +1469,23 @@ fn on_focus(pid: u32) {
 }
 
 fn focus_thread() {
+    if let Some(name) = super::linux_focus::detect() {
+        crate::log!("engine: following the focused window through {name}");
+        let mut last = None;
+        let result = super::linux_focus::watch(&mut |f| {
+            if last.as_ref() != Some(&f) {
+                last = Some(f.clone());
+                on_focus(f);
+            }
+        });
+        if let Err(e) = result {
+            crate::log!("engine: {name} focus tracking stopped ({e}); trying X11");
+        }
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        crate::log!(
+            "engine: this Wayland desktop doesn't say which window is in front; only programs running through XWayland are seen"
+        );
+    }
     if let Err(e) = watch_x11_focus() {
         crate::log!("engine: can't track the focused window ({e}); the Default profile applies everywhere");
     }
@@ -1402,7 +1523,10 @@ fn watch_x11_focus() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(0);
             if pid != 0 && pid != last_pid {
                 last_pid = pid;
-                on_focus(pid);
+                on_focus(super::linux_focus::Focused {
+                    pid,
+                    ..Default::default()
+                });
             }
         }
         // Wait for the next change of the active window.

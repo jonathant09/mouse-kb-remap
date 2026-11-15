@@ -32,7 +32,7 @@ app that works with **any** mouse or keyboard.
   - a **sensitivity clutch** ("sniper" button): lower pointer speed while held
   - **mouse gestures**: hold a button, swipe up / down / left / right, let go
   - a **controller button**, trigger or stick direction of a virtual Xbox controller
-    (Windows, with the free ViGEmBus driver the app offers to install)
+    (Windows, with the free ViGEmBus driver the app offers to install; Linux, experimental)
   - **off**
 - **Combos as triggers**: Ctrl + Back, Right click + Left click, Shift + Wheel… do
   something other than the button alone.
@@ -40,13 +40,15 @@ app that works with **any** mouse or keyboard.
   Steam Deck and Steam Controller, and any other gamepad: remap every button, trigger, d-pad and
   stick direction like any other input, and move the pointer with a stick, the gyro or the
   touchpad. Works alongside Steam.
-- **Virtual controller** (Windows): play games that want a controller with a keyboard and
-  mouse, or remap a controller for games: keys, mouse buttons and controller buttons press
-  the buttons, triggers and sticks of a virtual Xbox controller, which copies your real
-  controller's other inputs. Plugged in only while a profile uses it.
+- **Virtual controller** (Windows; Linux, experimental): play games that want a controller
+  with a keyboard and mouse, or remap a controller for games: keys, mouse buttons and
+  controller buttons press the buttons, triggers and sticks of a virtual Xbox controller,
+  which copies your real controller's other inputs. **Mouse movement can move a stick**, and
+  the real controller can be **hidden from games** (with HidHide on Windows, installed in one
+  click), so they see only the remapped one. Plugged in only while a profile uses it.
 - **Bindings for one device**: give a second mouse, a trackball or a controller its own
   bindings (keyboards too on Linux).
-- **Macros** can move the pointer and randomize their delays.
+- **Macros** can move the pointer, press controller buttons and randomize their delays.
 - **Games-friendly output.** Keys are sent as scan codes, which most games read, and timed
   output (turbo, macros) runs on a precise timer thread (typically within 1 ms).
 - **Safe by design.** Remaps never apply while this app's window is focused, and focusing it
@@ -84,9 +86,10 @@ replacing the exe with a newer version keeps them. To have it start when you sig
 | --- | --- |
 | Windows engine (hooks, focus tracking, `SendInput`, macros, turbo) | Working; timing, combos, macros, layers, tap / hold, gestures, per-device bindings, hotkeys, system actions, notifications, the command line and updating tested end-to-end on Windows 11 |
 | Controllers (XInput, PlayStation, Switch, Steam, other HID) | Report formats checked against SDL and unit-tested; reading tested on Windows 11 with no controller attached; not yet tried with real controllers |
-| Virtual controller (ViGEmBus) | Working: output, turbo, tap / hold and copying a controller tested end-to-end on Windows 11 through XInput (a second virtual controller standing in for a real one); not yet tried in games |
+| Virtual controller (ViGEmBus) | Working: output, turbo, tap / hold, macro steps, mouse → stick and copying a controller tested end-to-end on Windows 11 through XInput (a second virtual controller standing in for a real one); not yet tried in games |
+| Hiding the real controller (HidHide) | Working: hiding while copying, giving it back on quit and after a crash tested end-to-end on Windows 11 with HidHide 1.5.230 (on the stand-in controller) |
 | UI (profiles, mouse and keyboard diagrams, macro editor, settings) | Working |
-| Linux engine (evdev + uinput, X11 focus tracking) | Experimental: builds and passes unit tests, not yet tried on real hardware |
+| Linux engine (evdev + uinput; X11, sway, Hyprland and niri focus tracking) | Experimental: the virtual controller, mouse → stick, copying and hiding a controller tested end-to-end with uinput test devices, and focus tracking with a headless sway, in WSL 2; not yet tried on real hardware |
 | macOS engine | Not yet (the UI runs in preview mode) |
 
 ## Input latency
@@ -152,7 +155,7 @@ src/
   system.rs          Single instance, start with Windows, open files/URLs
   osd.rs             On-screen notifications
   update.rs          Release check and in-place update
-  driver.rs          Installing the ViGEmBus driver (download, checksum, admin prompt)
+  driver.rs          Installing ViGEmBus and HidHide (download, checksum, admin prompt)
   ipc.rs             Command-line control (named pipe)
   log.rs             Log file next to config.json
   engine/
@@ -163,10 +166,14 @@ src/
     win_actions.rs   System actions: audio, microphone, windows, lock (Windows)
     win_devices.rs   Which mouse a button came from (raw input), controllers (Windows)
     win_hid.rs       Controllers read directly over USB / Bluetooth (Windows)
+    vpad.rs          Virtual controller: its report, copying, mouse → stick (all platforms)
     win_vpad.rs      Virtual Xbox controller through the ViGEmBus driver (Windows)
+    win_hidhide.rs   Hiding the real controllers from games with HidHide (Windows)
     pad_hid.rs       PlayStation, Switch and Steam controller report formats
     pad.rs           Controller readings → inputs; stick, gyro, touchpad → pointer
     linux.rs         evdev grab + uinput output, X11 focus (Linux, experimental)
+    linux_vpad.rs    Virtual Xbox controller as a uinput device (Linux)
+    linux_focus.rs   Focused window on sway, Hyprland and niri (Linux)
     fallback.rs      No-op engine so the UI runs on other OSes
 ui/
   app.slint          Main window, status bar, tray icon
@@ -206,13 +213,15 @@ ui/
 - [x] Virtual Xbox controller (Windows, ViGEmBus): keyboard, mouse and controller → controller
       buttons, triggers and sticks; a real controller copied to it with remaps applied; one-click
       driver install (official installer, checksum built into the app, admin prompt)
+- [x] Hide the real controller from games (HidHide, one-click install; an evdev grab on
+      Linux); mouse movement → stick; controller steps in macros; a virtual controller on
+      Linux (uinput)
+- [x] Linux: Wayland focus tracking on sway, Hyprland and niri (with window titles)
 - [ ] Try controllers and the virtual controller with real hardware and games; the original
       Steam Controller (2015) and Switch 2 controllers
-- [ ] Hide the real controller from games without a separate tool (HidHide integration);
-      mouse movement → stick; controller steps in macros; a virtual controller on Linux (uinput)
 - [ ] Bindings for one keyboard on Windows (needs a filter driver such as Interception, which
       anti-cheats often block)
-- [ ] Linux: try on real hardware, Wayland focus tracking (per compositor)
+- [ ] Linux: try on real hardware; focus tracking on GNOME and KDE Plasma under Wayland
 - [ ] macOS backend
 
 ## License

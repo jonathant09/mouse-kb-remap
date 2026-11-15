@@ -14,7 +14,7 @@
 //! shows it; add a state here when adding a view that none of them reach.
 
 use super::*;
-use crate::config::{Combo, Macro, MacroStep, Modifier, MouseButton};
+use crate::config::{Combo, Macro, MacroStep, Modifier, MouseButton, PadButton};
 use i_slint_backend_testing::{ElementHandle, ElementQuery};
 use slint::{ComponentHandle, LogicalSize};
 
@@ -62,6 +62,10 @@ fn crowded_config() -> Config {
             x: 1919,
             y: 1079,
             absolute: true,
+        });
+        steps.push(MacroStep::PadTap {
+            button: PadButton::RsRight,
+            hold_ms: 50,
         });
     }
     cfg.macros = vec![
@@ -270,7 +274,7 @@ fn every_page_fits_the_smallest_window() {
     st.macro_idx = Some(0);
     st.step = None;
     fit.check(&st, "macro, no step selected");
-    for step in 0..5 {
+    for step in 0..6 {
         st.step = Some(step);
         fit.check(&st, &format!("macro, step {step} selected"));
     }

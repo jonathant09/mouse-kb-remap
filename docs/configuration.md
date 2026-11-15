@@ -80,7 +80,7 @@ typo never loses your profiles.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `version` | number | `5` | Format version. Version 1–4 files load unchanged; 0.4 and older can't read a file that uses the virtual controller. |
+| `version` | number | `6` | Format version. Version 1–5 files load unchanged; 0.5 and older can't read a file with controller macro steps, 0.4 and older one that uses the virtual controller. |
 | `theme` | `"dark"` / `"light"` | `"dark"` | UI theme |
 | `enabled` | bool | `true` | Master switch (the status-bar toggle) |
 | `close_to_tray` | bool | `true` | Closing the window keeps the app in the tray |
@@ -92,7 +92,7 @@ typo never loses your profiles.
 | `macros` | array | `[]` | Macro library, referenced by name |
 | `devices` | array | `[]` | Named mice and controllers: `{ "name": "Trackball", "id": … }` (below) |
 | `stick_speed` | number | `10` | Pointer speed (1–20) when a controller stick moves the pointer |
-| `pad` | object | | Controller settings: `gyro_speed`, `touch_speed` (1–20, default 10), `gyro_invert_x`, `gyro_invert_y`, `labels` (`"xbox"`, `"play_station"`, `"nintendo"`), `xinput`, `direct`, `skip_steam_virtual` (all three on by default), `steam_lizard_off` (off), `copy_to_virtual` (on: pass a real controller's unremapped inputs on to the virtual controller) |
+| `pad` | object | | Controller settings: `gyro_speed`, `touch_speed` (1–20, default 10), `gyro_invert_x`, `gyro_invert_y`, `labels` (`"xbox"`, `"play_station"`, `"nintendo"`), `xinput`, `direct`, `skip_steam_virtual` (all three on by default), `steam_lizard_off` (off), `copy_to_virtual` (on: pass a real controller's unremapped inputs on to the virtual controller), `hide_real` (off: hide the copied controllers from games: HidHide on Windows, an evdev grab on Linux), `mouse_stick_speed` (1–20, default 10), `mouse_stick_deadzone` (percent the stick starts at, default 20), `mouse_stick_hide` (off: keep the pointer still while the mouse moves a stick) |
 
 ## Profile
 
@@ -106,6 +106,7 @@ typo never loses your profiles.
 | `layers` | object[] | Layers 2 and 3, the same kind of map (optional) |
 | `stick_pointer` | `"off"` / `"left"` / `"right"` | Controller stick that moves the pointer. Left out: same as Default (off for Default itself). |
 | `gyro_pointer`, `touch_pointer` | bool | The controller gyro / touchpad moves the pointer. Left out: same as Default (off for Default itself). |
+| `mouse_stick` | `"off"` / `"left"` / `"right"` | Mouse movement moves this stick of the virtual controller. Left out: same as Default (off for Default itself). |
 
 Entries in `apps`, all case-insensitive, `*` and `?` as wildcards:
 
@@ -185,7 +186,7 @@ Use *Settings → Devices → Add a device* rather than writing ids by hand.
 | `{ "type": "system", "command": "mute_mic" }` | `lock_pc`, `mute_mic`, `next_audio_output`, `minimize_window`, `maximize_window` (toggles), `always_on_top` (toggles), `next_monitor`, `close_window`, `next_profile`, `auto_profile` |
 | `{ "type": "gesture", "tap": {…}, "up": {…}, "down": {…}, "left": {…}, "right": {…}, "distance": 40 }` | Hold, move the pointer at least `distance` pixels and let go: the part for the direction moved most. `tap`: let go without moving that far. Each part is optional and is any action except a `tap_hold` or `gesture`. |
 | `{ "type": "gyro", "toggle": false }` | Controller gyro moves the pointer while held, or (`toggle`) switch it on and off |
-| `{ "type": "pad", "button": "a" }` | Hold a button of the virtual Xbox controller (Windows, needs ViGEmBus) for as long as the input is held. `button`: the controller ids above without `pad:`, Xbox inputs only: `a`, `b`, `x`, `y`, `lb`, `rb`, `lt`, `rt` (fully pressed), `back`, `start`, `ls`, `rs`, `up`, `down`, `left`, `right`, `ls_up` … `rs_right` (stick pushed all the way), `guide`. |
+| `{ "type": "pad", "button": "a" }` | Hold a button of the virtual Xbox controller (Windows, needs ViGEmBus; Linux, needs `/dev/uinput`) for as long as the input is held. `button`: the controller ids above without `pad:`, Xbox inputs only: `a`, `b`, `x`, `y`, `lb`, `rb`, `lt`, `rt` (fully pressed), `back`, `start`, `ls`, `rs`, `up`, `down`, `left`, `right`, `ls_up` … `rs_right` (stick pushed all the way), `guide`. |
 | `{ "type": "disabled" }` | Swallow the input |
 
 ## Macros
@@ -208,6 +209,8 @@ Use *Settings → Devices → Add a device* rather than writing ids by hand.
 | `{ "type": "text", "text": "hello" }` | Type text |
 | `{ "type": "mouse_move", "x": 40, "y": -10 }` | Move the pointer by (x, y), like the mouse would |
 | `{ "type": "mouse_move", "x": 960, "y": 540, "absolute": true }` | Move the pointer to a screen position in pixels (Windows only) |
+| `{ "type": "pad_tap", "button": "a", "hold_ms": 50 }` | Press and release a virtual controller button, trigger or stick direction (ids as for the `pad` action) |
+| `{ "type": "pad_down", "button": "lt" }`, `{ "type": "pad_up", "button": "lt" }` | Press or release one |
 
 ## Key ids
 

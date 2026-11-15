@@ -217,6 +217,11 @@ struct State {
     vpad_installing: bool,
     /// How installing the driver went (shown until the next try).
     vpad_message: String,
+    /// Hiding the real controllers (HidHide), and installing it.
+    hide: engine::HideState,
+    hidhide: bool,
+    hidhide_installing: bool,
+    hidhide_message: String,
 }
 
 impl State {
@@ -266,6 +271,10 @@ impl State {
             vpad_driver: false,
             vpad_installing: false,
             vpad_message: String::new(),
+            hide: engine::HideState::default(),
+            hidhide: false,
+            hidhide_installing: false,
+            hidhide_message: String::new(),
         }
     }
 
@@ -452,6 +461,8 @@ pub fn run(opts: Options) -> Result<(), slint::PlatformError> {
     }
     st.vpad = engine::vpad_status();
     st.vpad_driver = engine::vpad_driver_present();
+    st.hide = engine::hide_status();
+    st.hidhide = engine::hidhide_present();
 
     let app = Rc::new(App {
         ui: ui.as_weak(),
@@ -656,6 +667,9 @@ fn step_kind(step: &MacroStep) -> i32 {
         MacroStep::Text { .. } => 7,
         MacroStep::MouseMove { absolute: false, .. } => 8,
         MacroStep::MouseMove { absolute: true, .. } => 9,
+        MacroStep::PadTap { .. } => 10,
+        MacroStep::PadDown { .. } => 11,
+        MacroStep::PadUp { .. } => 12,
     }
 }
 
@@ -677,8 +691,17 @@ fn step_button(step: &MacroStep) -> Option<MouseButton> {
 
 fn step_ms(step: &MacroStep) -> Option<u32> {
     match step {
-        MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. } => Some(*hold_ms),
+        MacroStep::KeyTap { hold_ms, .. }
+        | MacroStep::MouseClick { hold_ms, .. }
+        | MacroStep::PadTap { hold_ms, .. } => Some(*hold_ms),
         MacroStep::Delay { ms } => Some(*ms),
+        _ => None,
+    }
+}
+
+fn step_pad(step: &MacroStep) -> Option<PadButton> {
+    match step {
+        MacroStep::PadTap { button, .. } | MacroStep::PadDown { button } | MacroStep::PadUp { button } => Some(*button),
         _ => None,
     }
 }
@@ -690,7 +713,14 @@ fn step_xy(step: &MacroStep) -> Option<(i32, i32)> {
     }
 }
 
-fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>, xy: Option<(i32, i32)>) -> MacroStep {
+fn make_step(
+    kind: i32,
+    key: String,
+    button: MouseButton,
+    pad: PadButton,
+    ms: Option<u32>,
+    xy: Option<(i32, i32)>,
+) -> MacroStep {
     match kind {
         0 => MacroStep::KeyTap {
             key,
@@ -713,6 +743,12 @@ fn make_step(kind: i32, key: String, button: MouseButton, ms: Option<u32>, xy: O
             let (x, y) = xy.or_else(system::cursor_pos).unwrap_or((0, 0));
             MacroStep::MouseMove { x, y, absolute: true }
         }
+        10 => MacroStep::PadTap {
+            button: pad,
+            hold_ms: ms.unwrap_or(50),
+        },
+        11 => MacroStep::PadDown { button: pad },
+        12 => MacroStep::PadUp { button: pad },
         _ => MacroStep::Text { text: String::new() },
     }
 }
@@ -816,8 +852,81 @@ fn output_grid_name(b: PadButton) -> String {
 }
 
 /// Position of a virtual controller output in `PadButton::OUTPUTS`.
+/// Index of a stick choice in the Segmented: Off / Left / Right, with "As
+/// Default" first for other profiles.
+fn stick_index(profile: usize, choice: Option<StickPointer>) -> i32 {
+    let i = match choice {
+        None => 0,
+        Some(StickPointer::Off) => 1,
+        Some(StickPointer::Left) => 2,
+        Some(StickPointer::Right) => 3,
+    };
+    if profile == 0 {
+        (i - 1).max(0)
+    } else {
+        i
+    }
+}
+
 fn output_index(b: PadButton) -> i32 {
     PadButton::OUTPUTS.iter().position(|o| *o == b).map_or(-1, |i| i as i32)
+}
+
+/// The HidHide box: (`Store.hide-state`, text). 0 not installed, 1 ready,
+/// 2 hiding, 3 failed, 4 installing.
+fn hide_display(st: &State) -> (i32, String) {
+    if !cfg!(windows) {
+        return (
+            1,
+            "On Linux the app takes the real controller for itself (an evdev grab) while copying it, so games that \
+             read it through evdev see only the virtual one. Steam and games that open it through hidraw still see it."
+                .into(),
+        );
+    }
+    let note = if st.hidhide_message.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", st.hidhide_message)
+    };
+    if st.hidhide_installing {
+        return (
+            4,
+            format!(
+                "Installing {}: allow it in Windows' admin prompt, then follow the installer's steps.",
+                crate::driver::HIDHIDE.name
+            ),
+        );
+    }
+    if !st.hidhide {
+        return (
+            0,
+            format!(
+                "Needs the free HidHide driver, which isn't installed.{note} The app downloads the official installer \
+                 ({}, signed by Nefarius Software Solutions), checks that it's exactly the expected file and runs it \
+                 after Windows' admin prompt. From {}.",
+                crate::driver::HIDHIDE.name,
+                crate::driver::HIDHIDE.project_url
+            ),
+        );
+    }
+    match &st.hide {
+        engine::HideState::Hiding(n) => (
+            2,
+            format!(
+                "Hiding {n} controller device{} from games.{note} A game that already had the controller open keeps \
+                 it until it's restarted or the controller is plugged in again.",
+                if *n == 1 { "" } else { "s" }
+            ),
+        ),
+        engine::HideState::Failed(e) => (3, format!("Couldn't hide the real controllers: {e}.")),
+        _ => (
+            1,
+            format!(
+                "HidHide is installed.{note} While the virtual controller copies a real one, games only see the \
+                 virtual one; the app gives the real one back when it stops or quits."
+            ),
+        ),
+    }
 }
 
 /// The virtual controller box: (`Store.vpad-state`, text).
@@ -830,12 +939,18 @@ fn vpad_display(st: &State) -> (i32, String) {
     if !engine::VPAD_SUPPORTED {
         return (3, "The virtual controller is only available on Windows for now.".into());
     }
+    if cfg!(target_os = "linux") && !st.vpad_driver {
+        return (
+            3,
+            "The app can't create input devices: it needs write access to /dev/uinput (see Troubleshooting).".into(),
+        );
+    }
     if st.vpad_installing {
         return (
             4,
             format!(
                 "Installing {}: allow it in Windows' admin prompt, then follow the installer's steps.",
-                crate::driver::NAME
+                crate::driver::VIGEMBUS.name
             ),
         );
     }
@@ -846,8 +961,8 @@ fn vpad_display(st: &State) -> (i32, String) {
                 "Needs the free ViGEmBus driver, which isn't installed.{note} The app downloads the official \
                  installer ({}, signed by Nefarius Software Solutions), checks that it's exactly the expected \
                  file and runs it after Windows' admin prompt. From {}.",
-                crate::driver::NAME,
-                crate::driver::PROJECT_URL
+                crate::driver::VIGEMBUS.name,
+                crate::driver::VIGEMBUS.project_url
             ),
         );
     }
@@ -862,7 +977,14 @@ fn vpad_display(st: &State) -> (i32, String) {
         engine::VpadState::Failed(e) => (3, format!("The virtual controller couldn't be plugged in: {e}.")),
         _ => (
             1,
-            format!("ViGEmBus is installed.{note} The virtual controller is plugged in while a profile that uses it is active."),
+            format!(
+                "{}{note} The virtual controller is plugged in while a profile that uses it is active.",
+                if cfg!(windows) {
+                    "ViGEmBus is installed."
+                } else {
+                    "Ready (uinput)."
+                }
+            ),
         ),
     }
 }
@@ -1372,6 +1494,14 @@ impl App {
                     _ => {}
                 }
                 st.vpad = state;
+            }),
+            EngineEvent::Hide(state) => self.nav(|_, st| {
+                match state {
+                    engine::HideState::Hiding(_) => st.hidhide = true,
+                    engine::HideState::NotInstalled => st.hidhide = false,
+                    _ => {}
+                }
+                st.hide = state;
             }),
             EngineEvent::PadDetected { input } => {
                 if let Some(ui) = self.ui() {
@@ -1919,7 +2049,7 @@ impl App {
         }
         self.nav(|_, _| {});
         std::thread::spawn(|| {
-            let result = crate::driver::install(&|_, _| {});
+            let result = crate::driver::VIGEMBUS.install(&|_, _| {});
             if let Err(e) = &result {
                 crate::log!("driver: not installed: {e}");
             }
@@ -1929,7 +2059,39 @@ impl App {
                         st.vpad_installing = false;
                         st.vpad_driver = engine::vpad_driver_present();
                         st.vpad_message = match result {
-                            Ok(()) => "Driver installed.".into(),
+                            Ok(false) => "Driver installed.".into(),
+                            Ok(true) => "Driver installed: restart Windows to finish.".into(),
+                            Err(e) => format!("Couldn't install it: {e}."),
+                        };
+                    })
+                })
+            });
+        });
+    }
+
+    fn install_hidhide(&self) {
+        {
+            let mut st = self.st.borrow_mut();
+            if st.hidhide_installing || !engine::VPAD_SUPPORTED {
+                return;
+            }
+            st.hidhide_installing = true;
+            st.hidhide_message.clear();
+        }
+        self.nav(|_, _| {});
+        std::thread::spawn(|| {
+            let result = crate::driver::HIDHIDE.install(&|_, _| {});
+            if let Err(e) = &result {
+                crate::log!("driver: HidHide not installed: {e}");
+            }
+            let _ = slint::invoke_from_event_loop(move || {
+                with_app(|app| {
+                    app.nav(|_, st| {
+                        st.hidhide_installing = false;
+                        st.hidhide = engine::hidhide_present();
+                        st.hidhide_message = match result {
+                            Ok(false) => "HidHide installed.".into(),
+                            Ok(true) => "HidHide installed: restart Windows to finish.".into(),
                             Err(e) => format!("Couldn't install it: {e}."),
                         };
                     })
@@ -2151,28 +2313,16 @@ fn fill_ui(ui: &AppWindow, st: &State) {
             .map(|b| SharedString::from(pad_glyph(*b, cfg.pad.labels)))
             .collect(),
     ));
-    let (stick_items, stick_current) = if st.profile == 0 {
-        (
-            vec!["Off", "Left", "Right"],
-            match profile.stick_pointer.unwrap_or_default() {
-                StickPointer::Off => 0,
-                StickPointer::Left => 1,
-                StickPointer::Right => 2,
-            },
-        )
+    let stick_items = if st.profile == 0 {
+        vec!["Off", "Left", "Right"]
     } else {
-        (
-            vec!["As Default", "Off", "Left", "Right"],
-            match profile.stick_pointer {
-                None => 0,
-                Some(StickPointer::Off) => 1,
-                Some(StickPointer::Left) => 2,
-                Some(StickPointer::Right) => 3,
-            },
-        )
+        vec!["As Default", "Off", "Left", "Right"]
     };
-    s.set_stick_items(model(stick_items.into_iter().map(SharedString::from).collect()));
+    let stick_current = stick_index(st.profile, profile.stick_pointer);
+    s.set_stick_items(model(stick_items.iter().map(|s| SharedString::from(*s)).collect()));
     s.set_stick_current(stick_current);
+    s.set_mouse_stick_items(model(stick_items.iter().map(|s| SharedString::from(*s)).collect()));
+    s.set_mouse_stick_current(stick_index(st.profile, profile.mouse_stick));
     s.set_stick_speed(cfg.stick_speed.to_string().into());
     // Gyro / touchpad: Off / On, or (other profiles) Same as Default first.
     let on_off = |own: Option<bool>| -> (Vec<SharedString>, i32) {
@@ -2214,10 +2364,17 @@ fn fill_ui(ui: &AppWindow, st: &State) {
     s.set_pad_skip_steam(p.skip_steam_virtual);
     s.set_pad_lizard(p.steam_lizard_off);
     s.set_pad_copy(p.copy_to_virtual);
+    s.set_pad_mouse_speed(p.mouse_stick_speed.to_string().into());
+    s.set_pad_mouse_deadzone(p.mouse_stick_deadzone.to_string().into());
+    s.set_pad_mouse_hide(p.mouse_stick_hide);
     s.set_vpad_supported(engine::VPAD_SUPPORTED);
     let (state, text) = vpad_display(st);
     s.set_vpad_state(state);
     s.set_vpad_text(text.into());
+    let (state, text) = hide_display(st);
+    s.set_hide_state(state);
+    s.set_hide_text(text.into());
+    s.set_pad_hide_real(p.hide_real);
     s.set_pad_output_names(model(
         PadButton::OUTPUTS
             .iter()
@@ -2591,7 +2748,9 @@ fn fill_ui(ui: &AppWindow, st: &State) {
             .iter()
             .map(|s| match s {
                 MacroStep::Delay { ms } => *ms as u64,
-                MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. } => *hold_ms as u64,
+                MacroStep::KeyTap { hold_ms, .. }
+                | MacroStep::MouseClick { hold_ms, .. }
+                | MacroStep::PadTap { hold_ms, .. } => *hold_ms as u64,
                 _ => 0,
             })
             .sum();
@@ -2630,6 +2789,7 @@ fn fill_ui(ui: &AppWindow, st: &State) {
             }
             .into(),
         );
+        s.set_step_pad(step_pad(step).map(output_index).unwrap_or(-1));
         let (x, y) = step_xy(step).unwrap_or((0, 0));
         s.set_step_x(x.to_string().into());
         s.set_step_y(y.to_string().into());
@@ -2896,6 +3056,19 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             st.cfg.profiles[0].stick_pointer = None;
         }
     });
+    on!(on_set_mouse_stick, |i| edit |st: &mut State| {
+        let p = st.profile;
+        let choice = if p == 0 { i + 1 } else { i };
+        st.cfg.profiles[p].mouse_stick = match choice {
+            1 => Some(StickPointer::Off),
+            2 => Some(StickPointer::Left),
+            3 => Some(StickPointer::Right),
+            _ => None,
+        };
+        if p == 0 && st.cfg.profiles[0].mouse_stick == Some(StickPointer::Off) {
+            st.cfg.profiles[0].mouse_stick = None;
+        }
+    });
     on!(on_set_stick_speed, |value| edit |st: &mut State| {
         if let Ok(v) = value.trim().parse::<u32>() {
             st.cfg.stick_speed = v.clamp(1, 20);
@@ -2978,10 +3151,12 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
     });
     on!(on_set_pad_number, |field, value| edit |st: &mut State| {
         let Ok(v) = value.trim().parse::<u32>() else { return };
-        let v = v.clamp(1, 20);
+        let speed = v.clamp(1, 20);
         match field.as_str() {
-            "gyro" => st.cfg.pad.gyro_speed = v,
-            _ => st.cfg.pad.touch_speed = v,
+            "gyro" => st.cfg.pad.gyro_speed = speed,
+            "mouse" => st.cfg.pad.mouse_stick_speed = speed,
+            "mouse_deadzone" => st.cfg.pad.mouse_stick_deadzone = v.min(90),
+            _ => st.cfg.pad.touch_speed = speed,
         }
     });
     on!(on_set_pad_flag, |field, on| edit |st: &mut State| {
@@ -2993,6 +3168,8 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             "direct" => p.direct = on,
             "skip_steam" => p.skip_steam_virtual = on,
             "copy" => p.copy_to_virtual = on,
+            "mouse_hide" => p.mouse_stick_hide = on,
+            "hide_real" => p.hide_real = on,
             _ => p.steam_lizard_off = on,
         }
     });
@@ -3218,6 +3395,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         }
     });
     on!(on_install_vpad_driver, | | app |a: &Rc<App>| a.install_vpad_driver());
+    on!(on_install_hidhide, | | app |a: &Rc<App>| a.install_hidhide());
     on!(on_set_turbo_mouse, |i| edit |st: &mut State| {
         if let (Some(Action::Turbo { output, .. }), Some(b)) = (st.action_mut(), MouseButton::ALL.get(i as usize)) {
             *output = Output::Mouse { button: *b };
@@ -3365,7 +3543,7 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             a.edit(|_, st| {
                 let at = st.step.map(|s| s + 1);
                 let Some(m) = st.current_macro() else { return };
-                let step = make_step(kind, "A".into(), MouseButton::Left, None, None);
+                let step = make_step(kind, "A".into(), MouseButton::Left, PadButton::A, None, None);
                 is_key = step_key(&step).is_some();
                 let at = at.unwrap_or(m.steps.len()).min(m.steps.len());
                 m.steps.insert(at, step);
@@ -3382,13 +3560,14 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
         let Some(step) = st.current_step() else { return };
         let key = step_key(step).unwrap_or("A").to_string();
         let button = step_button(step).unwrap_or(MouseButton::Left);
+        let pad = step_pad(step).unwrap_or(PadButton::A);
         let ms = step_ms(step);
         let xy = step_xy(step);
         let text = match step {
             MacroStep::Text { text } => Some(text.clone()),
             _ => None,
         };
-        let mut new = make_step(kind, key, button, ms, xy);
+        let mut new = make_step(kind, key, button, pad, ms, xy);
         if let (MacroStep::Text { text: t }, Some(old)) = (&mut new, text) {
             *t = old;
         }
@@ -3400,10 +3579,16 @@ fn wire_callbacks(ui: &AppWindow, app: &Rc<App>) {
             *button = b
         }
     });
+    on!(on_set_step_pad, |i| edit |st: &mut State| {
+        let Some(b) = PadButton::OUTPUTS.get(i as usize).copied() else { return };
+        if let Some(MacroStep::PadTap { button, .. } | MacroStep::PadDown { button } | MacroStep::PadUp { button }) = st.current_step() {
+            *button = b
+        }
+    });
     on!(on_set_step_number, |v| edit |st: &mut State| {
         let Some(v) = parse_ms(&v) else { return };
         match st.current_step() {
-            Some(MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. }) => *hold_ms = v,
+            Some(MacroStep::KeyTap { hold_ms, .. } | MacroStep::MouseClick { hold_ms, .. } | MacroStep::PadTap { hold_ms, .. }) => *hold_ms = v,
             Some(MacroStep::Delay { ms }) => *ms = v,
             _ => {}
         }

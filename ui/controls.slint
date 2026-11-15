@@ -159,3 +159,34 @@ export component VpadStatus inherits VerticalLayout {
         }
     }
 }
+
+// HidHide status (hiding the real controllers): `Store.hide-state` /
+// `Store.hide-text`, with the install button while it's missing.
+export component HideStatus inherits VerticalLayout {
+    spacing: 8px;
+    Rectangle {
+        border-radius: Theme.radius;
+        background: (Store.hide-state == 0 || Store.hide-state == 3 ? Theme.warning : Theme.success).with-alpha(0.12);
+        border-width: 1px;
+        border-color: (Store.hide-state == 0 || Store.hide-state == 3 ? Theme.warning : Theme.success).with-alpha(0.35);
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            Text {
+                text: Store.hide-text;
+                wrap: word-wrap;
+                color: Theme.text;
+                font-size: Theme.font-sm;
+            }
+            if Store.hide-state == 0 || Store.hide-state == 4: HorizontalLayout {
+                alignment: start;
+                Button {
+                    text: Store.hide-state == 4 ? "Installing…" : "Install HidHide";
+                    primary: true;
+                    enabled: Store.hide-state == 0;
+                    clicked => { Store.install-hidhide(); }
+                }
+            }
+        }
+    }
+}

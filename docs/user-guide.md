@@ -88,7 +88,7 @@ Unbound inputs show the inherited value, e.g. "Left Ctrl (Default)".
 | **System** | Lock the PC, mute the microphone, switch audio output, act on the focused window, switch profile ([System actions](#system-actions)) |
 | **Gesture** | Hold and move the mouse up, down, left or right, then let go: a different action per direction ([Gestures](#gestures)) |
 | **Gyro** | Hold (or toggle) to move the pointer by tilting a controller ([Moving the pointer](#moving-the-pointer)) |
-| **Controller** | Presses a button, trigger or stick direction of a virtual Xbox controller, for games that want a controller (Windows) ([Virtual controller](#virtual-controller)) |
+| **Controller** | Presses a button, trigger or stick direction of a virtual Xbox controller, for games that want a controller (Windows; Linux, experimental) ([Virtual controller](#virtual-controller)) |
 | **Off** | The input is swallowed and does nothing |
 
 Remapped inputs are outlined in the accent color. On the keyboard, the new key is printed in
@@ -234,7 +234,8 @@ Gyro and touchpad speed, and which way the gyro moves, are in *Settings → Cont
 - The app reads controllers **shared**: games and Steam keep reading them too. That also
   means remapping alone can't hide a controller's buttons from a game: remap buttons the
   game doesn't use, use the controller to drive other apps, or remap it onto the
-  [virtual controller](#virtual-controller) and hide the real one with HidHide.
+  [virtual controller](#virtual-controller) and hide the real one
+  ([Hiding the real controller](#hiding-the-real-controller-hidhide)).
 - **Steam Input** adds an Xbox-style copy of a controller while it's on. *Skip Steam's
   virtual controllers* (on by default) keeps the app on the real one, so nothing counts
   twice.
@@ -254,8 +255,9 @@ Gyro and touchpad speed, and which way the gyro moves, are in *Settings → Cont
 
 ## Virtual controller
 
-On Windows, the **Controller** action presses a button, trigger or stick direction of a
-virtual Xbox 360 controller for as long as the input is held. Games see it as a real
+The **Controller** action presses a button, trigger or stick direction of a virtual Xbox
+360 controller for as long as the input is held (Windows; Linux, experimental: see
+[below](#on-linux)). Games see it as a real
 controller, so you can:
 
 - **play a game that wants a controller with the keyboard and mouse**: WASD on the left
@@ -265,7 +267,7 @@ controller, so you can:
 - **add buttons a controller doesn't have**, from the keyboard or a mouse with side buttons.
 
 It works anywhere an action does: in tap / hold and gesture parts, combos, layers and per
-device. Stick directions and triggers go all the way; two directions of one stick held
+device, and macros can press its buttons too ([controller steps](macros.md#macros)). Stick directions and triggers go all the way; two directions of one stick held
 together go diagonally. A tap holds the button for 50 ms so games, which read controllers
 once a frame, don't miss it.
 
@@ -308,13 +310,61 @@ Guide is never copied (Windows already opens the Game Bar for the real one). Whi
 remapping is paused, everything is copied as it is.
 
 The game still sees your real controller too, though, so a remapped button would do both
-things. Hide the real controller from games with **HidHide** (free, by the same author as
-ViGEmBus, [github.com/nefarius/HidHide](https://github.com/nefarius/HidHide)): add the
-controller to its list, and add `mouse-kb-remap.exe` to its allowed applications so the app
-can still read it. Without HidHide, remap buttons the game doesn't use, or turn copying off
-and use the virtual controller for keyboard and mouse only.
+things. Turn on **Hide the real controllers from games meanwhile** (same card) so games see
+only the virtual one.
 
-The virtual controller isn't available on Linux yet.
+### Hiding the real controller (HidHide)
+
+On Windows, hiding uses the free **HidHide** driver (by the same author as ViGEmBus,
+[github.com/nefarius/HidHide](https://github.com/nefarius/HidHide)). When it's missing, the
+card shows **Install HidHide**, which works like the ViGEmBus button: it downloads the
+official installer (HidHide 1.5.230), checks it against the size and SHA-256 built into the
+app, and runs it after Windows' admin prompt.
+
+While the virtual controller is plugged in and copying a real one, the app:
+
+- adds itself to HidHide's allowed programs, so it keeps reading your controller;
+- hides the controllers it reads (an Xbox controller's XInput and DirectInput parts, other
+  controllers' HID interface), never a virtual one: not its own, not DS4Windows', not
+  Steam's;
+- turns HidHide's hiding on if it was off.
+
+It undoes all of that when the virtual controller is unplugged and when the app quits. If
+the app is killed instead, the next start undoes it (it notes what it changed in
+`hidhide-restore.json` next to `config.json`). Entries you added in HidHide yourself are
+left alone.
+
+Hiding applies when a program opens the controller: a game that already had it open keeps
+it until you restart the game or plug the controller in again. Steam can't see a hidden
+controller either, so Steam Input stops working for it meanwhile. If HidHide's *Inverse
+application list* is on, the app doesn't change anything and says so.
+
+Without hiding, remap buttons the game doesn't use, or turn copying off and use the virtual
+controller for keyboard and mouse only.
+
+### Mouse movement → stick
+
+For games that only take a controller, the mouse can move a stick of the virtual
+controller: on the profile's **Mouse** tab, set *Mouse moves controller stick* to Left or
+Right (other profiles can follow Default). The faster the mouse moves, the further the stick
+leans; it centres a moment after the mouse stops. *Settings → Virtual controller → Mouse →
+stick* has:
+
+- **Speed** (1-20): how fast the mouse has to move for the stick to go all the way.
+- **Stick starts at** (%, default 20): games ignore small stick movements (a *dead zone*);
+  the stick jumps past it as soon as the mouse moves, so slow movements still turn.
+- **Keep the pointer still meanwhile**: the Windows pointer doesn't move while the profile's
+  app is in front and the virtual controller is plugged in (opening the app's window frees
+  it). Games that read the mouse directly still see it move.
+
+### On Linux
+
+The virtual controller is a uinput device with an Xbox 360 controller's ids and layout, so
+SDL, Steam and games map it like one. The app needs write access to `/dev/uinput`
+([Troubleshooting](troubleshooting.md#linux-experimental)). Copying, macro steps and mouse → stick work
+as on Windows. To hide the real controller, the app takes it for itself while copying it (an
+evdev grab): games that read it through evdev see only the virtual one, but Steam and games
+that open it through hidraw still see it. No extra driver is needed.
 
 ## Devices
 

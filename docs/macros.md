@@ -66,6 +66,8 @@ inserts after the selected step.
 | Text | Type text (Unicode on Windows; ASCII on Linux) |
 | Move by | Move the pointer right / down by a number of counts (negative: left / up), the way the mouse would, so games that read the mouse see it. On the desktop, the Windows pointer speed and *Enhance pointer precision* change how far it goes. |
 | Move to | Move the pointer to a screen position in pixels (all monitors together; the main one starts at 0, 0). *Use the pointer's position in 3 s* fills it in: click it, move the pointer where it should go and wait. Windows only. |
+| Controller press | Press and release a button, trigger or stick direction of the [virtual controller](user-guide.md#virtual-controller), holding it for the given time (50 ms by default: games read controllers once a frame) |
+| Controller down / up | Press or release one (hold a button, or a stick direction, across other steps) |
 
 **Delays:** *Remove all* deletes every delay step. *Set all to* changes every delay at once;
 on a macro without delays it adds one between every two steps. *Randomize ±* makes every
@@ -73,7 +75,8 @@ delay up to that many milliseconds shorter or longer each time it plays, so the 
 isn't identical every time (0 turns it off).
 
 Any key or button still held when a macro finishes or is stopped is released, so nothing
-gets stuck down.
+gets stuck down; that includes controller buttons. A profile that plays a macro with
+controller steps plugs the virtual controller in, like the Controller action does.
 
 ### Binding a macro
 
